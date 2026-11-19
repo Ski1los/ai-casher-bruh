@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 
-from .scanner import ScanResult
+from .scanner import NearMiss, ScanResult
 
 TELEGRAM_LIMIT = 4000  # у Telegram лимит 4096 символов, оставляем запас
 
@@ -24,12 +24,18 @@ class ScanStats:
     tri_keys: set = field(default_factory=set)
     best_cross: tuple[float, str] | None = None  # (% по стакану, описание)
     best_tri: tuple[float, str] | None = None
+    near_cross: NearMiss | None = None  # лучший вариант периода, даже если убыточный
+    near_tri: NearMiss | None = None
 
     def record(self, result: ScanResult, name=lambda x: x) -> None:
         self.scans += 1
         self.total_duration += result.duration_sec
         for ex in result.errors:
             self.exchange_errors[ex] += 1
+        if result.near_cross and (self.near_cross is None or result.near_cross.net_percent > self.near_cross.net_percent):
+            self.near_cross = result.near_cross
+        if result.near_tri and (self.near_tri is None or result.near_tri.net_percent > self.near_tri.net_percent):
+            self.near_tri = result.near_tri
         for o in result.opportunities:
             self.cross_keys.add(o.key)
             if o.depth and o.depth.filled:
@@ -70,6 +76,11 @@ class ScanStats:
             lines.append(
                 f"Лучший треугольник по стакану на ${trade_amount:g}: "
                 f"<b>{self.best_tri[0]:+.3f}%</b> ({html.escape(self.best_tri[1])})"
+            )
+        if self.near_tri and not self.best_tri:
+            lines.append(
+                f"Ближе всего к прибыли треугольник: {self.near_tri.net_percent:+.3f}% после комиссий "
+                f"({self.near_tri.gross_percent:+.3f}% до), {html.escape(self.near_tri.text)}"
             )
         if self.exchange_errors and self.scans:
             bad = [

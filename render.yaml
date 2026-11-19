@@ -21,3 +21,7 @@ services:
       # Telegram ID не секрет (его видит любой бот, которому ты пишешь), поэтому он прямо тут.
       - key: ALLOWED_USER_IDS
         value: "6069246522"
+      # Ключ бесплатного ИИ (Groq: https://console.groq.com/keys). Необязательно:
+      # можно оставить пустым и добавить позже в Environment. В репозиторий ключ НЕ пишем.
+      - key: AI_API_KEY
+        sync: false

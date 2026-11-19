@@ -89,12 +89,15 @@ def find_triangles(
     max_profit_percent: float = 5.0,
     min_volume_usd: float = 50_000,
     limit: int = 50,
+    near: list | None = None,
 ) -> list[TriOpportunity]:
     """Ищет все циклы start → A → B → start с прибылью в заданном диапазоне.
 
     markets: рынки биржи из ccxt (нужны base/quote/spot/active/taker)
     tickers: {символ: тикер ccxt} — только спот
+    near: если передан список, в него кладётся лучший цикл биржи (даже убыточный)
     """
+    best_any: TriOpportunity | None = None
     prices = usd_prices(tickers, start)
 
     # Граф обменов: edges[откуда][куда] = TriLeg
@@ -129,11 +132,19 @@ def find_triangles(
                 gross *= (1 / leg.price) if leg.side == "buy" else leg.price
             net = leg1.rate() * leg2.rate() * leg3.rate()
             gross_pct, net_pct = (gross - 1) * 100, (net - 1) * 100
+            if (
+                near is not None
+                and gross_pct <= max_profit_percent
+                and (best_any is None or net_pct > best_any.net_percent)
+            ):
+                best_any = TriOpportunity(exchange, [leg1, leg2, leg3], gross_pct, net_pct)
             if net_pct < min_profit_percent or gross_pct > max_profit_percent:
                 continue
             result.append(TriOpportunity(exchange, [leg1, leg2, leg3], gross_pct, net_pct))
 
     result.sort(key=lambda o: o.net_percent, reverse=True)
+    if near is not None and best_any is not None:
+        near.append(best_any)
     return result[:limit]
 
 
