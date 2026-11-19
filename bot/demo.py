@@ -95,17 +95,21 @@ class DemoAccount:
 # ---------------------------------------------------------------------------
 
 
+def account_from_dict(raw: dict) -> DemoAccount:
+    raw = dict(raw)
+    open_trade = raw.pop("open_trade", None)
+    trades = raw.pop("trades", [])
+    acc = DemoAccount(**raw)
+    acc.open_trade = DemoTrade(**open_trade) if open_trade else None
+    acc.trades = [DemoTrade(**t) for t in trades]
+    return acc
+
+
 def load_account(path: Path = DEMO_FILE) -> DemoAccount:
     if not path.exists():
         return DemoAccount()
     try:
-        raw = json.loads(path.read_text("utf-8"))
-        open_trade = raw.pop("open_trade", None)
-        trades = raw.pop("trades", [])
-        acc = DemoAccount(**raw)
-        acc.open_trade = DemoTrade(**open_trade) if open_trade else None
-        acc.trades = [DemoTrade(**t) for t in trades]
-        return acc
+        return account_from_dict(json.loads(path.read_text("utf-8")))
     except (ValueError, TypeError) as e:
         log.warning("Не удалось прочитать %s (%s), начинаю заново", path, e)
         return DemoAccount()
@@ -143,6 +147,13 @@ class DemoEngine:
             active=True, chat_id=chat_id, start_balance=amount, balance=amount, created_at=time.time()
         )
         self._counted.clear()
+        save_account(self.acc, self.path)
+
+    def export(self) -> dict:
+        return asdict(self.acc)
+
+    def restore(self, raw: dict) -> None:
+        self.acc = account_from_dict(raw)
         save_account(self.acc, self.path)
 
     def stop(self) -> None:

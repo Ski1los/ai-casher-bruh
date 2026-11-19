@@ -7,6 +7,8 @@ import asyncio
 import logging
 import sys
 
+from aiogram.exceptions import TelegramUnauthorizedError
+
 from bot.config import allowed_user_ids, load_settings, telegram_token
 from bot.telegram_bot import ArbitrageBot
 
@@ -31,6 +33,9 @@ def main() -> None:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
         print("\nБот остановлен.")
+    except TelegramUnauthorizedError:
+        print("Telegram отклонил токен. Проверь TELEGRAM_BOT_TOKEN (скопируй заново у @BotFather).")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

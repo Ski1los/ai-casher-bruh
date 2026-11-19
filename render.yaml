@@ -1,0 +1,21 @@
+# Конфиг для бесплатного хостинга Render (render.com).
+# Разворачивается кнопкой "Deploy to Render" из README. Токен сюда НЕ пишем:
+# Render сам спросит его при создании и сохранит в секретах.
+services:
+  - type: web
+    name: ai-casher-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false

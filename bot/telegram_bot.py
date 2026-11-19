@@ -15,8 +15,9 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand, Message
 
+from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start_health_server
 from .config import EDITABLE, Settings
-from .demo import DemoEngine
+from .demo import DEMO_FILE, DemoEngine
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ log = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
 MAX_IN_MESSAGE = 10  # сколько связок показывать в одном сообщении
+BACKUP_EVERY_SEC = 30 * 60  # как часто сохранять статистику демо в Telegram
 
 HELP_TEXT = """\
 <b>Арбитражный сканер</b> 🤖
@@ -74,6 +76,10 @@ class SubscriberStore:
 
     def remove(self, chat_id: int) -> None:
         self.chats.discard(chat_id)
+        self._save()
+
+    def replace(self, chats: list[int]) -> None:
+        self.chats = set(chats)
         self._save()
 
 
@@ -159,9 +165,10 @@ def format_settings(settings: Settings, scanner: Scanner) -> str:
 
 
 class ArbitrageBot:
-    def __init__(self, token: str, settings: Settings, allowed_ids: set[int]):
+    def __init__(self, token: str, settings: Settings, allowed_ids: list[int] | set[int]):
         self.settings = settings
-        self.allowed_ids = allowed_ids
+        owner = next(iter(allowed_ids), None) if isinstance(allowed_ids, list) else None
+        self.allowed_ids = set(allowed_ids)
         self.scanner = Scanner(settings)
         self.subscribers = SubscriberStore()
         self.sent_alerts: dict[tuple[str, str, str], tuple[float, float]] = {}
@@ -170,6 +177,36 @@ class ArbitrageBot:
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.dp = Dispatcher()
         self._register_handlers()
+
+        # Бэкап в Telegram работает, только если известен владелец (ALLOWED_USER_IDS)
+        self.backup = TelegramBackup(self.bot, owner) if owner else None
+        self._last_backup = 0.0
+
+    # --- резервная копия ----------------------------------------------------
+
+    def _state(self) -> dict:
+        return {"version": 1, "subscribers": sorted(self.subscribers.chats), "demo": self.demo.export()}
+
+    async def _backup_now(self) -> None:
+        if self.backup is None:
+            return
+        self._last_backup = time.time()
+        await self.backup.save(self._state())
+
+    async def _restore_backup(self) -> None:
+        if self.backup is None:
+            log.warning("ALLOWED_USER_IDS пустой: резервная копия в Telegram выключена")
+            return
+        state = await self.backup.restore()
+        if not state:
+            return
+        if DEMO_FILE.exists():
+            log.info("Бэкап найден, но есть локальные данные. Использую локальные")
+            return
+        if state.get("demo"):
+            self.demo.restore(state["demo"])
+        self.subscribers.replace(state.get("subscribers") or [])
+        log.info("Состояние восстановлено из Telegram (демо: %s)", "есть" if self.demo.acc.start_balance else "нет")
 
     # --- доступ -------------------------------------------------------------
 
@@ -218,6 +255,7 @@ class ArbitrageBot:
                 return
             ago = int(time.time() - result.finished_at)
             auto = "включены ✅" if message.chat.id in self.subscribers.chats else "выключены"
+            auto += "\nБэкап в Telegram: " + ("включён 💾" if self.backup else "выключен (заполни ALLOWED_USER_IDS)")
             await message.answer(
                 f"Последний скан: {ago} с назад, связок: {len(result.opportunities)}.\n"
                 f"Автосигналы в этом чате: {auto}\n\n" + format_footer(result, self.scanner)
@@ -228,6 +266,7 @@ class ArbitrageBot:
             if not self._allowed(message):
                 return
             self.subscribers.add(message.chat.id)
+            await self._backup_now()
             await message.answer(
                 f"✅ Автосигналы включены. Сканирую каждые {self.settings.scan_interval_sec:g} с "
                 f"и пишу, когда прибыль ≥ {self.settings.min_profit_percent:g}%."
@@ -238,6 +277,7 @@ class ArbitrageBot:
             if not self._allowed(message):
                 return
             self.subscribers.remove(message.chat.id)
+            await self._backup_now()
             await message.answer("🔕 Автосигналы выключены.")
 
         @dp.message(Command("settings"))
@@ -260,6 +300,7 @@ class ArbitrageBot:
                 await message.answer("Сумма от 1 до 1 000 000 $")
                 return
             self.demo.start(amount, message.chat.id)
+            await self._backup_now()
             await message.answer(
                 f"🧪 Демо-счёт запущен: <b>${amount:g}</b> виртуальных USDT.\n"
                 f"Бот сканирует каждые {self.settings.scan_interval_sec:g} с и сам «торгует» по реальным "
@@ -285,6 +326,7 @@ class ArbitrageBot:
             if not self._allowed(message):
                 return
             self.demo.stop()
+            await self._backup_now()
             await message.answer("⏸ Демо остановлено. Итог:\n\n" + self.demo.status_text())
 
         @dp.message(Command("set"))
@@ -328,6 +370,8 @@ class ArbitrageBot:
         except Exception:
             log.exception("Ошибка демо-счёта")
             return
+        if events or (self.demo.active and time.time() - self._last_backup > BACKUP_EVERY_SEC):
+            await self._backup_now()
         chat_id = self.demo.acc.chat_id
         for text in events:
             if chat_id is None:
@@ -364,29 +408,41 @@ class ArbitrageBot:
     # --- запуск -------------------------------------------------------------
 
     async def run(self) -> None:
-        await self.bot.set_my_commands(
-            [
-                BotCommand(command="scan", description="Просканировать сейчас"),
-                BotCommand(command="auto_on", description="Включить автосигналы"),
-                BotCommand(command="auto_off", description="Выключить автосигналы"),
-                BotCommand(command="demo_start", description="Демо-счёт: /demo_start 5"),
-                BotCommand(command="demo", description="Демо: баланс и статистика"),
-                BotCommand(command="demo_history", description="Демо: последние сделки"),
-                BotCommand(command="demo_stop", description="Остановить демо"),
-                BotCommand(command="status", description="Последний скан"),
-                BotCommand(command="settings", description="Настройки"),
-                BotCommand(command="help", description="Помощь"),
-            ]
-        )
-        me = await self.bot.get_me()
-        log.info("Бот @%s запущен. Открой его в Telegram и нажми Start.", me.username)
-        if not self.allowed_ids:
-            log.warning("ALLOWED_USER_IDS пустой: ботом может пользоваться кто угодно")
+        tasks: list[asyncio.Task] = []
+        runner = None
+        port = cloud_port()
+        if port:  # запущены в облаке: сразу открываем порт, чтобы хостинг видел, что сервис жив
+            runner = await start_health_server(port)
+            if public_url():
+                tasks.append(asyncio.create_task(self_ping_loop(public_url())))
 
-        auto_task = asyncio.create_task(self._auto_loop())
         try:
+            me = await self.bot.get_me()
+            await self.bot.set_my_commands(
+                [
+                    BotCommand(command="scan", description="Просканировать сейчас"),
+                    BotCommand(command="auto_on", description="Включить автосигналы"),
+                    BotCommand(command="auto_off", description="Выключить автосигналы"),
+                    BotCommand(command="demo_start", description="Демо-счёт: /demo_start 5"),
+                    BotCommand(command="demo", description="Демо: баланс и статистика"),
+                    BotCommand(command="demo_history", description="Демо: последние сделки"),
+                    BotCommand(command="demo_stop", description="Остановить демо"),
+                    BotCommand(command="status", description="Последний скан"),
+                    BotCommand(command="settings", description="Настройки"),
+                    BotCommand(command="help", description="Помощь"),
+                ]
+            )
+            log.info("Бот @%s запущен. Открой его в Telegram и нажми Start.", me.username)
+            if not self.allowed_ids:
+                log.warning("ALLOWED_USER_IDS пустой: ботом может пользоваться кто угодно")
+
+            await self._restore_backup()
+            tasks.append(asyncio.create_task(self._auto_loop()))
             await self.dp.start_polling(self.bot)
         finally:
-            auto_task.cancel()
+            for t in tasks:
+                t.cancel()
+            if runner:
+                await runner.cleanup()
             await self.scanner.close()
             await self.bot.session.close()

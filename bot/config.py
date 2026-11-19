@@ -66,5 +66,6 @@ def telegram_token() -> str:
     return os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 
-def allowed_user_ids() -> set[int]:
-    return {int(x) for x in _list("ALLOWED_USER_IDS") if x.lstrip("-").isdigit()}
+def allowed_user_ids() -> list[int]:
+    """ID пользователей с доступом. Первый в списке считается владельцем (ему идут бэкапы)."""
+    return [int(x) for x in _list("ALLOWED_USER_IDS") if x.lstrip("-").isdigit()]
