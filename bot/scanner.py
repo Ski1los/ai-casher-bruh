@@ -138,18 +138,8 @@ def find_opportunities(
     return result, compared
 
 
-def simulate_trade(
-    asks: list[list[float]],
-    bids: list[list[float]],
-    amount_usd: float,
-    fee_buy: float,
-    fee_sell: float,
-) -> DepthResult:
-    """Проходит по стаканам: покупает на amount_usd по asks, продаёт по bids.
-
-    asks/bids: [[цена, количество], ...], лучшие цены первыми (как отдаёт ccxt).
-    """
-    # 1) Покупаем монету на бирже A
+def simulate_buy(asks: list[list[float]], amount_usd: float, fee: float) -> tuple[float, float]:
+    """Покупка на amount_usd по стакану asks. Возвращает (потрачено $, получено монет после комиссии)."""
     spent = 0.0
     coins = 0.0
     for level in asks:
@@ -161,10 +151,11 @@ def simulate_trade(
         spent += can_spend
         if spent >= amount_usd - 1e-9:
             break
-    coins *= 1 - fee_buy
-    filled = spent >= amount_usd - 1e-9
+    return spent, coins * (1 - fee)
 
-    # 2) Продаём эти монеты на бирже B
+
+def simulate_sell(bids: list[list[float]], coins: float, fee: float) -> tuple[float, float]:
+    """Продажа монет по стакану bids. Возвращает (получено $ после комиссии, непроданный остаток монет)."""
     to_sell = coins
     received = 0.0
     for level in bids:
@@ -176,10 +167,26 @@ def simulate_trade(
         to_sell -= sell_qty
         if to_sell <= 1e-12:
             break
-    received *= 1 - fee_sell
-    if to_sell > 1e-12:
-        filled = False
+    return received * (1 - fee), max(to_sell, 0.0)
 
+
+def simulate_trade(
+    asks: list[list[float]],
+    bids: list[list[float]],
+    amount_usd: float,
+    fee_buy: float,
+    fee_sell: float,
+    transfer_fee_coins: float = 0.0,
+) -> DepthResult:
+    """Проходит по стаканам: покупает на amount_usd по asks, продаёт по bids.
+
+    asks/bids: [[цена, количество], ...], лучшие цены первыми (как отдаёт ccxt).
+    transfer_fee_coins: сколько монет съест перевод между биржами.
+    """
+    spent, coins = simulate_buy(asks, amount_usd, fee_buy)
+    coins = max(coins - transfer_fee_coins, 0.0)
+    received, left = simulate_sell(bids, coins, fee_sell)
+    filled = spent >= amount_usd - 1e-9 and left <= 1e-12
     # Если купить на всю сумму не вышло, считаем прибыль от реально потраченного
     return DepthResult(amount_usd=spent, received_usd=received, filled=filled)
 
@@ -262,6 +269,40 @@ class Scanner:
         except Exception:
             # некоторые биржи принимают только определённые limit, пробуем без него
             return await ex.fetch_order_book(symbol)
+
+    async def order_book(self, exchange_id: str, symbol: str) -> dict:
+        return await self._order_book(self.exchanges[exchange_id], symbol)
+
+    def market(self, exchange_id: str, symbol: str) -> dict:
+        ex = self.exchanges.get(exchange_id)
+        return (ex.markets or {}).get(symbol, {}) if ex else {}
+
+    def currency(self, exchange_id: str, code: str) -> dict:
+        """Инфо о монете: статус ввода/вывода и комиссии вывода.
+
+        Многие биржи отдают это только с API-ключом, тогда вернётся пустой dict.
+        """
+        ex = self.exchanges.get(exchange_id)
+        return (getattr(ex, "currencies", None) or {}).get(code) or {} if ex else {}
+
+    def withdraw_fee_coins(self, exchange_id: str, code: str) -> float | None:
+        """Самая дешёвая комиссия вывода монеты (в монетах) среди открытых сетей. None = неизвестно."""
+        cur = self.currency(exchange_id, code)
+        fees = []
+        for net in (cur.get("networks") or {}).values():
+            if net.get("withdraw") is False:
+                continue
+            if net.get("fee") is not None:
+                fees.append(float(net["fee"]))
+        if fees:
+            return min(fees)
+        return float(cur["fee"]) if cur.get("fee") is not None else None
+
+    def can_withdraw(self, exchange_id: str, code: str) -> bool | None:
+        return self.currency(exchange_id, code).get("withdraw")
+
+    def can_deposit(self, exchange_id: str, code: str) -> bool | None:
+        return self.currency(exchange_id, code).get("deposit")
 
     async def _check_depth(self, opp: Opportunity) -> None:
         try:

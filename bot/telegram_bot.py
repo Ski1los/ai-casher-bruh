@@ -16,6 +16,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand, Message
 
 from .config import EDITABLE, Settings
+from .demo import DemoEngine
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,12 @@ HELP_TEXT = """\
 /set — изменить настройку, например <code>/set min_profit 1</code>
 /myid — показать твой Telegram ID
 /help — это сообщение
+
+<b>Демо-счёт</b> (виртуальные деньги, реальные цены и комиссии)
+/demo_start 5 — запустить демо с $5 (можно любую сумму)
+/demo — баланс, сделки и почему связки отклонены
+/demo_history — последние сделки
+/demo_stop — остановить демо
 
 ⚠️ <b>Перед сделкой всегда проверь вручную</b>, что на обеих биржах открыты \
 ввод и вывод монеты и что это одна и та же монета в той же сети. \
@@ -158,6 +165,7 @@ class ArbitrageBot:
         self.scanner = Scanner(settings)
         self.subscribers = SubscriberStore()
         self.sent_alerts: dict[tuple[str, str, str], tuple[float, float]] = {}
+        self.demo = DemoEngine(self.scanner, settings)
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.dp = Dispatcher()
@@ -238,6 +246,47 @@ class ArbitrageBot:
                 return
             await message.answer(format_settings(self.settings, self.scanner))
 
+        @dp.message(Command("demo_start"))
+        async def cmd_demo_start(message: Message, command: CommandObject) -> None:
+            if not self._allowed(message):
+                return
+            raw = (command.args or "5").strip().replace(",", ".").lstrip("$")
+            try:
+                amount = float(raw)
+            except ValueError:
+                await message.answer("Формат: <code>/demo_start 5</code>")
+                return
+            if not 1 <= amount <= 1_000_000:
+                await message.answer("Сумма от 1 до 1 000 000 $")
+                return
+            self.demo.start(amount, message.chat.id)
+            await message.answer(
+                f"🧪 Демо-счёт запущен: <b>${amount:g}</b> виртуальных USDT.\n"
+                f"Бот сканирует каждые {self.settings.scan_interval_sec:g} с и сам «торгует» по реальным "
+                f"стаканам: с комиссиями, минимальными ордерами, платой за вывод и задержкой перевода "
+                f"{self.settings.demo_transfer_min:g} мин.\n\n"
+                "Сделки придут сюда сообщениями. Статистика: /demo"
+            )
+
+        @dp.message(Command("demo"))
+        async def cmd_demo(message: Message) -> None:
+            if not self._allowed(message):
+                return
+            await message.answer(self.demo.status_text())
+
+        @dp.message(Command("demo_history"))
+        async def cmd_demo_history(message: Message) -> None:
+            if not self._allowed(message):
+                return
+            await message.answer(self.demo.history_text())
+
+        @dp.message(Command("demo_stop"))
+        async def cmd_demo_stop(message: Message) -> None:
+            if not self._allowed(message):
+                return
+            self.demo.stop()
+            await message.answer("⏸ Демо остановлено. Итог:\n\n" + self.demo.status_text())
+
         @dp.message(Command("set"))
         async def cmd_set(message: Message, command: CommandObject) -> None:
             if not self._allowed(message):
@@ -273,14 +322,31 @@ class ArbitrageBot:
         grew = o.net_percent - sent_profit >= 1.0  # спред вырос на 1 п.п. и больше
         return cooldown_passed or grew
 
+    async def _run_demo(self, result: ScanResult) -> None:
+        try:
+            events = await self.demo.process(result)
+        except Exception:
+            log.exception("Ошибка демо-счёта")
+            return
+        chat_id = self.demo.acc.chat_id
+        for text in events:
+            if chat_id is None:
+                log.info(text)
+                continue
+            try:
+                await self.bot.send_message(chat_id, text)
+            except Exception as e:
+                log.warning("Не смог отправить демо-событие: %s", e)
+
     async def _auto_loop(self) -> None:
         await asyncio.sleep(3)
         while True:
-            if self.subscribers.chats:
+            if self.subscribers.chats or self.demo.active:
                 try:
                     result = await self.scanner.scan()
+                    await self._run_demo(result)
                     fresh = [o for o in result.opportunities if self._should_alert(o)]
-                    if fresh:
+                    if fresh and self.subscribers.chats:
                         text = "🔔 <b>Новые связки</b>\n\n" + "\n\n".join(
                             format_opportunity(o, self.scanner) for o in fresh[:MAX_IN_MESSAGE]
                         )
@@ -303,6 +369,10 @@ class ArbitrageBot:
                 BotCommand(command="scan", description="Просканировать сейчас"),
                 BotCommand(command="auto_on", description="Включить автосигналы"),
                 BotCommand(command="auto_off", description="Выключить автосигналы"),
+                BotCommand(command="demo_start", description="Демо-счёт: /demo_start 5"),
+                BotCommand(command="demo", description="Демо: баланс и статистика"),
+                BotCommand(command="demo_history", description="Демо: последние сделки"),
+                BotCommand(command="demo_stop", description="Остановить демо"),
                 BotCommand(command="status", description="Последний скан"),
                 BotCommand(command="settings", description="Настройки"),
                 BotCommand(command="help", description="Помощь"),

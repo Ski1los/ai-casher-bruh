@@ -30,6 +30,8 @@ class Settings:
     trade_amount_usd: float = 100
     scan_interval_sec: float = 60
     alert_cooldown_min: float = 30
+    demo_transfer_min: float = 10
+    demo_withdraw_fee_usd: float = 0.5
 
 
 # Что можно менять командой /set: имя -> (поле, описание)
@@ -40,6 +42,8 @@ EDITABLE = {
     "amount": ("trade_amount_usd", "сумма для проверки стакана, $"),
     "interval": ("scan_interval_sec", "интервал автосканирования, сек"),
     "cooldown": ("alert_cooldown_min", "пауза между повторами сигнала, мин"),
+    "transfer": ("demo_transfer_min", "демо: время перевода между биржами, мин"),
+    "wd_fee": ("demo_withdraw_fee_usd", "демо: комиссия вывода, если биржа её не сообщает, $"),
 }
 
 
@@ -53,6 +57,8 @@ def load_settings() -> Settings:
         trade_amount_usd=_float("TRADE_AMOUNT_USD", 100),
         scan_interval_sec=_float("SCAN_INTERVAL_SEC", 60),
         alert_cooldown_min=_float("ALERT_COOLDOWN_MIN", 30),
+        demo_transfer_min=_float("DEMO_TRANSFER_MIN", 10),
+        demo_withdraw_fee_usd=_float("DEMO_WITHDRAW_FEE_USD", 0.5),
     )
 
 
