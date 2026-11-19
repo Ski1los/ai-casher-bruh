@@ -32,6 +32,12 @@ class Settings:
     alert_cooldown_min: float = 30
     demo_transfer_min: float = 10
     demo_withdraw_fee_usd: float = 0.5
+    demo_amounts: list[float] = field(default_factory=lambda: [5.0, 50.0, 500.0])
+    triangular_enabled: bool = True
+    tri_min_profit_percent: float = 0.15
+    tri_max_profit_percent: float = 5.0
+    report_hour: int = 9
+    report_utc_offset: float = 3.0
 
 
 # Что можно менять командой /set: имя -> (поле, описание)
@@ -42,6 +48,8 @@ EDITABLE = {
     "amount": ("trade_amount_usd", "сумма для проверки стакана, $"),
     "interval": ("scan_interval_sec", "интервал автосканирования, сек"),
     "cooldown": ("alert_cooldown_min", "пауза между повторами сигнала, мин"),
+    "tri_min": ("tri_min_profit_percent", "треугольник: мин. чистая прибыль, %"),
+    "tri_max": ("tri_max_profit_percent", "треугольник: макс. прибыль (фильтр ошибок), %"),
     "transfer": ("demo_transfer_min", "демо: время перевода между биржами, мин"),
     "wd_fee": ("demo_withdraw_fee_usd", "демо: комиссия вывода, если биржа её не сообщает, $"),
 }
@@ -59,6 +67,12 @@ def load_settings() -> Settings:
         alert_cooldown_min=_float("ALERT_COOLDOWN_MIN", 30),
         demo_transfer_min=_float("DEMO_TRANSFER_MIN", 10),
         demo_withdraw_fee_usd=_float("DEMO_WITHDRAW_FEE_USD", 0.5),
+        demo_amounts=[float(x) for x in _list("DEMO_AMOUNTS", "5,50,500")] or [5.0, 50.0, 500.0],
+        triangular_enabled=os.getenv("TRIANGULAR", "1").strip().lower() not in ("0", "false", "no", "off"),
+        tri_min_profit_percent=_float("TRI_MIN_PROFIT_PERCENT", 0.15),
+        tri_max_profit_percent=_float("TRI_MAX_PROFIT_PERCENT", 5),
+        report_hour=int(_float("REPORT_HOUR", 9)),
+        report_utc_offset=_float("REPORT_UTC_OFFSET", 3),
     )
 
 

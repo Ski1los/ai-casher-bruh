@@ -17,5 +17,7 @@ services:
         value: 3.12.8
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      # Владелец бота: только ему бот отвечает, ему же идут отчёты и бэкапы.
+      # Telegram ID не секрет (его видит любой бот, которому ты пишешь), поэтому он прямо тут.
       - key: ALLOWED_USER_IDS
-        sync: false
+        value: "6069246522"
