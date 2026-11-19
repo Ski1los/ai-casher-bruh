@@ -51,6 +51,8 @@ def make_exchange(name: str):
     if name == "mexc" and hasattr(ex, "fetch_spot_markets"):
         ex.fetch_markets = ex.fetch_spot_markets
     return ex
+
+
 DEPTH_CHECK_TOP = 10  # для скольких лучших вариантов проверять стакан
 TRI_DEPTH_CHECK_TOP = 5  # то же для треугольников (по 3 стакана на каждый)
 
@@ -96,6 +98,17 @@ class ScanResult:
     symbols_compared: int = 0
     duration_sec: float = 0.0
     finished_at: float = 0.0
+    # «Почти получилось»: лучший вариант скана, даже если он ниже порога или в минусе.
+    # Показывает, насколько рынок близок к прибыли и сколько съедают комиссии.
+    near_cross: NearMiss | None = None
+    near_tri: NearMiss | None = None
+
+
+@dataclass
+class NearMiss:
+    net_percent: float  # после торговых комиссий
+    gross_percent: float  # до комиссий
+    text: str  # «PEPE/USDT bybit→okx» или «USDT → A → B → USDT на okx»
 
 
 # ---------------------------------------------------------------------------
@@ -111,12 +124,15 @@ def net_percent(ask: float, bid: float, fee_buy: float, fee_sell: float) -> floa
 def find_opportunities(
     quotes: dict[str, dict[str, Quote]],
     settings: Settings,
+    near: list | None = None,
 ) -> tuple[list[Opportunity], int]:
     """Ищет лучшие связки «купить здесь, продать там».
 
     quotes: {биржа: {символ: Quote}}
     Возвращает (список возможностей по убыванию прибыли, сколько пар сравнили).
+    near: если передан список, в него кладётся лучший вариант скана (NearMiss), даже убыточный.
     """
+    best_any: NearMiss | None = None
     by_symbol: dict[str, list[Quote]] = {}
     for exchange_quotes in quotes.values():
         for q in exchange_quotes.values():
@@ -139,6 +155,8 @@ def find_opportunities(
                 if gross > settings.max_profit_percent:
                     continue  # подозрительно много, скорее всего это разные монеты
                 net = net_percent(buy.ask, sell.bid, buy.taker_fee, sell.taker_fee)
+                if near is not None and (best_any is None or net > best_any.net_percent):
+                    best_any = NearMiss(net, gross, f"{symbol} {buy.exchange}→{sell.exchange}")
                 if net < settings.min_profit_percent:
                     continue
                 if best is None or net > best.net_percent:
@@ -147,6 +165,8 @@ def find_opportunities(
             result.append(best)
 
     result.sort(key=lambda o: o.net_percent, reverse=True)
+    if near is not None and best_any is not None:
+        near.append(best_any)
     return result, compared
 
 
@@ -205,6 +225,25 @@ class Scanner:
         if time.time() - loaded_at > MARKETS_RELOAD_SEC:
             await ex.load_markets(reload=loaded_at > 0)
             self._markets_loaded_at[name] = time.time()
+            self.apply_fee_overrides(name)
+
+    def apply_fee_overrides(self, name: str | None = None) -> None:
+        """Подставляет свои комиссии (FEE_OVERRIDES или /fee) во все пары биржи.
+
+        Исходная комиссия ccxt запоминается, чтобы её можно было вернуть.
+        Все расчёты (сканер, треугольники, демо) берут комиссию из market["taker"],
+        так что замена действует везде сразу.
+        """
+        names = [name] if name else list(self.exchanges)
+        for n in names:
+            ex = self.exchanges.get(n)
+            if ex is None:
+                continue
+            override = self.settings.fee_overrides.get(n)
+            for m in (getattr(ex, "markets", None) or {}).values():
+                if "_ccxt_taker" not in m:
+                    m["_ccxt_taker"] = m.get("taker")
+                m["taker"] = override if override is not None else m["_ccxt_taker"]
 
     async def _fetch_spot_tickers(self, name: str, ex: ccxt.Exchange) -> dict[str, dict]:
         """Все спотовые тикеры биржи (любые котируемые валюты) одним запросом."""
@@ -326,6 +365,7 @@ class Scanner:
                 return_exceptions=True,
             )
             quotes: dict[str, dict[str, Quote]] = {}
+            near_tri: list = []
             for name, data in zip(names, fetched):
                 if isinstance(data, BaseException):
                     result.errors[name] = short_error(data)
@@ -342,9 +382,15 @@ class Scanner:
                         min_profit_percent=self.settings.tri_min_profit_percent,
                         max_profit_percent=self.settings.tri_max_profit_percent,
                         min_volume_usd=self.settings.min_volume_usd,
+                        near=near_tri,
                     )
 
-            result.opportunities, result.symbols_compared = find_opportunities(quotes, self.settings)
+            near_cross: list = []
+            result.opportunities, result.symbols_compared = find_opportunities(quotes, self.settings, near_cross)
+            result.near_cross = near_cross[0] if near_cross else None
+            if near_tri:
+                best = max(near_tri, key=lambda x: x.net_percent)
+                result.near_tri = NearMiss(best.net_percent, best.gross_percent, f"{best.path_text} на {best.exchange}")
             result.triangles.sort(key=lambda o: o.net_percent, reverse=True)
 
             await asyncio.gather(

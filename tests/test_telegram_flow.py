@@ -1,6 +1,7 @@
 """Сквозной тест: команды идут через настоящий aiogram Dispatcher, а Telegram API подменён."""
 
 import asyncio
+import copy
 import datetime as dt
 
 import pytest
@@ -16,12 +17,18 @@ class RecordingSession(BaseSession):
     def __init__(self):
         super().__init__()
         self.sent: list[tuple[int, str]] = []
+        self.markups: list = []  # клавиатура каждого сообщения из sent (или None)
+        self.calls: list = []  # все остальные методы API
 
     async def make_request(self, bot, method, timeout=None):
         if isinstance(method, (SendMessage, EditMessageText)):
             text = method.text
             assert len(text) <= 4096, "Telegram не примет сообщение длиннее 4096 символов"
             self.sent.append((method.chat_id, text))
+            self.markups.append(method.reply_markup)
+        else:
+            self.calls.append(method)
+        if isinstance(method, (SendMessage, EditMessageText)):
             return Message(
                 message_id=len(self.sent),
                 date=dt.datetime.now(),
@@ -77,7 +84,7 @@ def exchanges():
         "BTC/USDT": {"bid": 50_000, "ask": 50_001, "quoteVolume": 1e7},
         "PEPE/USDT": {"bid": 0.0000103, "ask": 0.0000104, "quoteVolume": 1e7},
         "PEPE/BTC": {"bid": 2.0e-10, "ask": 2.01e-10, "quoteVolume": 200},
-    }, markets)
+    }, copy.deepcopy(markets))  # у каждой биржи свои рынки, как в ccxt
     return {"a": a, "b": b}
 
 
@@ -91,6 +98,9 @@ def bot_env(tmp_path, monkeypatch):
     monkeypatch.setattr(demo_mod, "DEMO_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(tb, "DEMO_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(tb, "SUBSCRIBERS_FILE", tmp_path / "subs.json")
+    monkeypatch.setattr(tb, "SETTINGS_FILE", tmp_path / "settings.json")
+    for var in ("AI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
 
     settings = Settings(exchanges=[], min_profit_percent=0.5, tri_min_profit_percent=0.1, demo_transfer_min=0)
     b = tb.ArbitrageBot("123456:" + "A" * 35, settings, [OWNER])
@@ -188,7 +198,9 @@ def test_bad_arguments_are_handled(bot_env):
         await send(b, "/demo xyz")
         assert "Формат" in session.sent[-1][1]
         await send(b, "/set interval 1")
-        assert "маленькое" in session.sent[-1][1]
+        assert "допустимо от 10" in session.sent[-1][1]
+        await send(b, "/set tri_min -1")
+        assert "допустимо" in session.sent[-1][1]
         await send(b, "/set nope 1")
         assert "Формат" in session.sent[-1][1]
 
