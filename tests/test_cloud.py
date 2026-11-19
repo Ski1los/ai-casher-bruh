@@ -1,6 +1,5 @@
 import asyncio
 import io
-import json
 import socket
 from types import SimpleNamespace
 
@@ -84,37 +83,74 @@ def test_backup_roundtrip_survives_restart():
     assert mid == tg.pinned
 
 
-def test_bot_restores_demo_from_backup(tmp_path, monkeypatch):
+def _make_bot(tb, demo_mod, tmp_path, subs_name):
+    from bot.config import Settings
+    from bot.demo_manager import DemoManager
+
+    b = tb.ArbitrageBot("123456:" + "A" * 35, Settings(exchanges=[]), [42])
+    b.subscribers = tb.SubscriberStore(tmp_path / subs_name)
+    b.demo = DemoManager(b.scanner, b.settings, tmp_path / "demo.json")
+    return b
+
+
+def _patch_paths(monkeypatch, tmp_path):
     import bot.demo as demo_mod
     import bot.telegram_bot as tb
 
     monkeypatch.setattr(demo_mod, "DEMO_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(tb, "DEMO_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(tb, "SUBSCRIBERS_FILE", tmp_path / "subs.json")
+    return tb, demo_mod
 
-    from bot.config import Settings
+
+def test_bot_restores_demo_from_backup(tmp_path, monkeypatch):
+    tb, demo_mod = _patch_paths(monkeypatch, tmp_path)
 
     async def run():
-        b = tb.ArbitrageBot("123456:" + "A" * 35, Settings(exchanges=[]), [42])
-        b.subscribers = tb.SubscriberStore(tmp_path / "subs.json")
-        b.demo = demo_mod.DemoEngine(b.scanner, b.settings, tmp_path / "demo.json")
         tg = FakeTelegram()
+        b = _make_bot(tb, demo_mod, tmp_path, "subs.json")
         b.backup = TelegramBackup(tg, 42)
-
-        b.demo.start(5, 42)
+        b.demo.start([5, 50], 42)
         b.subscribers.add(42)
         await b._backup_now()
 
         # Перезапуск: локальные файлы стёрлись
         (tmp_path / "demo.json").unlink()
-        b2 = tb.ArbitrageBot("123456:" + "A" * 35, Settings(exchanges=[]), [42])
-        b2.subscribers = tb.SubscriberStore(tmp_path / "subs2.json")
-        b2.demo = demo_mod.DemoEngine(b2.scanner, b2.settings, tmp_path / "demo.json")
+        b2 = _make_bot(tb, demo_mod, tmp_path, "subs2.json")
         b2.backup = TelegramBackup(tg, 42)
         await b2._restore_backup()
-        result = (b2.demo.acc.start_balance, b2.demo.active, b2.subscribers.chats)
+        result = (sorted(b2.demo.accounts), b2.demo.active, b2.subscribers.chats)
         for x in (b, b2):
             await x.bot.session.close()
         return result
 
-    assert asyncio.run(run()) == (5, True, {42})
+    accounts, active, subs = asyncio.run(run())
+    assert accounts == ["cross-5", "cross-50", "tri-5", "tri-50"]
+    assert active and subs == {42}
+
+
+def test_restore_old_v1_backup_format(tmp_path, monkeypatch):
+    """Бэкап, сделанный первой версией бота (один межбиржевой счёт), должен подняться."""
+    tb, demo_mod = _patch_paths(monkeypatch, tmp_path)
+    old_state = {
+        "version": 1,
+        "subscribers": [42],
+        "demo": {
+            "active": True, "chat_id": 42, "start_balance": 5.0, "balance": 5.0, "location": None,
+            "created_at": 1.0, "open_trade": None, "trades": [], "rejects": {"fees": 3}, "scans": 10,
+            "best_rejected": None, "best_rejected_percent": 0.0,
+        },
+    }
+
+    async def run():
+        tg = FakeTelegram()
+        await TelegramBackup(tg, 42).save(old_state)
+        b = _make_bot(tb, demo_mod, tmp_path, "subs.json")
+        b.backup = TelegramBackup(tg, 42)
+        await b._restore_backup()
+        acc = b.demo.accounts.get("cross-5")
+        await b.bot.session.close()
+        return acc
+
+    acc = asyncio.run(run())
+    assert acc is not None and acc.rejects == {"fees": 3} and acc.scans == 10

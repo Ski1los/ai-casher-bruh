@@ -19,12 +19,40 @@ from dataclasses import dataclass, field
 import ccxt.async_support as ccxt
 
 from .config import Settings
+from .sim import DepthResult, simulate_buy, simulate_sell  # noqa: F401 (реэкспорт)
+from .triangular import TriOpportunity, find_triangles, simulate_path
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TAKER_FEE = 0.001  # 0.1%, если биржа не сообщила комиссию
 MARKETS_RELOAD_SEC = 3600  # раз в час обновляем список пар
+
+# Грузим только спот: без фьючерсов и опционов меньше памяти (важно для бесплатного
+# хостинга с 512 МБ) и меньше запросов к бирже. А defaultType="spot" важен для Bybit:
+# по умолчанию он отдаёт тикеры фьючерсов, и спотовые цены просто не попадали бы в поиск.
+SPOT_ONLY_OPTIONS: dict[str, dict] = {
+    "bybit": {"fetchMarkets": {"types": ["spot"]}},
+    "okx": {"fetchMarkets": {"types": ["spot"]}},
+    "gate": {"fetchMarkets": {"types": ["spot"]}},
+    "kucoin": {"fetchMarkets": {"types": ["spot"]}},
+    "bitget": {"fetchMarkets": {"types": ["spot"]}},
+    "htx": {"fetchMarkets": {"types": {"spot": True, "linear": False, "inverse": False}}},
+}
+
+
+def make_exchange(name: str):
+    """Создаёт биржу ccxt, настроенную только на спот. None, если такой биржи нет."""
+    cls = getattr(ccxt, name, None)
+    if cls is None:
+        return None
+    options = {"defaultType": "spot", **SPOT_ONLY_OPTIONS.get(name, {})}
+    ex = cls({"enableRateLimit": True, "timeout": 20_000, "options": options})
+    # MEXC игнорирует опцию типов и всегда грузит ещё и фьючерсы, отключаем напрямую
+    if name == "mexc" and hasattr(ex, "fetch_spot_markets"):
+        ex.fetch_markets = ex.fetch_spot_markets
+    return ex
 DEPTH_CHECK_TOP = 10  # для скольких лучших вариантов проверять стакан
+TRI_DEPTH_CHECK_TOP = 5  # то же для треугольников (по 3 стакана на каждый)
 
 
 # ---------------------------------------------------------------------------
@@ -45,23 +73,6 @@ class Quote:
 
 
 @dataclass
-class DepthResult:
-    """Результат проверки по стакану: что будет, если реально вложить N долларов."""
-
-    amount_usd: float
-    received_usd: float
-    filled: bool  # хватило ли глубины стакана на всю сумму
-
-    @property
-    def profit_usd(self) -> float:
-        return self.received_usd - self.amount_usd
-
-    @property
-    def profit_percent(self) -> float:
-        return self.profit_usd / self.amount_usd * 100 if self.amount_usd else 0.0
-
-
-@dataclass
 class Opportunity:
     symbol: str
     buy: Quote  # где покупаем
@@ -79,6 +90,7 @@ class Opportunity:
 @dataclass
 class ScanResult:
     opportunities: list[Opportunity] = field(default_factory=list)
+    triangles: list[TriOpportunity] = field(default_factory=list)
     exchanges_ok: list[str] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
     symbols_compared: int = 0
@@ -138,38 +150,6 @@ def find_opportunities(
     return result, compared
 
 
-def simulate_buy(asks: list[list[float]], amount_usd: float, fee: float) -> tuple[float, float]:
-    """Покупка на amount_usd по стакану asks. Возвращает (потрачено $, получено монет после комиссии)."""
-    spent = 0.0
-    coins = 0.0
-    for level in asks:
-        price, qty = float(level[0]), float(level[1])
-        if price <= 0 or qty <= 0:
-            continue
-        can_spend = min(amount_usd - spent, price * qty)
-        coins += can_spend / price
-        spent += can_spend
-        if spent >= amount_usd - 1e-9:
-            break
-    return spent, coins * (1 - fee)
-
-
-def simulate_sell(bids: list[list[float]], coins: float, fee: float) -> tuple[float, float]:
-    """Продажа монет по стакану bids. Возвращает (получено $ после комиссии, непроданный остаток монет)."""
-    to_sell = coins
-    received = 0.0
-    for level in bids:
-        price, qty = float(level[0]), float(level[1])
-        if price <= 0 or qty <= 0:
-            continue
-        sell_qty = min(to_sell, qty)
-        received += sell_qty * price
-        to_sell -= sell_qty
-        if to_sell <= 1e-12:
-            break
-    return received * (1 - fee), max(to_sell, 0.0)
-
-
 def simulate_trade(
     asks: list[list[float]],
     bids: list[list[float]],
@@ -205,11 +185,11 @@ class Scanner:
         self.last_result: ScanResult | None = None
 
         for name in settings.exchanges:
-            cls = getattr(ccxt, name, None)
-            if cls is None:
+            ex = make_exchange(name)
+            if ex is None:
                 log.error("Биржа %r не найдена в ccxt, пропускаю", name)
                 continue
-            self.exchanges[name] = cls({"enableRateLimit": True, "timeout": 20_000})
+            self.exchanges[name] = ex
 
     def display_name(self, exchange_id: str) -> str:
         ex = self.exchanges.get(exchange_id)
@@ -226,24 +206,26 @@ class Scanner:
             await ex.load_markets(reload=loaded_at > 0)
             self._markets_loaded_at[name] = time.time()
 
-    async def _fetch_quotes(self, name: str, ex: ccxt.Exchange) -> dict[str, Quote]:
+    async def _fetch_spot_tickers(self, name: str, ex: ccxt.Exchange) -> dict[str, dict]:
+        """Все спотовые тикеры биржи (любые котируемые валюты) одним запросом."""
         await self._ensure_markets(name, ex)
         if not ex.has.get("fetchTickers"):
             raise RuntimeError("биржа не умеет отдавать все тикеры разом")
-
-        # Берём только спотовые пары нужной валюты
-        quote_ccy = self.settings.quote
-        spot = {
-            s: m
-            for s, m in ex.markets.items()
-            if m.get("spot") and m.get("quote") == quote_ccy and m.get("active") is not False
-        }
         tickers = await ex.fetch_tickers()
+        markets = ex.markets or {}
+        return {
+            s: t
+            for s, t in tickers.items()
+            if (m := markets.get(s)) and m.get("spot") and m.get("active") is not False
+        }
 
+    def _quotes_from_tickers(self, name: str, tickers: dict[str, dict]) -> dict[str, Quote]:
+        """Котировки пар к основной валюте (USDT) для межбиржевого сравнения."""
+        markets = self.exchanges[name].markets or {}
         out: dict[str, Quote] = {}
         for symbol, t in tickers.items():
-            market = spot.get(symbol)
-            if market is None:
+            market = markets.get(symbol) or {}
+            if market.get("quote") != self.settings.quote:
                 continue
             bid, ask = t.get("bid"), t.get("ask")
             if not bid or not ask:
@@ -320,6 +302,16 @@ class Scanner:
         except Exception as e:  # сеть, лимиты и т.п.
             opp.depth_error = short_error(e)
 
+    async def order_books(self, exchange_id: str, symbols: list[str]) -> list[dict]:
+        return list(await asyncio.gather(*(self.order_book(exchange_id, s) for s in symbols)))
+
+    async def _check_tri_depth(self, opp: TriOpportunity) -> None:
+        try:
+            books = await self.order_books(opp.exchange, [leg.symbol for leg in opp.legs])
+            opp.depth = simulate_path(books, opp.legs, self.settings.trade_amount_usd)
+        except Exception as e:
+            opp.depth_error = short_error(e)
+
     # --- главный метод ------------------------------------------------------
 
     async def scan(self) -> ScanResult:
@@ -330,7 +322,7 @@ class Scanner:
 
             names = list(self.exchanges)
             fetched = await asyncio.gather(
-                *(self._fetch_quotes(n, self.exchanges[n]) for n in names),
+                *(self._fetch_spot_tickers(n, self.exchanges[n]) for n in names),
                 return_exceptions=True,
             )
             quotes: dict[str, dict[str, Quote]] = {}
@@ -338,14 +330,27 @@ class Scanner:
                 if isinstance(data, BaseException):
                     result.errors[name] = short_error(data)
                     log.warning("%s: %s", name, data)
-                else:
-                    quotes[name] = data
-                    result.exchanges_ok.append(name)
+                    continue
+                result.exchanges_ok.append(name)
+                quotes[name] = self._quotes_from_tickers(name, data)
+                if self.settings.triangular_enabled:
+                    result.triangles += find_triangles(
+                        name,
+                        self.exchanges[name].markets or {},
+                        data,
+                        start=self.settings.quote,
+                        min_profit_percent=self.settings.tri_min_profit_percent,
+                        max_profit_percent=self.settings.tri_max_profit_percent,
+                        min_volume_usd=self.settings.min_volume_usd,
+                    )
 
             result.opportunities, result.symbols_compared = find_opportunities(quotes, self.settings)
+            result.triangles.sort(key=lambda o: o.net_percent, reverse=True)
 
-            top = result.opportunities[:DEPTH_CHECK_TOP]
-            await asyncio.gather(*(self._check_depth(o) for o in top))
+            await asyncio.gather(
+                *(self._check_depth(o) for o in result.opportunities[:DEPTH_CHECK_TOP]),
+                *(self._check_tri_depth(o) for o in result.triangles[:TRI_DEPTH_CHECK_TOP]),
+            )
 
             result.duration_sec = time.time() - started
             result.finished_at = time.time()

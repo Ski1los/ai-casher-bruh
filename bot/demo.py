@@ -59,6 +59,7 @@ class DemoTrade:
     closed_at: float | None = None
     received_usd: float | None = None
     sell_price: float | None = None
+    strategy: str = "cross"  # "cross" = межбиржевой, "tri" = треугольный
 
     @property
     def profit_usd(self) -> float:
@@ -83,6 +84,8 @@ class DemoAccount:
     scans: int = 0
     best_rejected: str | None = None  # пример лучшей связки, которая не прошла
     best_rejected_percent: float = 0.0
+    strategy: str = "cross"
+    recent: dict[str, float] = field(default_factory=dict)  # ключ связки -> когда торговали (антиповтор)
 
     @property
     def equity(self) -> float:
@@ -105,8 +108,8 @@ def account_from_dict(raw: dict) -> DemoAccount:
     return acc
 
 
-def load_account(path: Path = DEMO_FILE) -> DemoAccount:
-    if not path.exists():
+def load_account(path: Path | None = DEMO_FILE) -> DemoAccount:
+    if path is None or not path.exists():
         return DemoAccount()
     try:
         return account_from_dict(json.loads(path.read_text("utf-8")))
@@ -115,7 +118,9 @@ def load_account(path: Path = DEMO_FILE) -> DemoAccount:
         return DemoAccount()
 
 
-def save_account(acc: DemoAccount, path: Path = DEMO_FILE) -> None:
+def save_account(acc: DemoAccount, path: Path | None = DEMO_FILE) -> None:
+    if path is None:  # счётом управляет DemoManager и сохраняет сам
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(acc), ensure_ascii=False, indent=1), "utf-8")
 
@@ -131,11 +136,14 @@ def _limit(market: dict, kind: str) -> float:
 
 
 class DemoEngine:
-    def __init__(self, scanner: Scanner, settings: Settings, path: Path = DEMO_FILE):
+    """Один межбиржевой демо-счёт."""
+
+    def __init__(self, scanner: Scanner, settings: Settings, path: Path | None = DEMO_FILE):
         self.scanner = scanner
         self.settings = settings
         self.path = path
         self.acc = load_account(path)
+        self.get_book = scanner.order_book  # DemoManager подменяет на общий кэш стаканов
         self._counted: set[str] = set()  # чтобы одна связка не считалась в отказах много раз
 
     @property
@@ -176,7 +184,7 @@ class DemoEngine:
         if t is None or time.time() - t.opened_at < self.settings.demo_transfer_min * 60:
             return []
         try:
-            book = await self.scanner.order_book(t.sell_exchange, t.symbol)
+            book = await self.get_book(t.sell_exchange, t.symbol)
         except Exception as e:
             log.warning("Демо: не смог получить стакан для закрытия: %s", e)
             return []
@@ -248,8 +256,8 @@ class DemoEngine:
 
         # Точная проверка по стаканам
         try:
-            buy_book = await self.scanner.order_book(buy_ex, opp.symbol)
-            sell_book = await self.scanner.order_book(sell_ex, opp.symbol)
+            buy_book = await self.get_book(buy_ex, opp.symbol)
+            sell_book = await self.get_book(sell_ex, opp.symbol)
         except Exception as e:
             self._reject(opp, "error")
             log.info("Демо: %s", short_error(e))

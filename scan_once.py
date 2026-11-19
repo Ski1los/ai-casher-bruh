@@ -27,9 +27,9 @@ async def run() -> None:
         f"сравнено пар: {result.symbols_compared}; время: {result.duration_sec:.1f} с\n"
     )
 
+    print("=== Межбиржевые ===")
     if not result.opportunities:
         print(f"Связок с прибылью от {settings.min_profit_percent}% не найдено.")
-        return
 
     for o in result.opportunities[:15]:
         line = (
@@ -39,6 +39,17 @@ async def run() -> None:
         if o.depth:
             line += f"  | стакан ${o.depth.amount_usd:.0f}: {o.depth.profit_usd:+.2f}$"
             if not o.depth.filled:
+                line += " (мало глубины)"
+        print(line)
+
+    print("\n=== Треугольные ===")
+    if not result.triangles:
+        print(f"Треугольников с прибылью от {settings.tri_min_profit_percent}% не найдено.")
+    for t in result.triangles[:15]:
+        line = f"{t.exchange:<8} {t.path_text:<32} +{t.net_percent:.3f}%"
+        if t.depth:
+            line += f"  | стакан ${t.depth.amount_usd:.0f}: {t.depth.profit_usd:+.3f}$"
+            if not t.depth.filled:
                 line += " (мало глубины)"
         print(line)
 

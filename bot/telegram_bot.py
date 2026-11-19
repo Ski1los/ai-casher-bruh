@@ -17,41 +17,50 @@ from aiogram.types import BotCommand, Message
 
 from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start_health_server
 from .config import EDITABLE, Settings
-from .demo import DEMO_FILE, DemoEngine
+from .demo import DEMO_FILE
+from .demo_manager import DemoManager
+from .report import ScanStats, seconds_until, split_message
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
+from .triangular import TriOpportunity
 
 log = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
 MAX_IN_MESSAGE = 10  # сколько связок показывать в одном сообщении
+MAX_TRI_IN_MESSAGE = 5  # сколько треугольников показывать
 BACKUP_EVERY_SEC = 30 * 60  # как часто сохранять статистику демо в Telegram
 
 HELP_TEXT = """\
 <b>Арбитражный сканер</b> 🤖
 
-Я сравниваю цены монет на разных биржах и ищу, где можно купить дешевле, \
-а продать дороже. Сам я ничего не покупаю, только присылаю сигналы.
+Ищу две вещи:
+• <b>межбиржевой арбитраж</b>: где купить дешевле на одной бирже и продать дороже на другой;
+• <b>треугольный арбитраж</b>: цикл из трёх обменов внутри одной биржи \
+(USDT → A → B → USDT), без переводов между биржами.
+Сам я реальными деньгами не торгую, только сигналы и демо-счета.
 
-<b>Команды</b>
+<b>Сигналы</b>
 /scan — просканировать прямо сейчас
-/auto_on — присылать сигналы автоматически
+/auto_on — присылать новые связки автоматически
 /auto_off — выключить автосигналы
-/status — результат последнего сканирования
-/settings — текущие настройки
-/set — изменить настройку, например <code>/set min_profit 1</code>
-/myid — показать твой Telegram ID
-/help — это сообщение
 
-<b>Демо-счёт</b> (виртуальные деньги, реальные цены и комиссии)
-/demo_start 5 — запустить демо с $5 (можно любую сумму)
-/demo — баланс, сделки и почему связки отклонены
+<b>Демо-счета</b> (виртуальные деньги, реальные стаканы и комиссии)
+/demo_start — запустить демо на $5, $50 и $500 по обеим стратегиям
+/demo_start 5 — только на $5 (можно перечислить суммы: <code>/demo_start 5 20</code>)
+/demo — сводка по всем счетам
+/demo 5 — подробно по счетам на $5: сделки и почему связки отклонены
 /demo_history — последние сделки
 /demo_stop — остановить демо
 
-⚠️ <b>Перед сделкой всегда проверь вручную</b>, что на обеих биржах открыты \
-ввод и вывод монеты и что это одна и та же монета в той же сети. \
-Учитывай комиссию за вывод и время перевода: пока монета идёт, цена может уйти."""
+<b>Прочее</b>
+/report — отчёт о работе прямо сейчас (он же приходит каждый день)
+/status — последний скан и состояние бота
+/settings — настройки, /set — изменить, например <code>/set tri_min 0.1</code>
+/myid — твой Telegram ID
+
+⚠️ Перед реальной сделкой проверь вручную, что ввод/вывод монеты открыт, \
+и помни: пока ты вручную делаешь три обмена, треугольник обычно уже исчез."""
 
 
 class SubscriberStore:
@@ -118,17 +127,47 @@ def format_opportunity(o: Opportunity, scanner: Scanner) -> str:
     return "\n".join(lines)
 
 
+def format_triangle(o: TriOpportunity, scanner: Scanner) -> str:
+    lines = [
+        f"🔺 <b>{html.escape(o.path_text)}</b>  +{o.net_percent:.3f}% чистыми",
+        f"   Биржа: <b>{html.escape(scanner.display_name(o.exchange))}</b>",
+    ]
+    for i, leg in enumerate(o.legs, 1):
+        action = "купить" if leg.side == "buy" else "продать"
+        lines.append(f"   {i}) {action} {html.escape(leg.symbol)} по {fmt_price(leg.price)}")
+    lines.append(f"   Мин. объём пары за 24ч: {fmt_usd(min(leg.volume_usd for leg in o.legs))}")
+    if o.depth:
+        d = o.depth
+        sign = "+" if d.profit_usd >= 0 else "−"
+        line = f"   Стакан на {fmt_usd(d.amount_usd)}: {sign}${abs(d.profit_usd):.3f} ({d.profit_percent:+.3f}%)"
+        if not d.filled:
+            line += " ⚠️ глубины не хватает"
+        lines.append(line)
+    elif o.depth_error:
+        lines.append("   Стакан: не удалось проверить")
+    return "\n".join(lines)
+
+
 def format_scan(result: ScanResult, scanner: Scanner, settings: Settings) -> str:
     parts: list[str] = []
     if result.opportunities:
-        parts.append(f"Найдено связок: <b>{len(result.opportunities)}</b> (показываю до {MAX_IN_MESSAGE})")
+        parts.append(
+            f"<b>Межбиржевые связки: {len(result.opportunities)}</b> (показываю до {MAX_IN_MESSAGE})"
+        )
         parts += [format_opportunity(o, scanner) for o in result.opportunities[:MAX_IN_MESSAGE]]
     else:
         parts.append(
-            f"Связок с прибылью от {settings.min_profit_percent:g}% не найдено 🤷\n"
-            "Это нормально: крупные спреды бывают редко. Попробуй уменьшить порог: "
-            "<code>/set min_profit 0.3</code>"
+            f"Межбиржевых связок от {settings.min_profit_percent:g}% не найдено. "
+            "Крупные спреды бывают редко, это нормально."
         )
+    if settings.triangular_enabled:
+        if result.triangles:
+            parts.append(
+                f"<b>Треугольники: {len(result.triangles)}</b> (показываю до {MAX_TRI_IN_MESSAGE})"
+            )
+            parts += [format_triangle(t, scanner) for t in result.triangles[:MAX_TRI_IN_MESSAGE]]
+        else:
+            parts.append(f"Треугольников от {settings.tri_min_profit_percent:g}% не найдено.")
     parts.append(format_footer(result, scanner))
     return "\n\n".join(parts)
 
@@ -150,10 +189,13 @@ def format_footer(result: ScanResult, scanner: Scanner) -> str:
 def format_settings(settings: Settings, scanner: Scanner) -> str:
     lines = ["<b>Настройки</b>"]
     for key, (attr, desc) in EDITABLE.items():
-        lines.append(f"<code>{key}</code> = {getattr(settings, attr):g}  ({desc})")
+        lines.append(f"<code>{key}</code> = {float(getattr(settings, attr)):g}  ({desc})")
     exchanges = ", ".join(scanner.display_name(n) for n in scanner.exchanges)
     lines.append(f"\nБиржи: {html.escape(exchanges)}")
     lines.append(f"Валюта: {settings.quote}")
+    lines.append(f"Треугольный арбитраж: {'включён' if settings.triangular_enabled else 'выключен'}")
+    lines.append("Демо по умолчанию: " + ", ".join(f"${a:g}" for a in settings.demo_amounts))
+    lines.append(f"Ежедневный отчёт: {settings.report_hour}:00 (UTC{settings.report_utc_offset:+g})")
     lines.append("\nИзменить: <code>/set min_profit 1</code>")
     lines.append("<i>Биржи и валюта меняются в файле .env (нужен перезапуск).</i>")
     return "\n".join(lines)
@@ -172,7 +214,9 @@ class ArbitrageBot:
         self.scanner = Scanner(settings)
         self.subscribers = SubscriberStore()
         self.sent_alerts: dict[tuple[str, str, str], tuple[float, float]] = {}
-        self.demo = DemoEngine(self.scanner, settings)
+        self.demo = DemoManager(self.scanner, settings)
+        self.stats = ScanStats()
+        self.owner_id = owner
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.dp = Dispatcher()
@@ -185,7 +229,7 @@ class ArbitrageBot:
     # --- резервная копия ----------------------------------------------------
 
     def _state(self) -> dict:
-        return {"version": 1, "subscribers": sorted(self.subscribers.chats), "demo": self.demo.export()}
+        return {"version": 2, "subscribers": sorted(self.subscribers.chats), "demo": self.demo.export()}
 
     async def _backup_now(self) -> None:
         if self.backup is None:
@@ -206,7 +250,60 @@ class ArbitrageBot:
         if state.get("demo"):
             self.demo.restore(state["demo"])
         self.subscribers.replace(state.get("subscribers") or [])
-        log.info("Состояние восстановлено из Telegram (демо: %s)", "есть" if self.demo.acc.start_balance else "нет")
+        log.info("Состояние восстановлено из Telegram (демо-счетов: %d)", len(self.demo.accounts))
+
+    # --- отправка -----------------------------------------------------------
+
+    async def _send(self, chat_id: int, text: str) -> None:
+        for part in split_message(text):
+            try:
+                await self.bot.send_message(chat_id, part)
+            except Exception as e:
+                log.warning("Не смог отправить в чат %s: %s", chat_id, e)
+
+    async def _answer(self, message: Message, text: str) -> None:
+        for part in split_message(text):
+            await message.answer(part)
+
+    async def _scan(self) -> ScanResult:
+        try:
+            result = await self.scanner.scan()
+        except Exception:
+            self.stats.record_failure()
+            raise
+        self.stats.record(result, self.scanner.display_name)
+        return result
+
+    def report_text(self) -> str:
+        parts = [
+            "📊 <b>Отчёт</b>",
+            self.stats.text(len(self.scanner.exchanges), self.settings.trade_amount_usd),
+        ]
+        if self.demo.accounts:
+            parts.append(self.demo.summary_text())
+        else:
+            parts.append("Демо-счета не запущены: /demo_start")
+        return "\n\n".join(parts)
+
+    def _report_recipients(self) -> set[int]:
+        chats = set()
+        if self.owner_id:
+            chats.add(self.owner_id)
+        if self.demo.chat_id:
+            chats.add(self.demo.chat_id)
+        return chats
+
+    async def _daily_report_loop(self) -> None:
+        while True:
+            await asyncio.sleep(seconds_until(self.settings.report_hour, self.settings.report_utc_offset))
+            try:
+                text = self.report_text()
+                for chat_id in self._report_recipients():
+                    await self._send(chat_id, text)
+                self.stats.reset_period()
+            except Exception:
+                log.exception("Ошибка ежедневного отчёта")
+            await asyncio.sleep(90)
 
     # --- доступ -------------------------------------------------------------
 
@@ -238,12 +335,15 @@ class ArbitrageBot:
                 return
             wait = await message.answer("🔎 Сканирую биржи, обычно это 5–30 секунд…")
             try:
-                result = await self.scanner.scan()
+                result = await self._scan()
             except Exception as e:
                 log.exception("Ошибка сканирования")
                 await wait.edit_text(f"Ошибка сканирования: {html.escape(str(e))[:300]}")
                 return
-            await wait.edit_text(format_scan(result, self.scanner, self.settings))
+            parts = split_message(format_scan(result, self.scanner, self.settings))
+            await wait.edit_text(parts[0])
+            for part in parts[1:]:
+                await message.answer(part)
 
         @dp.message(Command("status"))
         async def cmd_status(message: Message) -> None:
@@ -257,7 +357,8 @@ class ArbitrageBot:
             auto = "включены ✅" if message.chat.id in self.subscribers.chats else "выключены"
             auto += "\nБэкап в Telegram: " + ("включён 💾" if self.backup else "выключен (заполни ALLOWED_USER_IDS)")
             await message.answer(
-                f"Последний скан: {ago} с назад, связок: {len(result.opportunities)}.\n"
+                f"Последний скан: {ago} с назад. Межбиржевых связок: {len(result.opportunities)}, "
+                f"треугольников: {len(result.triangles)}.\n"
                 f"Автосигналы в этом чате: {auto}\n\n" + format_footer(result, self.scanner)
             )
 
@@ -269,7 +370,9 @@ class ArbitrageBot:
             await self._backup_now()
             await message.answer(
                 f"✅ Автосигналы включены. Сканирую каждые {self.settings.scan_interval_sec:g} с "
-                f"и пишу, когда прибыль ≥ {self.settings.min_profit_percent:g}%."
+                f"и пишу о новых связках: межбиржевых от {self.settings.min_profit_percent:g}%"
+                + (f", треугольниках от {self.settings.tri_min_profit_percent:g}%" if self.settings.triangular_enabled else "")
+                + " (только если прибыль подтверждается стаканом)."
             )
 
         @dp.message(Command("auto_off"))
@@ -290,36 +393,47 @@ class ArbitrageBot:
         async def cmd_demo_start(message: Message, command: CommandObject) -> None:
             if not self._allowed(message):
                 return
-            raw = (command.args or "5").strip().replace(",", ".").lstrip("$")
+            raw = (command.args or "").replace("$", " ").replace(";", " ").split()
             try:
-                amount = float(raw)
+                amounts = [float(x.replace(",", ".")) for x in raw] or list(self.settings.demo_amounts)
             except ValueError:
-                await message.answer("Формат: <code>/demo_start 5</code>")
+                await message.answer("Формат: <code>/demo_start</code> или <code>/demo_start 5 50 500</code>")
                 return
-            if not 1 <= amount <= 1_000_000:
-                await message.answer("Сумма от 1 до 1 000 000 $")
+            amounts = sorted(set(amounts))
+            if len(amounts) > 5 or not all(1 <= a <= 1_000_000 for a in amounts):
+                await message.answer("До 5 сумм, каждая от 1 до 1 000 000 $")
                 return
-            self.demo.start(amount, message.chat.id)
+            labels = self.demo.start(amounts, message.chat.id)
             await self._backup_now()
-            await message.answer(
-                f"🧪 Демо-счёт запущен: <b>${amount:g}</b> виртуальных USDT.\n"
-                f"Бот сканирует каждые {self.settings.scan_interval_sec:g} с и сам «торгует» по реальным "
-                f"стаканам: с комиссиями, минимальными ордерами, платой за вывод и задержкой перевода "
-                f"{self.settings.demo_transfer_min:g} мин.\n\n"
-                "Сделки придут сюда сообщениями. Статистика: /demo"
+            await self._answer(
+                message,
+                "🧪 <b>Демо запущено</b>: " + ", ".join(labels) + "\n\n"
+                f"Каждые {self.settings.scan_interval_sec:g} с бот ищет связки и «торгует» виртуальными "
+                "деньгами по реальным стаканам. Учитывается всё: комиссии, минимальные ордера, "
+                f"плата за вывод и {self.settings.demo_transfer_min:g} мин перевода (межбиржевой), "
+                "повторный запрос стаканов перед исполнением (треугольный). Прибыль реинвестируется.\n\n"
+                "Сделки придут сюда. Сводка: /demo · каждый день в "
+                f"{self.settings.report_hour}:00 придёт отчёт.",
             )
 
         @dp.message(Command("demo"))
-        async def cmd_demo(message: Message) -> None:
+        async def cmd_demo(message: Message, command: CommandObject) -> None:
             if not self._allowed(message):
                 return
-            await message.answer(self.demo.status_text())
+            arg = (command.args or "").strip().lstrip("$").replace(",", ".")
+            if arg:
+                try:
+                    await self._answer(message, self.demo.details_text(float(arg)))
+                except ValueError:
+                    await message.answer("Формат: <code>/demo</code> или <code>/demo 5</code>")
+                return
+            await self._answer(message, self.demo.summary_text())
 
         @dp.message(Command("demo_history"))
         async def cmd_demo_history(message: Message) -> None:
             if not self._allowed(message):
                 return
-            await message.answer(self.demo.history_text())
+            await self._answer(message, self.demo.history_text())
 
         @dp.message(Command("demo_stop"))
         async def cmd_demo_stop(message: Message) -> None:
@@ -327,7 +441,13 @@ class ArbitrageBot:
                 return
             self.demo.stop()
             await self._backup_now()
-            await message.answer("⏸ Демо остановлено. Итог:\n\n" + self.demo.status_text())
+            await self._answer(message, "⏸ Демо остановлено. Итог:\n\n" + self.demo.summary_text())
+
+        @dp.message(Command("report"))
+        async def cmd_report(message: Message) -> None:
+            if not self._allowed(message):
+                return
+            await self._answer(message, self.report_text())
 
         @dp.message(Command("set"))
         async def cmd_set(message: Message, command: CommandObject) -> None:
@@ -352,16 +472,21 @@ class ArbitrageBot:
 
     # --- автоматический режим ----------------------------------------------
 
-    def _should_alert(self, o: Opportunity) -> bool:
-        # Если стакан проверили и реальной прибыли не хватает, молчим
-        if o.depth and o.depth.profit_percent < self.settings.min_profit_percent:
+    def _should_alert(self, o: Opportunity | TriOpportunity) -> bool:
+        threshold = (
+            self.settings.tri_min_profit_percent
+            if isinstance(o, TriOpportunity)
+            else self.settings.min_profit_percent
+        )
+        # Сигналим только о том, что подтверждено стаканом
+        if o.depth is None or not o.depth.filled or o.depth.profit_percent < threshold:
             return False
         prev = self.sent_alerts.get(o.key)
         if prev is None:
             return True
         sent_at, sent_profit = prev
         cooldown_passed = time.time() - sent_at > self.settings.alert_cooldown_min * 60
-        grew = o.net_percent - sent_profit >= 1.0  # спред вырос на 1 п.п. и больше
+        grew = o.net_percent - sent_profit >= 1.0  # прибыль выросла на 1 п.п. и больше
         return cooldown_passed or grew
 
     async def _run_demo(self, result: ScanResult) -> None:
@@ -372,35 +497,35 @@ class ArbitrageBot:
             return
         if events or (self.demo.active and time.time() - self._last_backup > BACKUP_EVERY_SEC):
             await self._backup_now()
-        chat_id = self.demo.acc.chat_id
+        chat_id = self.demo.chat_id
         for text in events:
             if chat_id is None:
                 log.info(text)
-                continue
-            try:
-                await self.bot.send_message(chat_id, text)
-            except Exception as e:
-                log.warning("Не смог отправить демо-событие: %s", e)
+            else:
+                await self._send(chat_id, text)
+
+    async def _send_alerts(self, result: ScanResult) -> None:
+        fresh_cross = [o for o in result.opportunities if self._should_alert(o)][:MAX_IN_MESSAGE]
+        fresh_tri = [o for o in result.triangles if self._should_alert(o)][:MAX_TRI_IN_MESSAGE]
+        if not (fresh_cross or fresh_tri) or not self.subscribers.chats:
+            return
+        blocks = ["🔔 <b>Новые связки</b>"]
+        blocks += [format_opportunity(o, self.scanner) for o in fresh_cross]
+        blocks += [format_triangle(o, self.scanner) for o in fresh_tri]
+        for o in [*fresh_cross, *fresh_tri]:
+            self.sent_alerts[o.key] = (time.time(), o.net_percent)
+        text = "\n\n".join(blocks)
+        for chat_id in list(self.subscribers.chats):
+            await self._send(chat_id, text)
 
     async def _auto_loop(self) -> None:
         await asyncio.sleep(3)
         while True:
             if self.subscribers.chats or self.demo.active:
                 try:
-                    result = await self.scanner.scan()
+                    result = await self._scan()
                     await self._run_demo(result)
-                    fresh = [o for o in result.opportunities if self._should_alert(o)]
-                    if fresh and self.subscribers.chats:
-                        text = "🔔 <b>Новые связки</b>\n\n" + "\n\n".join(
-                            format_opportunity(o, self.scanner) for o in fresh[:MAX_IN_MESSAGE]
-                        )
-                        for o in fresh[:MAX_IN_MESSAGE]:
-                            self.sent_alerts[o.key] = (time.time(), o.net_percent)
-                        for chat_id in list(self.subscribers.chats):
-                            try:
-                                await self.bot.send_message(chat_id, text)
-                            except Exception as e:
-                                log.warning("Не смог отправить в чат %s: %s", chat_id, e)
+                    await self._send_alerts(result)
                 except Exception:
                     log.exception("Ошибка в автосканировании")
             await asyncio.sleep(self.settings.scan_interval_sec)
@@ -423,10 +548,11 @@ class ArbitrageBot:
                     BotCommand(command="scan", description="Просканировать сейчас"),
                     BotCommand(command="auto_on", description="Включить автосигналы"),
                     BotCommand(command="auto_off", description="Выключить автосигналы"),
-                    BotCommand(command="demo_start", description="Демо-счёт: /demo_start 5"),
-                    BotCommand(command="demo", description="Демо: баланс и статистика"),
+                    BotCommand(command="demo_start", description="Демо на $5, $50, $500"),
+                    BotCommand(command="demo", description="Демо: сводка по счетам"),
                     BotCommand(command="demo_history", description="Демо: последние сделки"),
                     BotCommand(command="demo_stop", description="Остановить демо"),
+                    BotCommand(command="report", description="Отчёт о работе"),
                     BotCommand(command="status", description="Последний скан"),
                     BotCommand(command="settings", description="Настройки"),
                     BotCommand(command="help", description="Помощь"),
@@ -438,6 +564,7 @@ class ArbitrageBot:
 
             await self._restore_backup()
             tasks.append(asyncio.create_task(self._auto_loop()))
+            tasks.append(asyncio.create_task(self._daily_report_loop()))
             await self.dp.start_polling(self.bot)
         finally:
             for t in tasks:
