@@ -1,0 +1,12 @@
+# Секреты — никогда не коммить!
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Данные бота
+data/
