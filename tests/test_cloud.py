@@ -100,6 +100,8 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(demo_mod, "DEMO_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(tb, "DEMO_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(tb, "SUBSCRIBERS_FILE", tmp_path / "subs.json")
+    monkeypatch.setattr(tb, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(tb, "TRADING_FILE", tmp_path / "trading.json")
     return tb, demo_mod
 
 
