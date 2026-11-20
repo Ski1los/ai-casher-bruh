@@ -232,6 +232,7 @@ class WebApp:
             ("POST", "/api/cancel"): self.cancel,
             ("POST", "/api/mode"): self.mode,
             ("POST", "/api/auto"): self.auto,
+            ("POST", "/api/scalp"): self.scalp,
             ("POST", "/api/stop"): self.stop,
             ("POST", "/api/demo/start"): self.demo_start,
             ("POST", "/api/demo/stop"): self.demo_stop,
@@ -429,6 +430,8 @@ class WebApp:
             "keys": [{"exchange": n, "name": self._name(n), "status": t.key_status.get(n, "unchecked")} for n in t.creds],
             "key_warnings": t.key_warnings(),
             "auto_status": t.auto_status_dict(),
+            "scalp": self.b.scalper.status_dict(),
+            "duplicate": self.b.duplicate_running(),
             "working": t.working,
             "today": {"trades": st.day_trades, "pnl": round(st.day_pnl_usd, 6)},
             "limits": {"max_trade": self.b.settings.max_trade_usd, "daily_loss": self.b.settings.daily_loss_usd,
@@ -646,6 +649,8 @@ class WebApp:
             raise ApiError("треугольный арбитраж выключен (TRIANGULAR=0)")
         was_on = t.state.auto
         t.state.auto = on
+        if on and self.b.scalper.on:
+            self.b.scalper.turn_off()  # обе стратегии берут одни и те же USDT
         if on:
             t.state.paused_reason = None
             if not was_on:
@@ -655,6 +660,27 @@ class WebApp:
         self._changed(f"⚙️ Автоторговля {'включена' if on else 'выключена'} из приложения "
                       f"({'реальный режим' if t.state.live else 'тест'}).")
         return {"auto": on}
+
+    async def scalp(self, request: web.Request) -> dict:
+        """Режим $5 (ловец откатов) из приложения."""
+        self._owner(request)
+        body = await self._body(request)
+        t, sc = self.b.trader, self.b.scalper
+        on = bool(body.get("on"))
+        if on and not t.working:
+            raise ApiError("для режима $5 нужен рабочий ключ биржи")
+        if on:
+            note = ""
+            if t.state.auto:
+                t.state.auto = False
+                note = " Треугольники выключены: деньги теперь нужны режиму $5."
+            sc.turn_on()
+            self._changed(f"🎯 Режим $5 включён из приложения ({'реальный режим' if t.state.live else 'тест'}).{note} "
+                          "Состояние: /scalp")
+        else:
+            sc.turn_off()
+            self._changed("⏸ Режим $5 выключен из приложения.")
+        return {"scalp": sc.status_dict(), "auto": t.state.auto}
 
     async def stop(self, request: web.Request) -> dict:
         self._owner(request)

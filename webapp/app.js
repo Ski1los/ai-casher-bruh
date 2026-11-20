@@ -535,6 +535,7 @@ function renderHome() {
         <label class="switch"><input type="checkbox" data-act="auto" ${t.auto ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
         <div class="small muted" style="margin-top:6px">${t.auto ? (t.live ? "🔴 реально" : "🧪 в тесте") + `, от ${t.limits.auto_min}%` : "треугольники, по стакану"}</div></div>
     </div>
+    ${scalpCard()}
     ${autoCard()}
     <div class="grid4" style="margin-top:10px">
       <div class="action" data-act="scan"><div class="ic">${ICON.scan}</div>Скан</div>
@@ -1169,6 +1170,35 @@ async function toggleAuto(input) {
   } catch (e) { input.checked = !on; fail(e); }
 }
 
+async function toggleScalp(input) {
+  const on = input.checked;
+  if (on && tr().live && !(await confirmBox("Включить режим $5 в РЕАЛЬНОМ режиме? Бот сам купит монету на откате на свободные USDT и выставит продажу с прибылью. Прибыль не гарантирована."))) { input.checked = false; return; }
+  try {
+    const r = await api("/api/scalp", { on });
+    S.ov.trading.scalp = r.scalp; S.ov.trading.auto = r.auto;
+    toast(on ? "🎯 Режим $5 включён" : "⏸ Режим $5 выключен");
+    renderHeader(); renderActive(true);
+  } catch (e) { input.checked = !on; fail(e); }
+}
+
+function scalpCard() {
+  const t = tr(), s = t.scalp;
+  if (!s) return "";
+  const st = s.stats || {}, pos = s.pos;
+  const top = (s.top || []).filter((x) => x.net_pct > 0).slice(0, 3)
+    .map((x) => `${esc(x.symbol.split("/")[0])} ${pct(x.net_pct, 1)}`).join(" · ");
+  return `<div class="card" style="margin-top:10px">
+    <div class="row between"><div class="b">🎯 Режим $5</div>
+      <label class="switch"><input type="checkbox" data-act="scalp" ${s.on ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
+    <div class="small muted" style="margin-top:6px;white-space:normal">${s.on ? esc(s.reason || "запускаюсь…") : "Покупает на откате и сразу ставит продажу на +0,6…1,3% после комиссий. Хватает $5."}</div>
+    ${pos ? `<div class="small" style="margin-top:6px">Держу <b>${esc(pos.symbol.split("/")[0])}</b> за ${money(pos.cost)} · продажа по ${price(pos.tp)}${pos.breakeven ? " (безубыток)" : ""}</div>` : ""}
+    ${st.cycles ? `<div class="small" style="margin-top:6px">Сделок ${st.cycles} · в плюс ${st.wins} · <b class="${cls(st.pnl)}">${money(st.pnl, { sign: true })}</b></div>` : ""}
+    ${!t.live && s.paper_usd != null ? `<div class="tiny muted" style="margin-top:4px">🧪 тестовый баланс ${money(s.paper_usd)}</div>` : ""}
+    ${top ? `<div class="tiny muted" style="margin-top:4px">На истории в плюсе: ${top}</div>` : ""}
+    ${t.duplicate ? `<div class="tiny down" style="margin-top:6px">⚠️ Работают две копии бота: сделки на паузе. Удали лишний сервис в Render</div>` : ""}
+  </div>`;
+}
+
 async function panic() {
   if (!(await popup("Стоп-кран", "Выключить автоторговлю и реальный режим, отменить все открытые ордера?", "Остановить всё"))) return;
   try { const r = await api("/api/stop", {}); Sheet.close(); toast(r.text.split("\n")[0]); refresh(); loadOrders(); } catch (e) { fail(e); }
@@ -1564,6 +1594,7 @@ document.addEventListener("click", async (e) => {
 document.addEventListener("change", (e) => {
   const el = e.target;
   if (el.dataset.act === "auto") toggleAuto(el);
+  else if (el.dataset.act === "scalp") toggleScalp(el);
   else if (el.dataset.act === "radar") toggleRadar(el);
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.set) saveSetting(el);

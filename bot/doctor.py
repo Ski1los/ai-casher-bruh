@@ -167,7 +167,9 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                 if total < need:
                     checks.append(Check("Ключи", f"{title}: деньги", "warn" if t.state.live else "info",
                                         f"≈ ${total:.2f} на торговом счёте, а для цикла из трёх шагов нужно от ${need:.2f} "
-                                        f"(биржа принимает ордер через API от $5 на каждый шаг). Пополни торговый счёт до $10–20"))
+                                        f"(биржа принимает ордер через API от $5 на каждый шаг). "
+                                        + ("Режиму $5 (/scalp) этого хватает: там всего два ордера." if total >= 5 else
+                                           "Режиму $5 (/scalp) нужно от $5 на торговом счёте")))
             except Exception as e:
                 checks.append(Check("Ключи", title, "warn", f"ключ принят, но баланс не прочитан: {human_error(e)}"))
             checks += _key_info_checks(b, name, t.key_info.get(name, {}), now)
@@ -184,7 +186,15 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                         f"${s.daily_loss_usd:g} убытка в день, {s.daily_trades:g} сделок в день"))
     if t.state.paused_reason:
         checks.append(Check("Торговля", "Пауза", "warn", t.state.paused_reason))
+    sc = b.scalper
+    checks.append(Check("Торговля", "Режим $5", "ok" if sc.on else "info",
+                        f"включён: {sc.last_reason or 'запускается'}" if sc.on else
+                        "выключен. Торгует даже с $5: два ордера (купить на откате → продать с прибылью). /scalp on"))
     checks.append(_auto_check(b))
+    if b.duplicate_running():
+        checks.append(Check("Сервис", "Две копии бота", "bad",
+                            "тем же токеном пользуется второй сервис. Сделки на паузе, бот отвечает через раз, "
+                            "бесплатные часы Render тратятся вдвое. Render → лишний сервис → Settings → Delete Web Service"))
 
     # --- сервис --------------------------------------------------------------
     url = b.app_url()

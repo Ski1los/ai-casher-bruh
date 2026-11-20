@@ -39,6 +39,8 @@ from .demo_manager import DemoManager
 from .memory import free_memory, memory_line
 from .dex import DexClient
 from .report import ScanStats, seconds_until, split_message
+from .scalper import STEP_SEC as SCALP_STEP_SEC
+from .scalper import Scalper
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
 from .solana import PhantomWatcher
 from .tinvest import TInvestClient
@@ -60,6 +62,53 @@ CLEANUP_EVERY_SEC = 10 * 60  # как часто убирать устаревш
 KEYS_WATCH_SEC = 12 * 3600  # как часто перепроверять ключи бирж (права, срок действия)
 AUTO_WARN_SEC = 6 * 3600  # об одной и той же проблеме автоторговли напоминаем не чаще раза в 6 часов
 AUTO_FIRST_REPORT_SEC = 3600  # первая сводка автоторговли через час после включения
+DUPLICATE_WARN_SEC = 6 * 3600  # о второй копии бота напоминаем не чаще раза в 6 часов
+
+
+class ConflictWatch(logging.Handler):
+    """Замечает, что тем же токеном пользуется вторая копия бота (Telegram: «Conflict: terminated by other getUpdates»).
+
+    Две копии = два бота торгуют одними ключами: двойные покупки. Так бывает, если в Render два сервиса
+    с одним TELEGRAM_BOT_TOKEN. Короткий конфликт при обновлении (старая копия ещё не выключилась)
+    за дубль не считаем: нужно несколько конфликтов, растянутых больше чем на 3 минуты.
+    """
+
+    WINDOW = 15 * 60
+    SPAN = 3 * 60
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.hits: list[float] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return
+        if "Conflict" in msg or "TelegramConflictError" in msg:
+            self.note()
+
+    def note(self, now: float | None = None) -> None:
+        self.hits.append(time.time() if now is None else now)
+        del self.hits[:-30]
+
+    def active(self, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        recent = [h for h in self.hits if now - h < self.WINDOW]
+        return len(recent) >= 3 and recent[-1] - recent[0] >= self.SPAN
+
+DUPLICATE_TEXT = """\
+⚠️ <b>Работают две копии бота</b> с одним токеном.
+
+Скорее всего, в Render два сервиса (например, <code>ai-casher-bot</code> и <code>ai-casher-bot-mvjv</code>). \
+Чем это плохо:
+• две копии торгуют одними ключами: покупки могут удвоиться, поэтому новые сделки сейчас на паузе;
+• Telegram отдаёт сообщения то одной копии, то другой: бот «тупит» и не отвечает;
+• бесплатно у Render 750 часов в месяц на всех, а два сервиса тратят 1440. Примерно к середине месяца \
+оба выключатся до 1-го числа.
+
+Что сделать: Render → открой лишний сервис → Settings → в самом низу <b>Delete Web Service</b>. \
+Оставь тот, где в Environment есть ключи бирж. Как только останется одна копия, торговля продолжится сама."""
 
 HELP_TEXT = """\
 <b>Арбитражный сканер</b> 🤖
@@ -92,7 +141,8 @@ HELP_TEXT = """\
 <code>/limit bybit buy BTC 5 60000</code> — лимитный ордер
 /orders — открытые ордера и отмена
 /live — включить реальные ордера, /test — вернуть тест
-/autotrade on|off — автоторговля треугольниками
+/scalp — 🎯 <b>режим $5</b>: ловец откатов, торгует даже с $5 (<code>/scalp on</code>, <code>/scalp off</code>)
+/autotrade on|off — автоторговля треугольниками (нужно от ~$10–20)
 /why — 🔍 что автоторговля делает и почему нет сделок
 /trades — журнал сделок
 /stop — 🛑 стоп-кран: всё выключить и отменить ордера
@@ -392,6 +442,9 @@ class ArbitrageBot:
 
         # Торговля: ключи только из переменных окружения
         self.trader = Trader(self.scanner, settings)
+        self.conflicts = ConflictWatch()
+        self.scalper = Scalper(self.trader, self.duplicate_running)  # режим $5 (bot/scalper.py)
+        self._duplicate_warned = 0.0
         self.trading_file = TRADING_FILE
         self.tri_refs: dict[str, TriOpportunity] = {}  # кнопки «⚡ Исполнить» под сигналами
         self.order_refs: dict[str, tuple[str, str, str]] = {}  # кнопки отмены ордеров
@@ -645,10 +698,17 @@ class ArbitrageBot:
                                        "low_money", "need_usd", "funding", "blocked_now", "key_problems", "hint") if st.get(k) not in (None, {}, [])} | {
             "stats": {k: st["stats"][k] for k in ("checks", "attempts", "executed", "best")}}
 
+    def duplicate_running(self) -> bool:
+        """Работает ли вторая копия бота с тем же токеном (по конфликтам Telegram)."""
+        return self.conflicts.active()
+
     def _trading_context(self) -> dict:
         t, s = self.trader, self.settings
+        sc = self.scalper.status_dict()
         return {
             "mode": "live" if t.state.live else "test",
+            "scalp_mode_5usd": {k: sc[k] for k in ("on", "reason", "paper_usd", "stats", "pos", "top")},
+            "second_bot_copy_running": self.duplicate_running(),
             "autotrade_on": t.state.auto,
             "autotrade_paused_reason": t.state.paused_reason,
             "autotrade_status": self._auto_context(),
@@ -1222,6 +1282,10 @@ class ArbitrageBot:
     async def _run_autotrade(self, result: ScanResult) -> None:
         if not self.trader.state.auto or self.owner_id is None:
             return
+        if self.duplicate_running():  # вторая копия бота торгует теми же ключами: не удваиваем сделки
+            self.trader.auto_status = {**(self.trader.auto_status or {}), "at": time.time(),
+                                       "reason": "работают две копии бота, автоторговля на паузе (/doctor)"}
+            return
         try:
             executions = await self.trader.auto_step(result)
         except Exception:
@@ -1323,6 +1387,31 @@ class ArbitrageBot:
                     log.exception("Ошибка в автосканировании")
             await asyncio.sleep(self.settings.scan_interval_sec)
 
+    async def _warn_duplicate(self) -> None:
+        if not self.duplicate_running() or self.owner_id is None:
+            return
+        if time.time() - self._duplicate_warned < DUPLICATE_WARN_SEC:
+            return
+        self._duplicate_warned = time.time()
+        await self._send(self.owner_id, DUPLICATE_TEXT)
+
+    async def _scalp_loop(self) -> None:
+        """Режим $5: каждые 30 секунд следит за позицией или ищет вход."""
+        await asyncio.sleep(10)
+        while True:
+            try:
+                await self._warn_duplicate()
+                if self.scalper.on and self.owner_id is not None:
+                    events = await self.scalper.step()
+                    for text in events:
+                        await self._send(self.owner_id, text)
+                    if events:
+                        self.save_trading()
+                        await self._backup_now()
+            except Exception:
+                log.exception("Ошибка режима $5")
+            await asyncio.sleep(SCALP_STEP_SEC)
+
     # --- приложение ---------------------------------------------------------
 
     @staticmethod
@@ -1398,6 +1487,8 @@ class ArbitrageBot:
     async def run(self) -> None:
         tasks: list[asyncio.Task] = []
         runner = None
+        aiogram_log = logging.getLogger("aiogram.dispatcher")
+        aiogram_log.addHandler(self.conflicts)
         port = cloud_port() or int(os.getenv("WEBAPP_PORT", "0") or 0)
         if port:  # запущены в облаке: сразу открываем порт, чтобы хостинг видел, что сервис жив
             runner = await start_health_server(port, self.webapp.setup)
@@ -1427,6 +1518,7 @@ class ArbitrageBot:
                     BotCommand(command="alert", description="🔔 Ценовой алерт"),
                     BotCommand(command="alerts", description="Мои алерты"),
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
+                    BotCommand(command="scalp", description="🎯 Режим $5: ловец откатов"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
                     BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
                     BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
@@ -1452,6 +1544,7 @@ class ArbitrageBot:
             tasks.append(asyncio.create_task(extras_ui.alerts_loop(self)))
             tasks.append(asyncio.create_task(market_ui.radar_loop(self)))
             tasks.append(asyncio.create_task(self._auto_loop()))
+            tasks.append(asyncio.create_task(self._scalp_loop()))
             tasks.append(asyncio.create_task(self._equity_loop()))
             if self.app_url():
                 try:
@@ -1464,6 +1557,7 @@ class ArbitrageBot:
             tasks.append(asyncio.create_task(self._daily_report_loop()))
             await self.dp.start_polling(self.bot)
         finally:
+            aiogram_log.removeHandler(self.conflicts)
             for t in tasks:
                 t.cancel()
             if runner:
@@ -1471,8 +1565,6 @@ class ArbitrageBot:
             await self.scanner.close()
             await self.ai.client.close()
             await self.phantom.close()
-            await self.dex.close()
-            await self.tinvest.close()
             await self.dex.close()
             await self.tinvest.close()
             await self.bot.session.close()
