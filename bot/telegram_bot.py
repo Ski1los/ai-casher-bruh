@@ -28,7 +28,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import extras_ui, trading_ui
+from . import extras_ui, market_ui, trading_ui
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
@@ -36,10 +36,12 @@ from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
+from .dex import DexClient
 from .report import ScanStats, seconds_until, split_message
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
 from .solana import PhantomWatcher
-from .trading import Trader, days_left
+from .tinvest import TInvestClient
+from .trading import Trader, days_left, key_trade_problem, new_auto_stats
 from .triangular import TriOpportunity
 from .webapp import WebApp
 
@@ -54,6 +56,8 @@ MAX_IN_MESSAGE = 10  # сколько связок показывать в од�
 MAX_TRI_IN_MESSAGE = 5  # сколько треугольников показывать
 BACKUP_EVERY_SEC = 30 * 60  # как часто сохранять статистику демо в Telegram
 KEYS_WATCH_SEC = 12 * 3600  # как часто перепроверять ключи бирж (права, срок действия)
+AUTO_WARN_SEC = 6 * 3600  # об одной и той же проблеме автоторговли напоминаем не чаще раза в 6 часов
+AUTO_FIRST_REPORT_SEC = 3600  # первая сводка автоторговли через час после включения
 
 HELP_TEXT = """\
 <b>Арбитражный сканер</b> 🤖
@@ -87,6 +91,7 @@ HELP_TEXT = """\
 /orders — открытые ордера и отмена
 /live — включить реальные ордера, /test — вернуть тест
 /autotrade on|off — автоторговля треугольниками
+/why — 🔍 что автоторговля делает и почему нет сделок
 /trades — журнал сделок
 /stop — 🛑 стоп-кран: всё выключить и отменить ордера
 Под треугольниками есть кнопка «⚡ Исполнить». Каждый ордер исполняется только после твоего подтверждения.
@@ -107,6 +112,12 @@ HELP_TEXT = """\
 <code>/alert TON &lt; 5</code> — сообщить, когда цена дойдёт до уровня (или <code>/alert SOL +5%</code>)
 /alerts — мои алерты (удаление кнопками)
 <code>/phantom АДРЕС</code> — 👻 баланс кошелька Phantom (только просмотр, сид-фразу не нужно!)
+
+<b>Мемкоины и брокер</b> 🦎
+<code>/dex BONK</code> или <code>/dex АДРЕС</code> — токен с DexScreener: цена, ликвидность, риски, ссылки GMGN/Axiom
+<code>/rug АДРЕС</code> — 🛡 проверка токена Solana на скам (RugCheck)
+/hot — тренды Solana · <code>/radar on</code> — присылать новые токены, прошедшие фильтры
+/tinvest — 🏦 портфель Т-Инвестиций (токен «только чтение»)
 
 <b>Прочее</b>
 /report — отчёт о работе прямо сейчас (он же приходит каждый день)
@@ -361,7 +372,13 @@ class ArbitrageBot:
         self._fee_changes: dict[str, float | None] = {}  # что меняли через /fee (None = сброс)
         self.alerts = AlertBook()  # ценовые алерты (/alert)
         self.phantom = PhantomWatcher(os.getenv("PHANTOM_ADDRESS", "") or os.getenv("SOLANA_ADDRESS", ""))
+        self.dex = DexClient()  # мемкоины: DexScreener + RugCheck (публичные API, без ключей)
+        self.tinvest = TInvestClient.from_env()  # Т-Инвестиции: портфель (только чтение, TINVEST_TOKEN)
+        self.radar_chats: set[int] = set()  # кому слать радар мемкоинов (/radar on)
+        self.radar_seen: dict[str, float] = {}  # о каких токенах радар уже писал
         self._key_warned: dict[str, float] = {}  # о чём уже предупреждали (чтобы не спамить)
+        self._auto_warned: dict[str, float] = {}  # проблемы автоторговли, о которых уже написали
+        self._auto_reports = 0  # сколько сводок автоторговли отправлено с момента включения
         self.settings_file = SETTINGS_FILE
         if self.settings_file.exists():
             try:
@@ -411,7 +428,8 @@ class ArbitrageBot:
 
     def _settings_state(self) -> dict:
         return {"values": dict(self._changed), "fees": dict(self._fee_changes),
-                "alerts": self.alerts.export(), "phantom": self.phantom.address}
+                "alerts": self.alerts.export(), "phantom": self.phantom.address,
+                "radar": sorted(self.radar_chats)}
 
     def _apply_saved_settings(self, raw: dict) -> None:
         for key, value in (raw.get("values") or {}).items():
@@ -436,6 +454,8 @@ class ArbitrageBot:
                 self.phantom.set_address(raw.get("phantom") or "")
             except Exception:
                 pass
+        if isinstance(raw.get("radar"), list):
+            self.radar_chats = {int(c) for c in raw["radar"] if str(c).lstrip("-").isdigit()}
 
     async def save_extras(self) -> None:
         """Алерты и адрес кошелька: в файл и в резервную копию."""
@@ -446,7 +466,8 @@ class ArbitrageBot:
             log.warning("Бэкап не удался: %s", e)
 
     async def phantom_snapshot(self, force: bool = False) -> dict | None:
-        return await self.phantom.get(lambda coins: extras_ui.public_prices(self, coins), force=force)
+        return await self.phantom.get(lambda coins: extras_ui.public_prices(self, coins), force=force,
+                                      mint_price_fn=lambda mints: self.dex.token_prices("solana", mints))
 
     def _save_settings(self) -> None:
         try:
@@ -592,8 +613,30 @@ class ArbitrageBot:
             "phantom_wallet": phantom or {"connected": False, "how": "/phantom АДРЕС (только публичный адрес)"},
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
             "api_keys": keys,
-            "useful_commands": ["/doctor", "/price COIN", "/alert COIN < PRICE", "/phantom"],
+            "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
+                                "/hot", "/radar", "/tinvest"],
+            "tinvest": self._tinvest_context(),
+            "memecoin_radar_on": bool(self.radar_chats),
         }
+
+    def _tinvest_context(self) -> dict:
+        if not self.tinvest.configured:
+            return {"connected": False, "how": "/tinvest (токен «только чтение» в Render как TINVEST_TOKEN)"}
+        snap = self.tinvest.snapshot or {}
+        return {"connected": True, "read_only_view": True, "error": snap.get("error"),
+                "total_rub": round(snap.get("total") or 0, 2),
+                "accounts": [{"name": a.get("name"), "total": round(a.get("total") or 0, 2),
+                              "yield_pct": round(a.get("yield_pct") or 0, 2),
+                              "top": [{"ticker": p["ticker"], "value": round(p["value"], 2),
+                                       "yield_pct": round(p["yield_pct"], 2) if p.get("yield_pct") is not None else None}
+                                      for p in (a.get("positions") or [])[:8]]}
+                             for a in snap.get("accounts", [])[:5]]}
+
+    def _auto_context(self) -> dict:
+        st = self.trader.auto_status_dict()
+        return {k: st.get(k) for k in ("at", "need", "triangles", "candidates", "tried", "reason", "best", "free",
+                                       "low_money", "blocked_now", "key_problems", "hint") if st.get(k) not in (None, {}, [])} | {
+            "stats": {k: st["stats"][k] for k in ("checks", "attempts", "executed", "best")}}
 
     def _trading_context(self) -> dict:
         t, s = self.trader, self.settings
@@ -601,6 +644,7 @@ class ArbitrageBot:
             "mode": "live" if t.state.live else "test",
             "autotrade_on": t.state.auto,
             "autotrade_paused_reason": t.state.paused_reason,
+            "autotrade_status": self._auto_context(),
             "exchanges_with_keys": t.working,
             "key_errors": {k: v for k, v in t.key_status.items() if v != "ok"},
             "max_trade_usd": s.max_trade_usd,
@@ -1092,6 +1136,7 @@ class ArbitrageBot:
         # --- торговля и полезные мелочи (до обработчика обычного текста) ----------
         trading_ui.register(self)
         extras_ui.register(self)
+        market_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1159,15 +1204,41 @@ class ArbitrageBot:
         except Exception:
             log.exception("Ошибка автоторговли")
             return
-        for res in executions:
-            if res.executed or res.live:  # пропуски в тесте не шлём, чтобы не спамить
-                await self._send(self.owner_id, "⚙️ " + res.text(self.scanner.display_name))
+        for res in executions:  # пропуски не шлём каждый скан: они в /why и в сводке
+            await self._send(self.owner_id, "⚙️ " + res.text(self.scanner.display_name))
         if executions:
             if not self.trader.state.auto and self.trader.state.paused_reason:
                 await self._send(self.owner_id, f"⏸ <b>Автоторговля остановлена</b>: {html.escape(self.trader.state.paused_reason)}.\n"
                                                 "Включить снова: /autotrade on")
             self.save_trading()
             await self._backup_now()
+        await self._auto_notify()
+
+    async def _auto_notify(self, now: float | None = None) -> None:
+        """Разовое предупреждение, если автоторговля в принципе не может торговать, и периодическая сводка."""
+        t = self.trader
+        if not t.state.auto or self.owner_id is None:
+            return
+        now = time.time() if now is None else now
+        problem = t.auto_problem()
+        if problem:
+            code, text = problem
+            if now - self._auto_warned.get(code, 0) > AUTO_WARN_SEC:
+                self._auto_warned[code] = now
+                hint = t._auto_hint()
+                await self._send(self.owner_id, "⚠️ <b>Автоторговля включена, но торговать не может</b>\n"
+                                                f"{html.escape(text)}\n{hint}\nПодробно: /why · проверка: /doctor")
+        else:
+            self._auto_warned.clear()  # проблему исправили: если вернётся, снова предупредим
+        hours = self.settings.auto_report_hours
+        if hours <= 0:
+            return
+        period = min(AUTO_FIRST_REPORT_SEC, hours * 3600) if self._auto_reports == 0 else hours * 3600
+        if now - t.auto_stats["since"] >= period:
+            text = t.auto_digest()
+            self._auto_reports += 1
+            t.auto_stats = new_auto_stats()
+            await self._send(self.owner_id, text + "\nСводку реже/выключить: <code>/set auto_report 24</code> или 0")
 
     async def _send_alerts(self, result: ScanResult) -> None:
         fresh_cross = [o for o in result.opportunities if self._should_alert(o)][:MAX_IN_MESSAGE]
@@ -1226,7 +1297,16 @@ class ArbitrageBot:
 
     async def _check_keys_on_start(self) -> None:
         status = await self.trader.check_keys()
+        try:
+            await self.trader.inspect_keys()  # права ключа: «только чтение» не даст автоторговле торговать
+        except Exception:
+            log.exception("Не удалось прочитать права ключей")
         bad = {k: v for k, v in status.items() if v != "ok"}
+        if self.trader.state.live:
+            for name, info in self.trader.key_info.items():
+                problem = key_trade_problem(name, info)
+                if problem and name not in bad:
+                    bad[name] = problem
         log.info("Ключи бирж: %s", {k: ("ok" if v == "ok" else "ошибка") for k, v in status.items()})
         if bad and self.owner_id:
             lines = ["⚠️ <b>Проблема с ключами бирж</b>"]
@@ -1291,6 +1371,12 @@ class ArbitrageBot:
                     BotCommand(command="alert", description="🔔 Ценовой алерт"),
                     BotCommand(command="alerts", description="Мои алерты"),
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
+                    BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
+                    BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
+                    BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
+                    BotCommand(command="rug", description="🛡 Проверка токена на скам"),
+                    BotCommand(command="radar", description="📡 Радар новых мемкоинов"),
+                    BotCommand(command="tinvest", description="🏦 Т-Инвестиции: портфель"),
                     BotCommand(command="analysis", description="Анализ: комиссии и узкие места"),
                     BotCommand(command="fees", description="Комиссии бирж"),
                     BotCommand(command="report", description="Отчёт о работе"),
@@ -1308,6 +1394,7 @@ class ArbitrageBot:
                 tasks.append(asyncio.create_task(self._check_keys_on_start()))
                 tasks.append(asyncio.create_task(self._keys_watch_loop()))
             tasks.append(asyncio.create_task(extras_ui.alerts_loop(self)))
+            tasks.append(asyncio.create_task(market_ui.radar_loop(self)))
             tasks.append(asyncio.create_task(self._auto_loop()))
             tasks.append(asyncio.create_task(self._equity_loop()))
             if self.app_url():
@@ -1328,4 +1415,6 @@ class ArbitrageBot:
             await self.scanner.close()
             await self.ai.client.close()
             await self.phantom.close()
+            await self.dex.close()
+            await self.tinvest.close()
             await self.bot.session.close()

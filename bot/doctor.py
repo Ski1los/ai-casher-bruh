@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import ccxt.async_support as ccxt
 
-from .trading import NEEDS_PASSWORD, STABLES, days_left, human_error, is_geo_block
+from .trading import AUTO_MIN_FREE_USD, NEEDS_PASSWORD, STABLES, days_left, human_error, is_geo_block
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -105,7 +105,11 @@ def _key_info_checks(b: ArbitrageBot, name: str, info: dict, now: float) -> list
                          "у ключа включён вывод (Withdraw). Удали ключ и создай новый только со спотовой торговлей"))
     if name == "bybit":
         if info.get("read_only"):
-            out.append(Check("Ключи", f"{title}: права", "warn", "ключ «только чтение»: баланс виден, торговать нельзя"))
+            live = b.trader.state.live
+            out.append(Check("Ключи", f"{title}: права", "bad" if live else "warn",
+                             "ключ «только чтение»: баланс виден, торговать нельзя"
+                             + (". В реальном режиме биржа отклонит ордера. bybit.com → API → Edit → Read-Write + "
+                                "Spot Trade (без Withdraw)" if live else "")))
         elif not info.get("spot_trade"):
             out.append(Check("Ключи", f"{title}: права", "bad", "нет права Spot Trade: включи «Спот» в настройках ключа"))
         days = days_left(info, now)
@@ -165,6 +169,10 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                 rows = await asyncio.wait_for(t.balances(name), EXCHANGE_TIMEOUT)
                 total = sum(r[3] or 0 for r in rows)
                 checks.append(Check("Ключи", title, "ok", f"ключ работает, на торговом счёте ≈ ${total:.2f}"))
+                if t.state.live and total < AUTO_MIN_FREE_USD:
+                    checks.append(Check("Ключи", f"{title}: деньги", "warn",
+                                        f"≈ ${total:.2f} мало: биржа не примет ордера меньше ~$1–5 на каждый шаг, "
+                                        f"автоторговля будет пропускать циклы. Пополни торговый счёт до $10–20"))
             except Exception as e:
                 checks.append(Check("Ключи", title, "warn", f"ключ принят, но баланс не прочитан: {human_error(e)}"))
             checks += _key_info_checks(b, name, t.key_info.get(name, {}), now)
@@ -185,6 +193,7 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                         f"${s.daily_loss_usd:g} убытка в день, {s.daily_trades:g} сделок в день"))
     if t.state.paused_reason:
         checks.append(Check("Торговля", "Пауза", "warn", t.state.paused_reason))
+    checks.append(_auto_check(b))
 
     # --- сервис --------------------------------------------------------------
     url = b.app_url()
@@ -204,6 +213,16 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                         f"{mem:.0f} МБ из {RENDER_RAM_MB} МБ бесплатного Render"
                         + ("" if mem < RENDER_RAM_MB * 0.75 else ". Если бот перезапускается, убери пару бирж из EXCHANGES")))
 
+    if b.tinvest.configured:
+        snap = await b.tinvest.get(force=True)
+        if snap and snap.get("error"):
+            checks.append(Check("Сервис", "Т-Инвестиции", "bad", snap["error"]))
+        elif snap:
+            checks.append(Check("Сервис", "Т-Инвестиции", "ok",
+                                f"счетов: {len(snap['accounts'])}, портфель ≈ {snap['total']:,.0f} ₽ (только просмотр)".replace(",", " ")))
+    else:
+        checks.append(Check("Сервис", "Т-Инвестиции", "info", "не подключены (по желанию): /tinvest"))
+
     # --- Phantom и алерты ----------------------------------------------------
     if b.phantom.address:
         snap = await b.phantom_snapshot(force=True)
@@ -214,10 +233,31 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                                 f"виден баланс ≈ ${snap['total_usd']:.2f}, монет: {len(snap['assets'])}. Только просмотр"))
     else:
         checks.append(Check("Кошелёк", "Phantom", "info", "не подключён (по желанию): /phantom АДРЕС"))
+    checks.append(Check("Кошелёк", "Радар мемкоинов", "info",
+                        "включён" if b.radar_chats else "выключен. Включить: /radar on (новые токены Solana после RugCheck)"))
     n_alerts = len(b.alerts.items)
     checks.append(Check("Кошелёк", "Ценовые алерты", "info",
                         f"активных: {n_alerts}" if n_alerts else "нет. Пример: /alert TON < 5"))
     return checks
+
+
+def _auto_check(b: ArbitrageBot) -> Check:
+    t = b.trader
+    if not t.state.auto:
+        return Check("Торговля", "Автоторговля", "info", "выключена. Проверить безопасно: /test, затем /autotrade on")
+    problem = t.auto_problem()
+    st = t.auto_status
+    if problem:
+        return Check("Торговля", "Автоторговля", "bad" if problem[0] in ("blocked", "no_keys") else "warn",
+                     f"включена, но не может торговать: {problem[1]}. Подробно: /why")
+    if not st:
+        return Check("Торговля", "Автоторговля", "info", "включена, ждёт первого скана")
+    ago = time.time() - st["at"]
+    last = "исполнила цикл" if st.get("executed") else (st.get("reason") or "ждёт подходящий цикл")
+    stale = ago > max(300, b.settings.scan_interval_sec * 5)
+    return Check("Торговля", "Автоторговля", "warn" if stale else "ok",
+                 f"работает, последняя проверка {ago:.0f} с назад: {last}"
+                 + (". Давно не было сканов: проверь, жив ли сервис" if stale else "") + ". Подробно: /why")
 
 
 def summary(checks: list[Check]) -> dict:

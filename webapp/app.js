@@ -84,6 +84,10 @@ const ICON = {
   bell: svg('<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>', 'style="color:var(--yellow)"'),
   price: svg('<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>', 'style="color:#4f8cff"'),
   x: svg('<path d="M6 6l12 12M18 6 6 18"/>', 'style="color:var(--red)"'),
+  dex: svg('<path d="M12 3c4 3 6 6 6 10a6 6 0 0 1-12 0c0-2 1-4 2-5 0 2 1 3 2 3 0-3 1-6 2-8z"/>', 'style="color:#ff7a45"'),
+  bank: svg('<path d="M3 10h18M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 20h18M12 3l9 5H3z"/>', 'style="color:var(--yellow)"'),
+  pilot: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 12l4-3M12 7v1M7 12h1M16 12h1"/>', 'style="color:var(--accent2)"'),
+  fire: svg('<path d="M4 17l5-5 4 4 7-7M14 9h6v6"/>', 'style="color:var(--green)"'),
   ghost: svg('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.5-2-2.3 2-2.2-2-2.2 2-2.3-2z"/><circle cx="9.5" cy="11" r="1"/><circle cx="14.5" cy="11" r="1"/>', 'style="color:#ab9ff2"'),
 };
 const ARR = `<span class="arr">${ICON.arrow}</span>`;
@@ -531,6 +535,7 @@ function renderHome() {
         <label class="switch"><input type="checkbox" data-act="auto" ${t.auto ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
         <div class="small muted" style="margin-top:6px">${t.auto ? (t.live ? "🔴 реально" : "🧪 в тесте") + `, от ${t.limits.auto_min}%` : "треугольники, по стакану"}</div></div>
     </div>
+    ${autoCard()}
     <div class="grid4" style="margin-top:10px">
       <div class="action" data-act="scan"><div class="ic">${ICON.scan}</div>Скан</div>
       <div class="action" data-act="quick" data-side="buy"><div class="ic" style="background:var(--green-bg)">${ICON.buy}</div>Купить</div>
@@ -542,6 +547,12 @@ function renderHome() {
       <div class="action" data-act="alerts"><div class="ic">${ICON.bell}</div>Алерты</div>
       <div class="action" data-act="prices"><div class="ic">${ICON.price}</div>Цены</div>
       <div class="action" data-act="phantom"><div class="ic">${ICON.ghost}</div>Phantom</div>
+    </div>
+    <div class="grid4" style="margin-top:8px">
+      <div class="action" data-act="dex" data-v="hot"><div class="ic">${ICON.dex}</div>Мемкоины</div>
+      <div class="action" data-act="dex" data-v="search"><div class="ic">${ICON.fire}</div>DEX-поиск</div>
+      <div class="action" data-act="tinvest"><div class="ic">${ICON.bank}</div>Т-Инвест</div>
+      <div class="action" data-act="why"><div class="ic">${ICON.pilot}</div>Автопилот</div>
     </div>
     <div class="section-title">Лучшие сигналы <a data-act="goto" data-tab="signals">Все</a></div>
     ${sigs.length ? `<div class="list">${sigs.map(([s, k]) => signalMini(s, k)).join("")}</div>` : `<div class="card empty"><div class="e">🔍</div>${sc ? "Прибыльных связок сейчас нет. Это нормально: рынок эффективен." : "Сканирований ещё не было"}<div style="margin-top:12px"><button class="btn primary sm" data-act="scan">Сканировать</button></div></div>`}
@@ -1213,6 +1224,198 @@ async function askAI(q) {
 // Навигация, обновление, события
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Автоторговля: что делает и почему нет сделок
+// ---------------------------------------------------------------------------
+
+function autoState(t) {
+  const a = t.auto_status || {};
+  const blocked = Object.keys(a.blocked_now || {});
+  if (!t.auto) return { cls: "gray", icon: "⏸", text: "выключена" };
+  if (blocked.length && blocked.length >= (t.working || []).length) return { cls: "bad", icon: "⛔", text: "не может торговать" };
+  if (a.low_money && Object.keys(a.low_money).length) return { cls: "bad", icon: "💵", text: "мало денег на счёте" };
+  if (!a.at) return { cls: "gray", icon: "⏳", text: "ждёт первого скана" };
+  if (a.executed) return { cls: "ok", icon: "✅", text: "исполнила цикл" };
+  return { cls: "ok", icon: "🟢", text: "ждёт выгодный цикл" };
+}
+
+function autoCard() {
+  const t = tr();
+  if (!owner() || !(t.keys || []).length) return "";
+  const a = t.auto_status || {};
+  const st = autoState(t);
+  const need = a.need ?? (t.limits || {}).auto_min ?? 0.3;
+  const best = a.best ? a.best.net : null;
+  const fill = best == null ? 0 : Math.max(0, Math.min(100, (best / need) * 100));
+  const problems = Object.entries(a.blocked_now || {}).map(([ex, why]) => `<div class="tiny down" style="margin-top:6px">⛔ ${esc(exName(ex))}: ${esc(why)}</div>`).join("");
+  const money_ = Object.entries(a.low_money || {}).map(([ex, v]) => `<div class="tiny down" style="margin-top:6px">💵 ${esc(exName(ex))}: свободно ${amount(v)} ${esc(S.ov.quote)}. Нужно $10–20</div>`).join("");
+  return `<div class="card press auto-card" data-act="why" style="margin-top:10px">
+    <div class="row between"><div class="b">⚙️ Автопилот</div><span class="pill ${st.cls}">${st.icon} ${esc(st.text)}</span></div>
+    ${t.auto && a.at ? `<div class="small muted" style="margin-top:6px">Проверка ${ago(a.at)} · циклов ${a.triangles ?? 0} · подходящих ${a.candidates ?? 0}</div>
+    <div class="meter" style="margin-top:10px"><div style="width:${fill.toFixed(0)}%"></div></div>
+    <div class="row between tiny muted" style="margin-top:4px"><span>лучший ${best == null ? "—" : pct(best, 3)}</span><span>нужно ≥ ${need}%</span></div>` : `<div class="small muted" style="margin-top:6px">${t.auto ? "Скоро первая проверка" : "Включи переключатель выше: в тесте безопасно"}</div>`}
+    ${problems}${money_}
+    <div class="tiny link" style="margin-top:8px">Почему нет сделок →</div></div>`;
+}
+
+const exName = (id) => ((S.ov.exchanges || []).find((e) => e.id === id) || {}).name || id;
+
+async function whySheet() {
+  Sheet.open("Автопилот", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Загружаю…</div>`, { full: true });
+  try {
+    const r = await api("/api/autostatus");
+    if (!Sheet.isOpen() || $("#sheetTitle").textContent !== "Автопилот") return;
+    const a = r.status || {}, s = a.stats || {}, t = tr();
+    const st = autoState(Object.assign({}, t, { auto: r.auto, auto_status: a }));
+    const rows = [];
+    for (const k of t.keys || []) {
+      const why = (a.blocked_now || {})[k.exchange], warn = (a.key_problems || {})[k.exchange];
+      const status = why ? "bad" : warn ? "warn" : "ok";
+      rows.push(`<div class="item" style="align-items:flex-start"><div class="doc-ic ${status}">${DOC_ICON[status]}</div><div class="grow"><div class="t">${esc(k.name)}</div><div class="s" style="white-space:normal">${esc(why || (warn ? warn + " (в тесте не мешает)" : "может торговать"))}${a.free && a.free[k.exchange] != null ? ` · свободно ${amount(a.free[k.exchange])} ${esc(S.ov.quote)}` : ""}</div></div></div>`);
+    }
+    const tried = (a.tried || []).map((x) => `<div class="item" style="align-items:flex-start"><div class="doc-ic ${x.executed ? "ok" : "info"}">${DOC_ICON[x.executed ? "ok" : "info"]}</div><div class="grow"><div class="t">${esc(x.path)} <span class="muted small">${esc(exName(x.exchange))} · ${pct(x.estimate, 3)}</span></div><div class="s" style="white-space:normal">${esc(x.reason || "исполнен")}</div></div></div>`).join("");
+    Sheet.body().innerHTML = `
+      <div class="row between"><span class="pill ${r.live ? "live" : "test"}">${r.live ? "Реальный" : "Тест"}</span><span class="pill ${st.cls}">${st.icon} ${esc(st.text)}</span></div>
+      ${a.reason && !a.executed ? `<div class="banner ${a.code === "no_candidates" || a.code === "moved" ? "info" : "red"}" style="margin-top:10px"><div><b>Почему нет сделки:</b> ${esc(a.reason)}</div></div>` : ""}
+      ${a.hint ? `<div class="card small" style="margin-top:10px;white-space:normal">${esc(a.hint)}</div>` : ""}
+      <div class="grid4" style="margin-top:10px">
+        <div class="stat center"><div class="v num">${s.checks ?? 0}</div><div class="k">сканов</div></div>
+        <div class="stat center"><div class="v num">${s.candidates ?? 0}</div><div class="k">подходящих</div></div>
+        <div class="stat center"><div class="v num">${s.attempts ?? 0}</div><div class="k">проверено</div></div>
+        <div class="stat center"><div class="v num up">${s.executed ?? 0}</div><div class="k">сделок</div></div>
+      </div>
+      ${a.best ? `<div class="small muted" style="margin-top:8px">Лучший цикл сейчас: <b class="${cls(a.best.net)}">${pct(a.best.net, 3)}</b> ${esc(a.best.path)}${a.best.exchange ? " · " + esc(exName(a.best.exchange)) : ""} (нужно ≥ ${a.need}%)</div>` : ""}
+      <div class="section-title">Биржи</div><div class="list">${rows.join("") || `<div class="item">Ключей нет</div>`}</div>
+      ${tried ? `<div class="section-title">Последняя проверка</div><div class="list">${tried}</div>` : ""}
+      <div class="tiny muted" style="margin-top:12px;white-space:normal">Бот покупает, только когда цикл приносит ≥ ${a.need ?? "?"}% после комиссий по свежему стакану. Если таких нет, он ждёт: это защищает деньги. Сводка приходит в чат раз в ${S.ov.settings && S.ov.settings.auto_report ? S.ov.settings.auto_report.value : 6} ч.</div>
+      <button class="btn block ghost" style="margin-top:14px" data-act="why">Обновить</button>`;
+  } catch (e) { Sheet.body().innerHTML = `<div class="banner red">❌ ${esc(e.message)}</div>`; }
+}
+
+// ---------------------------------------------------------------------------
+// Мемкоины: DexScreener + RugCheck, ссылки на GMGN и Axiom
+// ---------------------------------------------------------------------------
+
+const VERDICT = { green: ["ok", "🟢 явных флагов нет"], yellow: ["test", "🟡 осторожно"], red: ["bad", "🔴 высокий риск"] };
+
+function tokenIcon(it) {
+  if (!it.image || !/^https:\/\//.test(it.image)) return coinIcon(it.symbol);
+  return `<div class="coin" style="background:${coinColor(it.symbol)};position:relative;overflow:hidden">${esc(String(it.symbol).slice(0, 4))}<img src="${esc(it.image)}" alt="" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()"></div>`;
+}
+
+function age(h) { return h == null ? "?" : h < 1 ? `${Math.round(h * 60)} мин` : h < 48 ? `${Math.round(h)} ч` : `${Math.round(h / 24)} дн`; }
+
+function tokenCard(it, full) {
+  const v0 = VERDICT[it.verdict] || VERDICT.yellow;
+  const v = [v0[0], (it.verdict_text || v0[1]).replace("явных красных флагов нет", "явных флагов нет")];
+  const ch = it.change || {};
+  const L = it.links || {};
+  const btn = (k, label) => L[k] ? `<button class="btn sm ghost" data-act="open" data-url="${esc(L[k])}">${label}</button>` : "";
+  return `<div class="card token" style="margin-top:10px">
+    <div class="row" style="gap:10px">${tokenIcon(it)}<div class="grow" style="min-width:0"><div class="b">${esc(it.symbol)} <span class="muted small">${esc(it.chain_title)} · ${esc(it.dex)}</span></div><div class="small muted ellipsis">${esc(it.name)}</div></div>
+      <div class="r" style="text-align:right"><div class="b num">${it.price != null ? price(it.price) : "—"}</div><div class="small num ${cls(ch.h24)}">${ch.h24 != null ? pct(ch.h24, 1) : ""}</div></div></div>
+    <div class="grid4 tok-stats" style="margin-top:10px">
+      <div><div class="k">Ликвидн.</div><div class="num">$${compact(it.liquidity)}</div></div>
+      <div><div class="k">Объём 24ч</div><div class="num">$${compact(it.volume)}</div></div>
+      <div><div class="k">Капитал.</div><div class="num">$${compact(it.mcap || it.fdv)}</div></div>
+      <div><div class="k">Возраст</div><div class="num">${age(it.age_h)}</div></div>
+    </div>
+    <div class="row between" style="margin-top:10px"><span class="pill ${v[0]}">${v[1]}</span><span class="tiny muted">🟢 ${it.buys} / 🔴 ${it.sells} за 24ч</span></div>
+    ${it.rug ? `<div class="small" style="margin-top:8px">RugCheck: риск <b>${it.rug.score}/100</b> (${esc(it.rug.label)})${it.rug.lp_locked != null ? ` · ликвидность заблокирована ${Math.round(it.rug.lp_locked)}%` : ""}</div>` : ""}
+    ${full && (it.flags || []).length ? `<div class="col" style="gap:4px;margin-top:8px">${it.flags.slice(0, 5).map((f) => `<div class="tiny" style="color:var(--yellow)">⚠️ ${esc(f)}</div>`).join("")}</div>` : ""}
+    ${full ? `<div class="tiny muted mono" style="margin-top:8px;word-break:break-all">${esc(it.address)}</div>` : ""}
+    <div class="row" style="gap:6px;margin-top:10px;flex-wrap:wrap">${btn("gmgn", "GMGN")}${btn("axiom", "Axiom")}${btn("dexscreener", "DexScreener")}${it.chain === "solana" && !it.rug ? `<button class="btn sm ghost" data-act="dex-rug" data-v="${esc(it.address)}">🛡 RugCheck</button>` : ""}</div>
+  </div>`;
+}
+
+function dexSheet(tab = "hot") {
+  S.dexTab = tab;
+  Sheet.open("Мемкоины", `
+    <div class="seg"><button data-act="dex-tab" data-v="hot" class="${tab === "hot" ? "on" : ""}">🔥 Тренды</button><button data-act="dex-tab" data-v="search" class="${tab === "search" ? "on" : ""}">🔎 Поиск</button></div>
+    ${tab === "search" ? `<div class="row" style="gap:8px;margin-top:10px"><input id="dexQ" class="input grow" placeholder="BONK или адрес токена" autocomplete="off" value="${esc(store.get("dexQ", ""))}"><button class="btn primary" data-act="dex-go">Найти</button></div>
+    <div class="chips" style="margin-top:10px">${["BONK", "WIF", "POPCAT", "TRUMP", "PENGU"].map((x) => `<button class="chip" data-act="dex-q" data-v="${x}">${x}</button>`).join("")}</div>` :
+    `<div class="row between card" style="margin-top:10px"><div><div class="b">📡 Радар в чат</div><div class="tiny muted">Новые токены Solana: ликвидность ≥ $30K, объём ≥ $100K, RugCheck ≤ 30</div></div><label class="switch"><input type="checkbox" data-act="radar" ${S.radar ? "checked" : ""}><span></span></label></div>`}
+    <div id="dexBox"><div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Загружаю…</div></div>
+    <div class="tiny muted" style="margin-top:12px;white-space:normal">Бот мемкоины не покупает: у GMGN, Axiom и FOMO нет официального API, а для торговли с кошелька нужен приватный ключ. Открывай токен в GMGN/Axiom кнопкой. Большинство мемкоинов падает почти до нуля.</div>`, { full: true });
+  if (tab === "hot") loadDexHot(); else if (store.get("dexQ", "")) loadDexSearch(); else $("#dexBox").innerHTML = "";
+}
+
+async function loadDexHot() {
+  try {
+    const r = await api("/api/dex/hot");
+    S.radar = r.radar;
+    const box = $("#dexBox"); if (!box) return;
+    const sw = $('[data-act="radar"]'); if (sw) sw.checked = !!r.radar;
+    box.innerHTML = r.items.length ? r.items.map((it) => tokenCard(it, false)).join("") : `<div class="card empty">Сейчас трендов нет</div>`;
+  } catch (e) { const box = $("#dexBox"); if (box) box.innerHTML = `<div class="banner red">❌ ${esc(e.message)}</div>`; }
+}
+
+async function loadDexSearch(btn) {
+  const q = (($("#dexQ") || {}).value || "").trim();
+  if (!q) { toast("Введи название или адрес", true); return; }
+  store.set("dexQ", q);
+  if (btn) busy(btn, true);
+  $("#dexBox").innerHTML = `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Ищу «${esc(q)}»…</div>`;
+  try {
+    const r = await api("/api/dex/search?q=" + encodeURIComponent(q));
+    const box = $("#dexBox"); if (!box) return;
+    box.innerHTML = r.items.length ? r.items.map((it, i) => (i === 1 ? `<div class="tiny muted" style="margin-top:12px">Ещё с таким названием. Проверяй адрес: скамеры копируют тикеры</div>` : "") + tokenCard(it, i === 0)).join("") : `<div class="card empty">Ничего не нашёл</div>`;
+  } catch (e) { $("#dexBox").innerHTML = `<div class="banner red">❌ ${esc(e.message)}</div>`; } finally { if (btn) busy(btn, false); }
+}
+
+async function dexRug(mint, btn) {
+  busy(btn, true);
+  try {
+    const r = await api("/api/dex/rug?mint=" + encodeURIComponent(mint));
+    const card = btn.closest(".token");
+    if (card && r.item) card.outerHTML = tokenCard(r.item, true);
+  } catch (e) { fail(e); busy(btn, false); }
+}
+
+async function toggleRadar(input) {
+  try { const r = await api("/api/radar", { on: input.checked }); S.radar = r.radar; toast(r.radar ? "📡 Радар включён: новые токены придут в чат" : "Радар выключен"); } catch (e) { input.checked = !input.checked; fail(e); }
+}
+
+function openLink(url) {
+  try { tg.openLink(url); } catch { window.open(url, "_blank", "noopener"); }
+}
+
+// ---------------------------------------------------------------------------
+// Т-Инвестиции (только просмотр)
+// ---------------------------------------------------------------------------
+
+const RUB = (v, cur = "rub") => `${groupInt(Math.round(v).toString())}${NB}${{ rub: "₽", usd: "$", eur: "€", cny: "¥" }[cur] || cur.toUpperCase()}`;
+const TI_TYPES = { share: "Акции", bond: "Облигации", etf: "Фонды", currency: "Валюта", futures: "Фьючерсы", option: "Опционы", sp: "Ноты" };
+
+async function tinvestSheet(force = false) {
+  Sheet.open("Т-Инвестиции", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Загружаю портфель…</div>`, { full: true });
+  try {
+    const r = await api("/api/tinvest" + (force ? "?force=1" : ""));
+    if (!Sheet.isOpen() || $("#sheetTitle").textContent !== "Т-Инвестиции") return;
+    if (!r.configured) {
+      Sheet.body().innerHTML = `<div class="card"><div class="b">Подключить портфель (только просмотр)</div><ol class="small" style="padding-left:18px;margin:8px 0 0;line-height:1.55">
+        <li>Т-Банк → Инвестиции → ⚙️ Настройки → «Токены T-Invest API»</li>
+        <li>«Создать токен» → доступ <b>«Только чтение»</b> → все счета → скопировать</li>
+        <li>Render → сервис → Environment → <b>TINVEST_TOKEN</b> = токен → Save</li>
+        <li>Через минуту открой этот экран снова</li></ol>
+        <div class="tiny muted" style="margin-top:10px">🔒 Токен не присылай в чат. «Только чтение» не даёт выставлять заявки и выводить деньги.</div></div>`;
+      return;
+    }
+    if (r.error) { Sheet.body().innerHTML = `<div class="banner red"><div>❌ ${esc(r.error)}</div></div>`; return; }
+    Sheet.body().innerHTML = `
+      ${r.accounts.length > 1 ? `<div class="stat"><div class="k">Всего</div><div class="v num">${RUB(r.total)}</div></div>` : ""}
+      ${r.accounts.map((a) => a.error ? `<div class="banner red" style="margin-top:10px"><div><b>${esc(a.name)}</b>: ${esc(a.error)}</div></div>` : `
+        <div class="card" style="margin-top:10px">
+          <div class="row between"><div><div class="b">${esc(a.name)}</div><div class="tiny muted">${esc(a.type || "")}</div></div>
+          <div style="text-align:right"><div class="b num">${RUB(a.total, a.currency)}</div><div class="small num ${cls(a.yield_pct)}">${pct(a.yield_pct)} всего${a.daily_yield != null ? ` · <span class="${cls(a.daily_yield)}">${a.daily_yield > 0 ? "+" : ""}${RUB(a.daily_yield, a.currency)} день</span>` : ""}</div></div></div>
+          ${Object.keys(a.by_type || {}).length ? `<div class="chips" style="margin-top:10px;flex-wrap:wrap">${Object.entries(a.by_type).map(([k, v]) => `<span class="chip">${esc(TI_TYPES[k] || k)} ${RUB(v, a.currency)}</span>`).join("")}</div>` : ""}
+        </div>
+        <div class="list" style="margin-top:8px">${a.positions.slice(0, 30).map((p) => `<div class="item">${coinIcon(p.ticker)}<div class="grow"><div class="t">${esc(p.ticker)} <span class="muted small">${esc(TI_TYPES[p.type] || p.type)}</span></div><div class="s num">${amount(p.quantity)} шт × ${price(p.price)}</div></div><div class="r"><div class="b num">${RUB(p.value, p.currency)}</div><div class="s num ${cls(p.yield)}">${p.yield ? (p.yield > 0 ? "+" : "") + RUB(p.yield, p.currency) + (p.yield_pct != null ? ` (${pct(p.yield_pct, 1)})` : "") : ""}</div></div></div>`).join("")}</div>`).join("")}
+      <button class="btn block ghost" style="margin-top:14px" data-act="tinvest-refresh">Обновить</button>
+      <div class="tiny muted center" style="margin-top:8px">Только просмотр. Заявки бот в Т-Инвестициях не выставляет.</div>`;
+  } catch (e) { Sheet.body().innerHTML = `<div class="banner red"><div>❌ ${esc(e.message)}</div></div>`; }
+}
+
 const RENDER = { home: renderHome, market: renderMarket, signals: renderSignals, demo: renderDemo, wallet: renderWallet };
 let lastSig = {};
 function renderActive(force = false) {
@@ -1284,6 +1487,15 @@ document.addEventListener("click", async (e) => {
     case "price-go": loadPrices(el); break;
     case "price-coin": $("#priceCoin").value = d.v; loadPrices(); break;
     case "phantom": haptic.tap(); phantomSheet(); loadPhantom(); break;
+    case "why": haptic.tap(); whySheet(); break;
+    case "dex": haptic.tap(); dexSheet(d.v || "hot"); break;
+    case "dex-tab": haptic.sel(); dexSheet(d.v); break;
+    case "dex-go": loadDexSearch(el); break;
+    case "dex-q": $("#dexQ").value = d.v; loadDexSearch(); break;
+    case "dex-rug": dexRug(d.v, el); break;
+    case "open": haptic.tap(); openLink(d.url); break;
+    case "tinvest": haptic.tap(); tinvestSheet(); break;
+    case "tinvest-refresh": haptic.tap(); tinvestSheet(true); break;
     case "phantom-save": savePhantom(el); break;
     case "phantom-off": savePhantom(el, true); break;
     case "phantom-refresh": haptic.tap(); loadPhantom(true); break;
@@ -1348,6 +1560,7 @@ document.addEventListener("click", async (e) => {
 document.addEventListener("change", (e) => {
   const el = e.target;
   if (el.dataset.act === "auto") toggleAuto(el);
+  else if (el.dataset.act === "radar") toggleRadar(el);
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.set) saveSetting(el);
 });

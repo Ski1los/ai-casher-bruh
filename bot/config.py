@@ -49,6 +49,7 @@ class Settings:
     daily_trades: float = 30  # максимум сделок бота за сутки
     auto_min_profit_percent: float = 0.3  # автоторговля берёт только циклы с такой прибылью по стакану
     max_slippage_percent: float = 1.0  # если цена ушла хуже предпросмотра больше чем на столько, ордер отменяется
+    auto_report_hours: float = 6.0  # сводка автоторговли владельцу раз в N часов (0 = не присылать)
 
 
 # Что можно менять командой /set: имя -> (поле, описание)
@@ -68,6 +69,7 @@ EDITABLE = {
     "daily_trades": ("daily_trades", "торговля: максимум сделок бота за сутки"),
     "auto_min": ("auto_min_profit_percent", "автоторговля: мин. прибыль цикла по стакану, %"),
     "slippage": ("max_slippage_percent", "торговля: допустимое ухудшение цены, %"),
+    "auto_report": ("auto_report_hours", "автоторговля: сводка раз в N часов (0 = выкл)"),
 }
 
 # Эти лимиты риска ИИ предлагать не может: их меняет только человек командой /set
@@ -90,6 +92,7 @@ BOUNDS = {
     "daily_trades": (1.0, 1000.0),
     "auto_min": (0.05, 10.0),
     "slippage": (0.1, 10.0),
+    "auto_report": (0.0, 168.0),
 }
 
 
@@ -133,6 +136,7 @@ def load_settings() -> Settings:
         daily_trades=_float("DAILY_TRADES", 30),
         auto_min_profit_percent=_float("AUTO_MIN_PROFIT_PERCENT", 0.3),
         max_slippage_percent=_float("MAX_SLIPPAGE_PERCENT", 1),
+        auto_report_hours=_float("AUTO_REPORT_HOURS", 6),
     )
 
 
