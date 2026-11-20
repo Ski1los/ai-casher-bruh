@@ -32,7 +32,8 @@ from . import extras_ui, market_ui, trading_ui
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
-from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start_health_server, version_text
+from .cloud import (TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
+                    version_text)
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
@@ -1484,6 +1485,20 @@ class ArbitrageBot:
                 log.exception("Ошибка проверки ключей")
             await asyncio.sleep(KEYS_WATCH_SEC)
 
+    async def _get_me_with_retry(self, tries: int = 8):
+        """Связь с Telegram при старте иногда пропадает на секунды: не падаем сразу, пробуем ещё."""
+        from aiogram.exceptions import TelegramNetworkError, TelegramServerError
+
+        for attempt in range(tries):
+            try:
+                return await self.bot.get_me()
+            except (TelegramNetworkError, TelegramServerError) as e:
+                if attempt == tries - 1:
+                    raise
+                set_status("starting", "Нет связи с Telegram, пробую снова…")
+                log.warning("Нет связи с Telegram (%s), попытка %d из %d", e, attempt + 1, tries)
+                await asyncio.sleep(min(5 * (attempt + 1), 30))
+
     async def run(self) -> None:
         tasks: list[asyncio.Task] = []
         runner = None
@@ -1496,7 +1511,8 @@ class ArbitrageBot:
                 tasks.append(asyncio.create_task(self_ping_loop(public_url())))
 
         try:
-            me = await self.bot.get_me()
+            me = await self._get_me_with_retry()
+            set_status("running", bot=me.username)
             await self.bot.set_my_commands(
                 [
                     BotCommand(command="scan", description="Просканировать сейчас"),
