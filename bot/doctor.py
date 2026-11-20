@@ -16,8 +16,9 @@ from typing import TYPE_CHECKING
 
 import ccxt.async_support as ccxt
 
+from .cloud import version_text
 from .memory import RENDER_RAM_MB, memory_line, rss_mb
-from .trading import AUTO_MIN_FREE_USD, STABLES, days_left, human_error, is_geo_block
+from .trading import STABLES, days_left, human_error, is_geo_block
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -162,10 +163,11 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                 rows = await asyncio.wait_for(t.balances(name), EXCHANGE_TIMEOUT)
                 total = sum(r[3] or 0 for r in rows)
                 checks.append(Check("Ключи", title, "ok", f"ключ работает, на торговом счёте ≈ ${total:.2f}"))
-                if t.state.live and total < AUTO_MIN_FREE_USD:
-                    checks.append(Check("Ключи", f"{title}: деньги", "warn",
-                                        f"≈ ${total:.2f} мало: биржа не примет ордера меньше ~$1–5 на каждый шаг, "
-                                        f"автоторговля будет пропускать циклы. Пополни торговый счёт до $10–20"))
+                need = t.min_start_usd(name)
+                if total < need:
+                    checks.append(Check("Ключи", f"{title}: деньги", "warn" if t.state.live else "info",
+                                        f"≈ ${total:.2f} на торговом счёте, а для цикла из трёх шагов нужно от ${need:.2f} "
+                                        f"(биржа принимает ордер через API от $5 на каждый шаг). Пополни торговый счёт до $10–20"))
             except Exception as e:
                 checks.append(Check("Ключи", title, "warn", f"ключ принят, но баланс не прочитан: {human_error(e)}"))
             checks += _key_info_checks(b, name, t.key_info.get(name, {}), now)
@@ -197,6 +199,7 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
         checks.append(Check("Сервис", "ИИ", "ok", f"подключён: {titles}"))
     else:
         checks.append(Check("Сервис", "ИИ", "info", "не подключён (по желанию): бесплатный ключ Groq, см. /ai"))
+    checks.append(Check("Сервис", "Версия бота", "info", version_text()))
     mem = rss_mb()
     checks.append(Check("Сервис", "Память", "ok" if mem < RENDER_RAM_MB * 0.75 else "warn",
                         memory_line() + " бесплатного Render"

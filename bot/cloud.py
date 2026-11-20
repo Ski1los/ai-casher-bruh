@@ -25,6 +25,13 @@ log = logging.getLogger(__name__)
 BACKUP_FILENAME = "bot_state.json"
 BACKUP_CAPTION = "💾 Резервная копия бота (демо-счёт и настройки). Не открепляй это сообщение."
 SELF_PING_SEC = 10 * 60
+BOT_VERSION = "9"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
+
+
+def version_text() -> str:
+    """«v9 (adc7bd5)»: номер версии и коммит, который Render развернул (RENDER_GIT_COMMIT)."""
+    commit = os.getenv("RENDER_GIT_COMMIT", "").strip()[:7]
+    return f"v{BOT_VERSION}" + (f" ({commit})" if commit else "")
 
 
 # ---------------------------------------------------------------------------

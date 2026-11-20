@@ -32,7 +32,7 @@ from . import extras_ui, market_ui, trading_ui
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
-from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start_health_server
+from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start_health_server, version_text
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
@@ -642,7 +642,7 @@ class ArbitrageBot:
     def _auto_context(self) -> dict:
         st = self.trader.auto_status_dict()
         return {k: st.get(k) for k in ("at", "need", "triangles", "candidates", "tried", "reason", "best", "free",
-                                       "low_money", "blocked_now", "key_problems", "hint") if st.get(k) not in (None, {}, [])} | {
+                                       "low_money", "need_usd", "funding", "blocked_now", "key_problems", "hint") if st.get(k) not in (None, {}, [])} | {
             "stats": {k: st["stats"][k] for k in ("checks", "attempts", "executed", "best")}}
 
     def _trading_context(self) -> dict:
@@ -897,7 +897,7 @@ class ArbitrageBot:
             await message.answer(
                 f"Последний скан: {ago} с назад. Межбиржевых связок: {len(result.opportunities)}, "
                 f"треугольников: {len(result.triangles)}.\n"
-                f"Автосигналы в этом чате: {auto}\n\n" + format_footer(result, self.scanner)
+                f"Автосигналы в этом чате: {auto}\nВерсия бота: {version_text()}\n\n" + format_footer(result, self.scanner)
             )
 
         @dp.message(Command("auto_on"))

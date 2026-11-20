@@ -1233,6 +1233,7 @@ function autoState(t) {
   const blocked = Object.keys(a.blocked_now || {});
   if (!t.auto) return { cls: "gray", icon: "⏸", text: "выключена" };
   if (blocked.length && blocked.length >= (t.working || []).length) return { cls: "bad", icon: "⛔", text: "не может торговать" };
+  if (a.funding && Object.keys(a.funding).length) return { cls: "bad", icon: "📥", text: "деньги на Funding" };
   if (a.low_money && Object.keys(a.low_money).length) return { cls: "bad", icon: "💵", text: "мало денег на счёте" };
   if (!a.at) return { cls: "gray", icon: "⏳", text: "ждёт первого скана" };
   if (a.executed) return { cls: "ok", icon: "✅", text: "исполнила цикл" };
@@ -1248,7 +1249,10 @@ function autoCard() {
   const best = a.best ? a.best.net : null;
   const fill = best == null ? 0 : Math.max(0, Math.min(100, (best / need) * 100));
   const problems = Object.entries(a.blocked_now || {}).map(([ex, why]) => `<div class="tiny down" style="margin-top:6px">⛔ ${esc(exName(ex))}: ${esc(why)}</div>`).join("");
-  const money_ = Object.entries(a.low_money || {}).map(([ex, v]) => `<div class="tiny down" style="margin-top:6px">💵 ${esc(exName(ex))}: свободно ${amount(v)} ${esc(S.ov.quote)}. Нужно $10–20</div>`).join("");
+  const funding = a.funding || {};
+  const money_ = Object.entries(a.low_money || {}).map(([ex, v]) => funding[ex]
+    ? `<div class="tiny down" style="margin-top:6px">📥 ${esc(exName(ex))}: $${amount(funding[ex])} лежат на счёте Funding. Переведи на торговый счёт (Активы → Перевод)</div>`
+    : `<div class="tiny down" style="margin-top:6px">💵 ${esc(exName(ex))}: на торговом счёте ${amount(v)} ${esc(S.ov.quote)}, для цикла нужно от $${amount((a.need_usd || {})[ex] || 5)}. Лучше $10–20</div>`).join("");
   return `<div class="card press auto-card" data-act="why" style="margin-top:10px">
     <div class="row between"><div class="b">⚙️ Автопилот</div><span class="pill ${st.cls}">${st.icon} ${esc(st.text)}</span></div>
     ${t.auto && a.at ? `<div class="small muted" style="margin-top:6px">Проверка ${ago(a.at)} · циклов ${a.triangles ?? 0} · подходящих ${a.candidates ?? 0}</div>
@@ -1271,7 +1275,7 @@ async function whySheet() {
     for (const k of t.keys || []) {
       const why = (a.blocked_now || {})[k.exchange], warn = (a.key_problems || {})[k.exchange];
       const status = why ? "bad" : warn ? "warn" : "ok";
-      rows.push(`<div class="item" style="align-items:flex-start"><div class="doc-ic ${status}">${DOC_ICON[status]}</div><div class="grow"><div class="t">${esc(k.name)}</div><div class="s" style="white-space:normal">${esc(why || (warn ? warn + " (в тесте не мешает)" : "может торговать"))}${a.free && a.free[k.exchange] != null ? ` · свободно ${amount(a.free[k.exchange])} ${esc(S.ov.quote)}` : ""}</div></div></div>`);
+      rows.push(`<div class="item" style="align-items:flex-start"><div class="doc-ic ${status}">${DOC_ICON[status]}</div><div class="grow"><div class="t">${esc(k.name)}</div><div class="s" style="white-space:normal">${esc(why || (warn ? warn + " (в тесте не мешает)" : "может торговать"))}${a.free && a.free[k.exchange] != null ? ` · на торговом счёте ${amount(a.free[k.exchange])} ${esc(S.ov.quote)}` : ""}${a.funding && a.funding[k.exchange] ? ` · на Funding $${amount(a.funding[k.exchange])}` : ""}</div></div></div>`);
     }
     const tried = (a.tried || []).map((x) => `<div class="item" style="align-items:flex-start"><div class="doc-ic ${x.executed ? "ok" : "info"}">${DOC_ICON[x.executed ? "ok" : "info"]}</div><div class="grow"><div class="t">${esc(x.path)} <span class="muted small">${esc(exName(x.exchange))} · ${pct(x.estimate, 3)}</span></div><div class="s" style="white-space:normal">${esc(x.reason || "исполнен")}</div></div></div>`).join("");
     Sheet.body().innerHTML = `
