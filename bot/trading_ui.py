@@ -20,6 +20,7 @@ from . import updater
 from .cloud import version_text
 from .trading import (KEY_PAGES, OrderPlan, TradeError, fmt_amount, human_error,
                       key_trade_problem)
+from .scalper import STRATEGIES, is_good
 from .triangular import TriOpportunity
 
 if TYPE_CHECKING:
@@ -72,7 +73,7 @@ def panel_keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Балансы", callback_data="tr:bal"),
          InlineKeyboardButton(text="📋 Ордера", callback_data="tr:orders")],
-        [InlineKeyboardButton(text="🎯 Режим $5: ловец откатов" + (" 🟢" if b.scalper.on else ""), callback_data="sc:show")],
+        [InlineKeyboardButton(text="🤖 Автопилот (режим $5)" + (" 🟢" if b.scalper.on else ""), callback_data="sc:show")],
         [InlineKeyboardButton(text="⏸ Выключить треугольники" if st.auto else "⚙️ Автоторговля треугольниками",
                               callback_data="tr:auto")],
         [InlineKeyboardButton(text="🧪 Вернуть тестовый режим" if st.live else "🔴 Включить реальный режим",
@@ -101,8 +102,11 @@ LIVE_WARNING = """\
 
 def scalp_keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
     sc = b.scalper
-    rows = [[InlineKeyboardButton(text="⏸ Выключить режим $5" if sc.on else "▶️ Включить режим $5",
-                                  callback_data="sc:off" if sc.on else "sc:on")],
+    coins = sc.st["use_coins"]
+    rows = [[InlineKeyboardButton(text="⏸ Выключить автопилот" if sc.on else "🤖 Включить автопилот",
+                                  callback_data="sc:off" if sc.on else "ap:on")],
+            [InlineKeyboardButton(text=("✅" if coins else "⬜️") + " Монеты в дело: продавать лежащие монеты в USDT",
+                                  callback_data="sc:coins")],
             [InlineKeyboardButton(text="📊 Проверка на истории", callback_data="sc:bt"),
              InlineKeyboardButton(text="🔄 Обновить", callback_data="sc:show")]]
     if sc.positions:
@@ -148,8 +152,18 @@ async def scalp_preflight(b: ArbitrageBot) -> list[str]:
             out.append(f"{title}: не смог прочитать баланс ({human_error(e)})")
             continue
         if free < 5:
+            await b.scalper._fresh_balances(name, 0)
+            idle = b.scalper._idle_coins_text(name)
             elsewhere = await t.other_accounts(name)
-            if sum(elsewhere.values()) >= 1:
+            if idle:
+                if not b.scalper.st["use_coins"]:
+                    out.append(f"{title}: USDT {free:.2f}, а деньги лежат в монетах ({idle}). Включи «Монеты в дело» "
+                               "в /scalp — бот сам продаст их в USDT и будет ими торговать")
+                elif not t.state.live:
+                    out.append(f"{title}: в реальном режиме «Монеты в дело» продаст {idle} в USDT и пустит в торговлю")
+                else:
+                    out.append(f"{title}: «Монеты в дело» продаст {idle} в USDT на ближайшем шаге (до 30 с)")
+            elif sum(elsewhere.values()) >= 1:
                 out.append(t.where_money_text(name, elsewhere, free))
             else:
                 out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}, а биржа принимает ордер от $5. "
@@ -333,13 +347,20 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
             todo.append(f"на {title} отменить старый ордер: /orders → ❌ (деньги вернутся на счёт)")
         else:
             coin = await _stuck_coin(ex_name, quote)
-            if coin:
+            if coin and sc.st["use_coins"] and not coin[2]:
+                ready += 1
+                lines.append(f"2️⃣ ✅ {title}: ≈${coin[1]:.2f} в {html.escape(coin[0])} — «Монеты в дело» включено, "
+                             + ("бот сам продаст в USDT и начнёт торговать" if t.state.live
+                                else "в реальном режиме бот сам продаст в USDT"))
+            elif coin:
                 c, usd, locked = coin
                 lines.append(f"2️⃣ ❌ {title}: {free:.2f} {quote} свободно, а <b>≈${usd:.2f} лежит в {html.escape(c)}</b> "
                              "(купил не режим $5, он такую монету не ведёт)")
-                tips.append((f"на {title} {html.escape(c)} занят ордером: сначала /orders → отменить, потом " if locked
-                             else f"на {title} вернуть деньги в USDT: ")
-                            + f"<code>/sell {ex_name} {html.escape(c)} all</code> (или в приложении: Спот → {html.escape(c)}/USDT → Продать по рынку)")
+                tips.append(f"на {title} {html.escape(c)} занят ордером: сначала /orders → отменить, потом "
+                            f"<code>/sell {ex_name} {html.escape(c)} all</code>" if locked
+                            else f"на {title} пустить {html.escape(c)} в торговлю: кнопка «🤖 Включить автопилот» "
+                            "(включит «Монеты в дело», бот сам продаст в USDT) или вручную "
+                            f"<code>/sell {ex_name} {html.escape(c)} all</code>")
             else:
                 lines.append(f"2️⃣ ➖ {title}: на торговом счёте {free:.2f} {quote} — меньше $5, эта биржа будет ждать")
                 low.append(title)
@@ -358,18 +379,20 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
             ranking = await sc.rank(name)
         except Exception:
             ranking = []
-        good = [r for r in ranking if r["net_pct"] > 0]
+        good = [r for r in ranking if is_good(r)]
         if good:
-            top = ", ".join(f"{html.escape(r['symbol'].split('/')[0])} {r['net_pct']:+.1f}%" for r in good[:3])
-            lines.append(f"3️⃣ ✅ Проверка на истории: в плюсе {len(good)} монет ({top})")
+            top = ", ".join(f"{html.escape(r['symbol'].split('/')[0])} {STRATEGIES.get(r.get('strategy') or 'dip', ('',))[0]} "
+                            f"{r['net_pct']:+.1f}%" for r in good[:3])
+            lines.append(f"3️⃣ ✅ Проверка на истории (3 стратегии, с проверкой на новых данных): прошли {len(good)} "
+                         f"монет ({top})")
         elif ranking:
-            lines.append("3️⃣ ⏳ Проверка на истории: сейчас ни одна монета не в плюсе — бот будет ждать, "
+            lines.append("3️⃣ ⏳ Проверка на истории: сейчас ни одна монета не прошла — бот будет ждать, "
                          "это нормально и бережёт деньги")
         else:
             lines.append("3️⃣ ⚠️ Биржа пока не отдала свечи для проверки, попробую позже")
 
     # 4. режим $5 и реальный режим
-    lines.append(f"4️⃣ {'✅' if sc.on else '⬜️'} Режим $5 (ловец откатов): {'включён' if sc.on else 'выключен'}"
+    lines.append(f"4️⃣ {'✅' if sc.on else '⬜️'} Автопилот (режим $5): {'включён' if sc.on else 'выключен'}"
                  + (f" — {html.escape(sc.last_reason)}" if sc.on and sc.last_reason else ""))
     lines.append(f"5️⃣ {'🔴' if t.state.live else '🧪'} Режим: "
                  + ("<b>реальный</b> — ордера уходят на биржу" if t.state.live else "<b>тест</b> — ордера не отправляются"))
@@ -386,7 +409,7 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
         lines.append("<b>Осталось сделать:</b>")
         lines += [f"• {x}" for x in todo]
     elif not sc.on:
-        lines.append("✅ Всё готово. Включи режим $5: сначала в тесте, посмотри пару сделок, потом реальный режим.")
+        lines.append("✅ Всё готово. Нажми «🤖 Включить автопилот»: бот сам выберет монету и стратегию и будет торговать.")
     elif not t.state.live:
         lines.append("✅ Режим $5 работает в тесте. Когда увидишь, как он торгует, включи реальный режим.")
     else:
@@ -396,7 +419,7 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
     if not t.creds or any(st != "ok" for st in t.key_status.values()):
         rows.append([InlineKeyboardButton(text="🔑 Как подключить ключ", callback_data="su:keys")])
     if name and not sc.on:
-        rows.append([InlineKeyboardButton(text="▶️ Включить режим $5", callback_data="sc:on")])
+        rows.append([InlineKeyboardButton(text="🤖 Включить автопилот", callback_data="ap:on")])
     if name and sc.on and not t.state.live and not todo:
         rows.append([InlineKeyboardButton(text="🔴 Включить реальный режим", callback_data="tr:live")])
     rows.append([InlineKeyboardButton(text="📊 Проверка на истории", callback_data="sc:bt"),
@@ -698,6 +721,44 @@ def register(b: ArbitrageBot) -> None:
             return
         await b._send(chat_id, sc.backtest_text(name))
 
+    async def autopilot(chat_id: int, on: bool = True) -> None:
+        """Одна кнопка: режим $5 + «Монеты в дело». Реальные деньги — только после отдельного подтверждения."""
+        sc = b.scalper
+        if not on:
+            await toggle_scalp(chat_id, False)
+            return
+        if not b.trader.working:
+            await b._send(chat_id, "Для автопилота нужен рабочий ключ биржи (права «Чтение + Спот торговля»): /keys")
+            return
+        sc.st["use_coins"] = True
+        if sc.on:
+            await after_change()
+            await b._refresh_balances()
+            await b._send(chat_id, "🤖 Автопилот уже работает. «Монеты в дело» включено.\n\n" + sc.status_text(),
+                          scalp_keyboard(b))
+        else:
+            await toggle_scalp(chat_id, True)
+        if not b.trader.state.live:
+            s = b.settings
+            await b._send(chat_id, "🧪 Сейчас автопилот торгует <b>в тесте</b>: всё как по-настоящему, но ордера не уходят. "
+                                   "Можно понаблюдать пару сделок, а можно сразу включить реальные деньги:\n\n"
+                                   + LIVE_WARNING.format(max_trade=s.max_trade_usd, daily=s.daily_trades,
+                                                         loss=s.daily_loss_usd), live_keyboard())
+
+    @dp.message(Command("autopilot", "avtopilot", "pilot"))
+    async def cmd_autopilot(message: Message, command: CommandObject) -> None:
+        if not await owner_only(message):
+            return
+        arg = (command.args or "").strip().lower()
+        await autopilot(message.chat.id, arg not in ("off", "0", "выкл", "нет"))
+
+    @dp.callback_query(F.data.startswith("ap:"))
+    async def cb_autopilot(cb: CallbackQuery) -> None:
+        if not await cb_owner(cb):
+            return
+        await cb.answer()
+        await autopilot(chat_of(cb), cb.data == "ap:on")
+
     @dp.message(Command("scalp", "five", "dip"))
     async def cmd_scalp(message: Message, command: CommandObject) -> None:
         if not await owner_only(message):
@@ -726,6 +787,15 @@ def register(b: ArbitrageBot) -> None:
             await toggle_scalp(chat_id, False)
         elif action == "bt":
             await scalp_backtest(chat_id)
+        elif action == "coins":
+            st = b.scalper.st
+            st["use_coins"] = not st["use_coins"]
+            await after_change()
+            await b._send(chat_id, ("🪙 <b>Монеты в дело: включено.</b> Если на счёте мало USDT, а монета (например, SOL) "
+                                    "лежит без дела и стоит больше минимального ордера, бот продаст её по рынку в USDT "
+                                    "и будет торговать этими деньгами. Только в реальном режиме; монету из открытой "
+                                    "сделки не трогает." if st["use_coins"] else
+                                    "🪙 Монеты в дело: выключено. Монеты на счёте бот не трогает."), scalp_keyboard(b))
         elif action == "sell":
             try:
                 text = await b.scalper.sell_now()

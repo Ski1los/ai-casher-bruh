@@ -531,7 +531,7 @@ function renderHome() {
     ${hero.html}
     <div class="grid2" style="margin-top:10px">
       <div class="stat"><div class="k">Сегодня</div><div class="v num ${cls(t.today ? t.today.pnl : 0)}">${money(t.today ? t.today.pnl : 0, { sign: true })}</div><div class="small muted">сделок: ${t.today ? t.today.trades : 0} из ${t.limits ? t.limits.daily_trades : "—"}</div></div>
-      <div class="stat"><div class="row between"><div class="k">Автоторговля</div>
+      <div class="stat"><div class="row between"><div class="k">Треугольники</div>
         <label class="switch"><input type="checkbox" data-act="auto" ${t.auto ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
         <div class="small muted" style="margin-top:6px">${t.auto ? (t.live ? "🔴 реально" : "🧪 в тесте") + `, от ${t.limits.auto_min}%` : "треугольники, по стакану"}</div></div>
     </div>
@@ -554,7 +554,7 @@ function renderHome() {
       <div class="action" data-act="dex" data-v="hot"><div class="ic">${ICON.dex}</div>Мемкоины</div>
       <div class="action" data-act="dex" data-v="search"><div class="ic">${ICON.fire}</div>DEX-поиск</div>
       <div class="action" data-act="tinvest"><div class="ic">${ICON.bank}</div>Т-Инвест</div>
-      <div class="action" data-act="why"><div class="ic">${ICON.pilot}</div>Автопилот</div>
+      <div class="action" data-act="pilot"><div class="ic">${ICON.pilot}</div>Автопилот</div>
     </div>
     <div class="section-title">Лучшие сигналы <a data-act="goto" data-tab="signals">Все</a></div>
     ${sigs.length ? `<div class="list">${sigs.map(([s, k]) => signalMini(s, k)).join("")}</div>` : `<div class="card empty"><div class="e">🔍</div>${sc ? "Прибыльных связок сейчас нет. Это нормально: рынок эффективен." : "Сканирований ещё не было"}<div style="margin-top:12px"><button class="btn primary sm" data-act="scan">Сканировать</button></div></div>`}
@@ -1159,6 +1159,7 @@ async function toggleLive(input) {
     toast(r.live ? "🔴 Реальный режим включён" : "🧪 Тестовый режим");
     renderHeader(); renderActive(true);
     if (Sheet.isOpen() && $("#sheetTitle").textContent === "Настройки") settingsSheet();
+    if (Sheet.isOpen() && $("#sheetTitle").textContent === "Автопилот") pilotSheet();
   } catch (e) { fail(e); }
 }
 
@@ -1174,31 +1175,89 @@ async function toggleAuto(input) {
 
 async function toggleScalp(input) {
   const on = input.checked;
-  if (on && tr().live && !(await confirmBox("Включить режим $5 в РЕАЛЬНОМ режиме? Бот сам купит монету на откате на свободные USDT и выставит продажу с прибылью. Прибыль не гарантирована."))) { input.checked = false; return; }
+  if (on && tr().live && !(await confirmBox("Включить автопилот в РЕАЛЬНОМ режиме? Бот сам купит монету по сигналу на свободные USDT и выставит продажу с прибылью. Прибыль не гарантирована."))) { input.checked = false; return; }
   try {
     const r = await api("/api/scalp", { on });
     S.ov.trading.scalp = r.scalp; S.ov.trading.auto = r.auto;
-    toast(on ? "🎯 Режим $5 включён" : "⏸ Режим $5 выключен");
+    toast(on ? "🤖 Автопилот включён" : "⏸ Автопилот выключен");
     renderHeader(); renderActive(true);
+    if (Sheet.isOpen() && $("#sheetTitle").textContent === "Автопилот") pilotSheet();
   } catch (e) { input.checked = !on; fail(e); }
+}
+
+const STRAT_HINT = { dip: "резкий откат ниже средней", bounce: "разворот от нижней полосы Боллинджера", trend: "откат в растущем рынке" };
+
+function pilotTop(s, n) {
+  return (s.top || []).filter((x) => x.ok ?? x.net_pct > 0).slice(0, n);
 }
 
 function scalpCard() {
   const t = tr(), s = t.scalp;
   if (!s) return "";
   const st = s.stats || {}, positions = s.positions || (s.pos ? [s.pos] : []);
-  const top = (s.top || []).filter((x) => x.net_pct > 0).slice(0, 3)
-    .map((x) => `${esc(x.symbol.split("/")[0])} ${pct(x.net_pct, 1)}`).join(" · ");
-  return `<div class="card" style="margin-top:10px">
-    <div class="row between"><div class="b">🎯 Режим $5</div>
+  const top = pilotTop(s, 3).map((x) => `${esc(x.symbol.split("/")[0])} <span class="dim">${esc(x.strategy_name || "")}</span>`).join(" · ");
+  const canStart = owner() && (t.keys || []).length;
+  return `<div class="card pilot-card ${s.on ? "on" : ""}" style="margin-top:10px">
+    <div class="row between"><div class="press" data-act="pilot"><div class="b">🤖 Автопилот ${s.on ? `<span class="pill ${t.live ? "live" : "test"}" style="margin-left:6px">${t.live ? "реально" : "тест"}</span>` : ""}</div><div class="tiny muted">режим $5 · бот торгует сам</div></div>
       <label class="switch"><input type="checkbox" data-act="scalp" ${s.on ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
-    <div class="small muted" style="margin-top:6px;white-space:normal">${s.on ? esc(s.reason || "запускаюсь…") : "Покупает на откате и сразу ставит продажу на +0,6…1,3% после комиссий. Хватает $5."}</div>
+    <div class="small muted press" data-act="pilot" style="margin-top:8px;white-space:normal">${s.on ? esc(s.reason || "запускаюсь…") : "Сам выбирает монету и стратегию (Откат, Отскок, Тренд), покупает по сигналу и сразу ставит продажу на +0,6…1,3% после комиссий."}</div>
     ${positions.map((pos) => `<div class="small" style="margin-top:6px">${pos.exchange ? esc(exName(pos.exchange)) + ": " : ""}держу <b>${esc(pos.symbol.split("/")[0])}</b> за ${money(pos.cost)} · продажа по ${price(pos.tp)}${pos.breakeven ? " (безубыток)" : ""}</div>`).join("")}
     ${st.cycles ? `<div class="small" style="margin-top:6px">Сделок ${st.cycles} · в плюс ${st.wins} · <b class="${cls(st.pnl)}">${money(st.pnl, { sign: true })}</b></div>` : ""}
-    ${!t.live && s.paper_usd != null ? `<div class="tiny muted" style="margin-top:4px">🧪 тестовый баланс ${money(s.paper_usd)}</div>` : ""}
-    ${top ? `<div class="tiny muted" style="margin-top:4px">На истории в плюсе: ${top}</div>` : ""}
+    ${!t.live && s.paper_usd != null && s.on ? `<div class="tiny muted" style="margin-top:4px">🧪 тестовый баланс ${money(s.paper_usd)}</div>` : ""}
+    ${top ? `<div class="tiny muted" style="margin-top:4px">Прошли проверку: ${top}</div>` : ""}
+    ${owner() ? `<div class="row between" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line)"><div><div class="small b">🪙 Монеты в дело</div><div class="tiny muted">лежащие монеты (SOL и др.) → USDT для торговли</div></div><label class="switch"><input type="checkbox" data-act="scalp-coins" ${s.use_coins ? "checked" : ""}><span></span></label></div>` : ""}
+    ${!s.on && canStart ? `<button class="btn primary block" style="margin-top:10px" data-act="pilot-start">🤖 Включить автопилот</button>` : ""}
     ${t.duplicate ? `<div class="tiny down" style="margin-top:6px">⚠️ Работают две копии бота: сделки на паузе. Удали лишний сервис в Render</div>` : ""}
   </div>`;
+}
+
+async function pilotStart() {
+  try {
+    const r = await api("/api/scalp", { on: true, coins: true });
+    S.ov.trading.scalp = r.scalp; S.ov.trading.auto = r.auto;
+    haptic.ok();
+    renderHeader(); renderActive(true);
+    if (!tr().live) {
+      toast("🤖 Автопилот включён в тесте");
+      const L = tr().limits;
+      if (await popup("Реальные деньги?", `Автопилот работает в тесте: ордера не уходят. Включить реальную торговлю? Лимит на сделку $${L.max_trade}, на убыток за день $${L.daily_loss}. Прибыль не гарантирована.`, "Да, торговать реально")) {
+        const m = await api("/api/mode", { live: true, confirm: "LIVE" });
+        S.ov.trading.live = m.live; toast(m.live ? "🔴 Автопилот торгует реально" : "🧪 Остался тест");
+        renderHeader(); renderActive(true);
+      }
+    } else toast("🤖 Автопилот включён: торгует реально");
+  } catch (e) { fail(e); }
+}
+
+async function toggleScalpCoins(el) {
+  try {
+    const r = await api("/api/scalp", { coins: el.checked });
+    S.ov.trading.scalp = r.scalp;
+    toast(r.scalp.use_coins ? "🪙 Монеты в дело: бот продаст лежащие монеты в USDT (в реальном режиме)" : "Монеты на счёте бот не трогает");
+    if (Sheet.isOpen() && $("#sheetTitle").textContent === "Автопилот") pilotSheet();
+  } catch (e) { el.checked = !el.checked; fail(e); }
+}
+
+function pilotSheet() {
+  const t = tr(), s = t.scalp || {};
+  const reasons = Object.entries(s.reasons || {}).map(([ex, why]) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">${esc(ex === "_" ? "Общее" : exName(ex))}</div><div class="s" style="white-space:normal">${esc(why)}${(s.real || {})[ex] ? ` · ${esc(s.real[ex])}` : ""}</div></div></div>`).join("");
+  const top = (s.top || []).map((x) => `<div class="item"><div class="grow"><div class="t">${x.ok ?? x.net_pct > 0 ? "🟢" : "🔴"} ${esc(x.symbol.split("/")[0])} <span class="muted small">${esc(x.strategy_name || "")}</span></div><div class="s" style="white-space:normal">${esc(STRAT_HINT[x.strategy] || "")} · сделок ${x.trades} (${x.wins} в плюс) · цель +${(x.tp * 100).toFixed(1)}%</div></div><div class="r"><div class="b num ${cls(x.net_pct)}">${pct(x.net_pct, 1)}</div><div class="s num">новые ${x.test_pct == null ? "—" : pct(x.test_pct, 1)}</div></div></div>`).join("");
+  const positions = (s.positions || []).map((pos) => `<div class="item"><div class="grow"><div class="t">${esc(pos.symbol.split("/")[0])} <span class="muted small">${esc(exName(pos.exchange))}</span></div><div class="s">за ${money(pos.cost)} · продажа по ${price(pos.tp)}${pos.breakeven ? " (безубыток)" : ""}</div></div></div>`).join("");
+  const st = s.stats || {};
+  Sheet.open("Автопилот", `
+    <div class="row between"><span class="pill ${t.live ? "live" : "test"}">${t.live ? "🔴 Реальные деньги" : "🧪 Тест"}</span><span class="pill ${s.on ? "ok" : "gray"}">${s.on ? "🟢 работает" : "⏸ выключен"}</span></div>
+    ${owner() ? `<div class="list" style="margin-top:10px">
+      <div class="item"><div class="grow"><div class="t">🤖 Автопилот</div><div class="s">ищет сигнал каждые 30 с, на каждой бирже с ключом</div></div><label class="switch"><input type="checkbox" data-act="scalp" ${s.on ? "checked" : ""}><span></span></label></div>
+      <div class="item"><div class="grow"><div class="t">🪙 Монеты в дело</div><div class="s" style="white-space:normal">если USDT мало, продаёт лежащие монеты в USDT (только в реальном режиме)</div></div><label class="switch"><input type="checkbox" data-act="scalp-coins" ${s.use_coins ? "checked" : ""}><span></span></label></div>
+      <div class="item"><div class="grow"><div class="t">🔴 Реальные деньги</div><div class="s">выключено = тест, ордера не уходят</div></div><label class="switch"><input type="checkbox" data-act="live" ${t.live ? "checked" : ""}><span></span></label></div>
+    </div>` : ""}
+    ${st.cycles ? `<div class="grid2" style="margin-top:10px"><div class="stat center"><div class="v num">${st.cycles} / ${st.wins}</div><div class="k">сделок / в плюс</div></div><div class="stat center"><div class="v num ${cls(st.pnl)}">${money(st.pnl, { sign: true })}</div><div class="k">итог</div></div></div>` : ""}
+    ${positions ? `<div class="section-title">Сейчас в сделке</div><div class="list">${positions}</div>` : ""}
+    ${reasons ? `<div class="section-title">Что делает сейчас</div><div class="list">${reasons}</div>` : ""}
+    <div class="section-title">Монеты и стратегии</div>
+    ${top ? `<div class="list">${top}</div>` : `<div class="card empty">Проверка на истории ещё не готова — появится через минуту после включения</div>`}
+    <div class="tiny muted" style="margin-top:10px;white-space:normal">Для каждой монеты бот перебирает 3 стратегии на первых 2/3 истории (свечи по 5 мин за ~3,5 дня) и проверяет лучшую на последней трети, которую она «не видела» («новые»). Торгует только 🟢. Если BTC падает больше 2% за час — новых покупок нет. Прибыль не гарантирована.</div>
+    <button class="btn block ghost" style="margin-top:14px" data-act="why">Треугольники: почему нет сделок</button>`, { full: true });
 }
 
 async function panic() {
@@ -1286,7 +1345,7 @@ function autoCard() {
     ? `<div class="tiny down" style="margin-top:6px">📥 ${esc(exName(ex))}: $${amount(funding[ex])} лежат на счёте Funding. Переведи на торговый счёт (Активы → Перевод)</div>`
     : `<div class="tiny down" style="margin-top:6px">💵 ${esc(exName(ex))}: на торговом счёте ${amount(v)} ${esc(S.ov.quote)}, для цикла нужно от $${amount((a.need_usd || {})[ex] || 5)}. Лучше $10–20</div>`).join("");
   return `<div class="card press auto-card" data-act="why" style="margin-top:10px">
-    <div class="row between"><div class="b">⚙️ Автопилот</div><span class="pill ${st.cls}">${st.icon} ${esc(st.text)}</span></div>
+    <div class="row between"><div class="b">⚙️ Треугольники</div><span class="pill ${st.cls}">${st.icon} ${esc(st.text)}</span></div>
     ${t.auto && a.at ? `<div class="small muted" style="margin-top:6px">Проверка ${ago(a.at)} · циклов ${a.triangles ?? 0} · подходящих ${a.candidates ?? 0}</div>
     <div class="meter" style="margin-top:10px"><div style="width:${fill.toFixed(0)}%"></div></div>
     <div class="row between tiny muted" style="margin-top:4px"><span>лучший ${best == null ? "—" : pct(best, 3)}</span><span>нужно ≥ ${need}%</span></div>` : `<div class="small muted" style="margin-top:6px">${t.auto ? "Скоро первая проверка" : "Включи переключатель выше: в тесте безопасно"}</div>`}
@@ -1297,10 +1356,10 @@ function autoCard() {
 const exName = (id) => ((S.ov.exchanges || []).find((e) => e.id === id) || {}).name || id;
 
 async function whySheet() {
-  Sheet.open("Автопилот", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Загружаю…</div>`, { full: true });
+  Sheet.open("Треугольники", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Загружаю…</div>`, { full: true });
   try {
     const r = await api("/api/autostatus");
-    if (!Sheet.isOpen() || $("#sheetTitle").textContent !== "Автопилот") return;
+    if (!Sheet.isOpen() || $("#sheetTitle").textContent !== "Треугольники") return;
     const a = r.status || {}, s = a.stats || {}, t = tr();
     const st = autoState(Object.assign({}, t, { auto: r.auto, auto_status: a }));
     const rows = [];
@@ -1586,6 +1645,8 @@ document.addEventListener("click", async (e) => {
     case "price-coin": $("#priceCoin").value = d.v; loadPrices(); break;
     case "phantom": haptic.tap(); phantomSheet(); loadPhantom(); break;
     case "why": haptic.tap(); whySheet(); break;
+    case "pilot": haptic.tap(); pilotSheet(); break;
+    case "pilot-start": haptic.tap(); pilotStart(); break;
     case "dex": haptic.tap(); dexSheet(d.v || "hot"); break;
     case "opps": haptic.tap(); oppsSheet(); break;
     case "opps-tab": haptic.sel(); S.oppsTab = d.v; $$('[data-act="opps-tab"]').forEach((b) => b.classList.toggle("on", b.dataset.v === d.v)); $("#oppsBox").innerHTML = oppsBody(S.opps, d.v); break;
@@ -1664,6 +1725,7 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "scalp") toggleScalp(el);
   else if (el.dataset.act === "radar") toggleRadar(el);
   else if (el.dataset.act === "opps-notify") toggleOppsNotify(el);
+  else if (el.dataset.act === "scalp-coins") toggleScalpCoins(el);
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.set) saveSetting(el);
 });

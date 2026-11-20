@@ -42,11 +42,12 @@ def test_setup_ready_then_enable_scalp(bot_env):
         text = session.sent[-1][1]
         assert "✅ ExA: ключ работает" in text
         assert "5.10 USDT" in text and "режиму $5 хватает" in text
-        assert "Проверка на истории: в плюсе 1 монет" in text
+        assert "прошли 1 монет" in text and "проверкой на новых данных" in text
         assert "Всё готово" in text
-        assert "sc:on" in buttons(session.markups[-1])
-        await press(b, "sc:on")
-        assert b.scalper.on
+        assert "ap:on" in buttons(session.markups[-1])
+        await press(b, "ap:on")  # одна кнопка: режим $5 + «Монеты в дело», реальные деньги — отдельно
+        assert b.scalper.on and b.scalper.st["use_coins"] and not b.trader.state.live
+        assert "Включить реальную торговлю" in session.sent[-1][1] and "live:yes" in buttons(session.markups[-1])
         await press(b, "su:again")
         text = session.sent[-1][1]
         assert "работает в тесте" in text and "tr:live" in buttons(session.markups[-1])
@@ -105,7 +106,47 @@ def test_setup_finds_money_stuck_in_a_coin(bot_env):
     ex.balance["SOL"] = 0.059  # ≈ $5.8, куплено вручную
     asyncio.run(send(b, "/setup"))
     text = session.sent[-1][1]
-    assert "лежит в SOL" in text and "/sell a SOL all" in text
+    assert "лежит в SOL" in text and "/sell a SOL all" in text and "Включить автопилот" in text
+
+
+def test_autopilot_sells_idle_sol_and_starts_trading(bot_env):
+    """Как у пользователя на Bybit: USDT почти нет, ≈$5.8 лежит в SOL. Автопилот сам пускает их в дело."""
+    b, session = bot_env
+    ex = attach(b, balance=0.01)
+    ex.ohlcv = {"SOL/USDT": dip_candles()}  # в конце свежий откат — есть сигнал
+    ex.balance["SOL"] = 0.059
+    b.trader.state.live = True
+
+    async def flow():
+        await send(b, "/autopilot")
+        assert b.scalper.on and b.scalper.st["use_coins"]
+        assert any("продаст SOL" in t for _, t in session.sent[-3:])
+        events = await b.scalper.step()  # шаг 1: SOL → USDT
+        assert events and "SOL → 5.80 USDT" in events[0].replace("5.79", "5.80")
+        assert ex.created[0][:2] == ("sell", "SOL/USDT") and ex.balance["SOL"] < 1e-9
+        events = await b.scalper.step()  # шаг 2: покупка по сигналу на эти деньги
+        assert events and "купил SOL" in events[0] and "Сигнал «" in events[0]
+        assert b.trader.state.log[0]["note"].startswith("автопилот: монета без дела")
+        await send(b, "/scalp")
+        assert "Монеты в дело: <b>вкл</b>" in session.sent[-1][1]
+        await press(b, "sc:coins")
+        assert not b.scalper.st["use_coins"]
+
+    asyncio.run(flow())
+
+
+def test_idle_coins_untouched_without_permission_or_in_test(bot_env):
+    b, session = bot_env
+    ex = attach(b, balance=0.01)
+    ex.balance["SOL"] = 0.059
+    b.trader.state.live = True
+    b.scalper.turn_on()
+    assert asyncio.run(b.scalper.step()) == []
+    assert not ex.created and "Монеты в дело" in b.scalper.last_reason  # без разрешения не продаёт, но подсказывает
+    b.scalper.st["use_coins"] = True
+    b.trader.state.live = False
+    asyncio.run(b.scalper.step())
+    assert not ex.created  # в тесте реальные монеты не продаются
 
 
 class BingXAccounts(FakeTradingExchange):
