@@ -6,6 +6,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 import time
 from collections import OrderedDict
@@ -17,7 +18,15 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonWebApp,
+    Message,
+    WebAppInfo,
+)
 
 from . import trading_ui
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
@@ -30,6 +39,7 @@ from .report import ScanStats, seconds_until, split_message
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
 from .trading import Trader
 from .triangular import TriOpportunity
+from .webapp import WebApp
 
 log = logging.getLogger(__name__)
 
@@ -358,6 +368,7 @@ class ArbitrageBot:
                 log.warning("Не удалось прочитать %s: %s", self.trading_file, e)
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        self.webapp = WebApp(self, token)  # Telegram Mini App: /app на том же сервере, что и /health
         self.dp = Dispatcher()
         self._register_handlers()
 
@@ -710,7 +721,24 @@ class ArbitrageBot:
             if not self._allowed(message):
                 await message.answer("⛔ Доступ закрыт. Твой ID: /myid")
                 return
-            await message.answer(HELP_TEXT)
+            await message.answer(HELP_TEXT, reply_markup=self.app_markup())
+
+        @dp.message(Command("app"))
+        async def cmd_app(message: Message) -> None:
+            if not self._allowed(message):
+                return
+            markup = self.app_markup()
+            if markup is None:
+                await message.answer(
+                    "📱 Приложение работает, когда бот запущен в облаке (Render): Telegram открывает "
+                    "Mini App только по HTTPS-адресу. На компьютере укажи PUBLIC_URL с https-адресом."
+                )
+                return
+            await message.answer(
+                "📱 <b>AI Casher</b>: портфель, графики, рынок, сигналы, демо и ИИ в одном окне.\n"
+                "Ещё его можно открыть кнопкой «App» слева от поля ввода.",
+                reply_markup=markup,
+            )
 
         @dp.message(Command("scan"))
         async def cmd_scan(message: Message) -> None:
@@ -1113,6 +1141,31 @@ class ArbitrageBot:
                     log.exception("Ошибка в автосканировании")
             await asyncio.sleep(self.settings.scan_interval_sec)
 
+    # --- приложение ---------------------------------------------------------
+
+    @staticmethod
+    def app_url() -> str | None:
+        url = public_url()
+        return f"{url.rstrip('/')}/app" if url and url.startswith("https://") else None
+
+    def app_markup(self) -> InlineKeyboardMarkup | None:
+        url = self.app_url()
+        if not url:
+            return None
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📱 Открыть приложение", web_app=WebAppInfo(url=url))]])
+
+    async def _equity_loop(self) -> None:
+        """Раз в 15 минут записывает стоимость портфеля, чтобы в приложении был график баланса."""
+        await asyncio.sleep(20)
+        while True:
+            if self.trader.working:
+                try:
+                    await self.trader.portfolio()
+                    self.save_trading()
+                except Exception:
+                    log.exception("Не удалось записать стоимость портфеля")
+            await asyncio.sleep(15 * 60)
+
     # --- запуск -------------------------------------------------------------
 
     async def _check_keys_on_start(self) -> None:
@@ -1129,9 +1182,9 @@ class ArbitrageBot:
     async def run(self) -> None:
         tasks: list[asyncio.Task] = []
         runner = None
-        port = cloud_port()
+        port = cloud_port() or int(os.getenv("WEBAPP_PORT", "0") or 0)
         if port:  # запущены в облаке: сразу открываем порт, чтобы хостинг видел, что сервис жив
-            runner = await start_health_server(port)
+            runner = await start_health_server(port, self.webapp.setup)
             if public_url():
                 tasks.append(asyncio.create_task(self_ping_loop(public_url())))
 
@@ -1146,6 +1199,7 @@ class ArbitrageBot:
                     BotCommand(command="demo", description="Демо: сводка по счетам"),
                     BotCommand(command="demo_history", description="Демо: последние сделки"),
                     BotCommand(command="demo_stop", description="Остановить демо"),
+                    BotCommand(command="app", description="📱 Приложение: графики и торговля"),
                     BotCommand(command="trade", description="💼 Торговля: панель"),
                     BotCommand(command="balance", description="Балансы на биржах"),
                     BotCommand(command="orders", description="Открытые ордера"),
@@ -1167,6 +1221,15 @@ class ArbitrageBot:
             if self.trader.creds:
                 tasks.append(asyncio.create_task(self._check_keys_on_start()))
             tasks.append(asyncio.create_task(self._auto_loop()))
+            tasks.append(asyncio.create_task(self._equity_loop()))
+            if self.app_url():
+                try:
+                    await self.bot.set_chat_menu_button(
+                        menu_button=MenuButtonWebApp(text="App", web_app=WebAppInfo(url=self.app_url()))
+                    )
+                    log.info("Mini App: %s", self.app_url())
+                except Exception as e:
+                    log.warning("Не удалось поставить кнопку приложения: %s", e)
             tasks.append(asyncio.create_task(self._daily_report_loop()))
             await self.dp.start_polling(self.bot)
         finally:

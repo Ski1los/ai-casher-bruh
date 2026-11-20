@@ -10,3 +10,4 @@ venv/
 
 # Данные бота
 data/
+.preview/

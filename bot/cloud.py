@@ -32,13 +32,20 @@ SELF_PING_SEC = 10 * 60
 # ---------------------------------------------------------------------------
 
 
-async def start_health_server(port: int) -> web.AppRunner:
+async def start_health_server(port: int, setup=None) -> web.AppRunner:
+    """HTTP-сервер: /health для Render и (если передан setup) Mini App с API."""
+
     async def health(_: web.Request) -> web.Response:
         return web.Response(text="ok")
 
-    app = web.Application()
-    app.router.add_get("/", health)
+    async def root(_: web.Request) -> web.Response:
+        raise web.HTTPFound("/app") if setup else web.HTTPOk(text="ok")
+
+    app = web.Application(client_max_size=256 * 1024)
+    app.router.add_get("/", root)
     app.router.add_get("/health", health)
+    if setup:
+        setup(app)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
