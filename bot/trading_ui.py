@@ -35,12 +35,16 @@ KEYS_HELP = """\
 1. Открой управление API <b>на сайте</b> биржи (в браузере телефона: «версия для ПК»): {links}.
 2. Создай <b>системный API-ключ</b> (System-generated / HMAC).
 3. Права: включи только <b>Чтение + Спот-торговлю</b> (Read + Spot Trade).
-   ❗ <b>Вывод (Withdraw) НЕ включай.</b> Тогда даже при утечке ключа деньги нельзя вывести.
+   ❗ <b>Вывод (Withdraw) НЕ включай — он боту НЕ нужен, даже для реальной торговли.</b> \
+Бот покупает и продаёт внутри биржи, деньги никуда не выводит. Без вывода даже украденный ключ не заберёт деньги.
+   На <b>BingX</b> галочки такие: ✅ Чтение, ✅ Спот торговля; ⬜️ Бессрочная фьючерсная торговля, \
+⬜️ Universal Transfer, ⬜️ Вывод, ⬜️ Управлять субаккаунтами, ⬜️ P2P. Доступ по IP: «Неограниченный».
+   На <b>Bybit</b>: системный ключ → «Чтение и запись» → отметь торговлю (Unified Trading / Spot); Withdraw не трогай.
 4. IP-ограничение не ставь: у бесплатного Render адрес сервера не твой личный. Особенности:
    • <b>Bybit</b>: ключ без IP живёт ~3 месяца. Бот покажет дату и напомнит за 2 недели (/doctor).
    • <b>BingX</b>: ключ без IP удаляется, если им 14 дней не пользовались. Бот обращается к бирже \
 каждые 15 минут, так что, пока бот работает, ключ живой.
-5. Скопируй ключ и секрет.
+5. Скопируй ключ и секрет <b>сразу</b>: секрет биржа показывает один раз. Потерял — удали ключ и создай новый.
 6. Render → сервис <b>ai-casher-bot</b> → <b>Environment</b> → <b>Add Environment Variable</b>:
    <code>BYBIT_API_KEY</code> = ключ, <code>BYBIT_API_SECRET</code> = секрет
    <code>BINGX_API_KEY</code> = ключ, <code>BINGX_API_SECRET</code> = секрет
@@ -86,6 +90,8 @@ LIVE_WARNING = """\
 • лимит на одну покупку или цикл: <b>${max_trade:g}</b> (<code>/set max_trade</code>);
 • не больше <b>{daily:g}</b> сделок в сутки;
 • автоторговля встанет на паузу, если за сутки потеряет <b>${loss:g}</b>.
+
+Право «Вывод» у ключа для этого <b>не нужно</b> и включать его не надо: хватает «Чтение + Спот торговля».
 
 Честно: прибыль не гарантирована. Треугольники живут доли секунды, и в реальности часть сделок \
 будет в минус из-за проскальзывания. Ставь только те деньги, которые не жалко потерять.
@@ -230,6 +236,17 @@ async def keys_text(b: ArbitrageBot) -> str:
     return "\n".join(lines)
 
 
+def perms_line(info: dict | None) -> str:
+    """«(чтение ✅, спот ✅, вывод ⬜️ — так и надо)»: что включено у ключа, если биржа это сообщает."""
+    if not info or info.get("error") or not any(k in info for k in ("spot_trade", "read", "read_only", "withdraw")):
+        return ""
+    parts = []
+    if "spot_trade" in info:
+        parts.append(f"спот {'✅' if info.get('spot_trade') else '❌'}")
+    parts.append(f"вывод {'⚠️ включён — лучше выключить' if info.get('withdraw') else '⬜️ выключен, так и надо'}")
+    return " (" + ", ".join(parts) + ")"
+
+
 async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
     """/setup: чек-лист «готов ли бот торговать» — по шагам, с кнопками для следующего шага."""
     t, sc, quote = b.trader, b.scalper, b.settings.quote
@@ -257,7 +274,7 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
                 lines.append(f"1️⃣ ⚠️ {title}: ключ работает, но {html.escape(problem)}")
                 todo.append(f"включить право «Спот-торговля» у ключа {title}")
             else:
-                lines.append(f"1️⃣ ✅ {title}: ключ работает, торговать может")
+                lines.append(f"1️⃣ ✅ {title}: ключ работает, торговать может" + perms_line(t.key_info.get(name)))
     name = sc.exchange()
 
     # 2. деньги

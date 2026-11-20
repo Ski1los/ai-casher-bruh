@@ -98,6 +98,20 @@ class ConflictWatch(logging.Handler):
         recent = [h for h in self.hits if now - h < self.WINDOW]
         return len(recent) >= 3 and recent[-1] - recent[0] >= self.SPAN
 
+_KEYWORDS = r"(ключ|api|апи|прав|разреш|галоч|торгов)"
+WITHDRAW_Q = re.compile(rf"(вывод|withdraw).*{_KEYWORDS}|{_KEYWORDS}.*(вывод|withdraw)", re.I | re.S)
+WITHDRAW_ANSWER = """\
+🔒 <b>Право «Вывод» боту НЕ нужно</b> — ни для теста, ни для реальной торговли. Не включай его.
+
+Бот покупает и продаёт <b>внутри биржи</b>: деньги никуда не уходят. Для этого хватает двух галочек:
+✅ <b>Чтение</b> · ✅ <b>Спот торговля</b>
+Всё остальное (Вывод, Universal Transfer, фьючерсы, субаккаунты, P2P) — выключено. Доступ по IP — «Неограниченный».
+
+Почему это важно: ключ хранится на сервере. Если он когда-нибудь утечёт, без права вывода его владелец \
+сможет только торговать, а забрать деньги — нет. Поэтому биржи и требуют IP для вывода.
+
+Если бот где-то пишет про ключ, пришли скриншот этого сообщения — разберу. Проверить ключ: /setup или /keys"""
+
 DUPLICATE_TEXT = """\
 ⚠️ <b>Работают две копии бота</b> с одним токеном.
 
@@ -1262,6 +1276,9 @@ class ArbitrageBot:
             text = (message.text or "").strip()
             if text.startswith("/"):
                 await message.answer("Не знаю такой команды. Список: /help")
+                return
+            if WITHDRAW_Q.search(text):  # частый опасный вопрос: отвечаем без ИИ, твёрдо и одинаково
+                await self._answer(message, WITHDRAW_ANSWER)
                 return
             if not self.ai.configured:
                 await message.answer(
