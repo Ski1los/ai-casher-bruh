@@ -3,7 +3,7 @@
 import asyncio
 
 from bot.config import Settings
-from bot.scalper import (MAX_HOLD_SEC, Params, Scalper, backtest, best_params, ema, rsi, signal_at,
+from bot.scalper import (MAX_HOLD_SEC, Params, Scalper, backtest, best_params, ema, indicators, rsi, signal_at,
                          target_price, trade_return)
 from bot.trading import Trader
 from tests.fake_exchange import FakeTradingExchange, mk_market
@@ -24,6 +24,7 @@ def dip_candles(cycles=15, end_in_dip=True, dip=0.025):
     if end_in_dip:
         closes += [100 * (1.0002 if i % 2 else 0.9998) for i in range(44)]
         closes += [100 * (1 - dip * (k + 1) / 6) for k in range(6)]
+        closes.append(closes[-1] * 1.004)  # первая зелёная свеча после отката: сигнал и «Отката», и «Отскока»
         closes.append(closes[-1])  # текущая, ещё не закрытая свеча
     out, prev = [], closes[0]
     for i, c in enumerate(closes):
@@ -63,7 +64,8 @@ def test_backtest_finds_profit_on_dips_and_skips_crash():
     res = backtest(candles, Params(0.006, 30), 0.001)
     assert res["trades"] >= 10 and res["wins"] == res["trades"] and res["net_pct"] > 0
     best = best_params(candles, 0.001)
-    assert best and best["net_pct"] >= res["net_pct"]
+    assert best and best["ok"] and best["train_pct"] > 0 and best["test_pct"] > 0 and best["test_trades"] >= 3
+    assert best["strategy"] in ("dip", "bounce")  # на откатах «Тренд» не нужен
     # обвал: -0,5% каждую свечу — это не откат, покупок нет
     closes = [100 * 0.995 ** i for i in range(400)]
     crash = [[i, c, c, c * 0.999, c, 1] for i, c in enumerate(closes)]
@@ -73,9 +75,11 @@ def test_backtest_finds_profit_on_dips_and_skips_crash():
 def test_signal_only_on_last_closed_dip():
     candles = dip_candles()
     closes = [c[4] for c in candles[:-1]]
-    assert signal_at(closes, ema(closes, 50), rsi(closes), len(closes) - 1, Params(0.006, 30))
+    assert signal_at(closes, indicators(closes), len(closes) - 1, Params(0.006, 30))
+    assert signal_at(closes, indicators(closes), len(closes) - 1, Params(0.006, 40, "bounce"))
     flat = [100.0 + (0.01 if i % 2 else 0) for i in range(120)]
-    assert not signal_at(flat, ema(flat, 50), rsi(flat), 119, Params(0.006, 30))
+    for strat in ("dip", "bounce", "trend"):
+        assert not signal_at(flat, indicators(flat), 119, Params(0.006, 60, strat))
 
 
 def test_live_cycle_with_five_dollars():
@@ -123,7 +127,7 @@ def test_waits_when_no_dip_and_breakeven_after_a_day():
     flat = dip_candles(end_in_dip=False)
     sc, trader, ex = make(balance=5.1, candles=flat)
     assert run(sc.step()) == []
-    assert "жду отката" in sc.last_reason
+    assert "жду сигнала" in sc.last_reason
     # открытая позиция сутки без цели → продажа в безубыток
     sc2, trader2, ex2 = make(balance=5.1)
     run(sc2.step())
@@ -180,7 +184,7 @@ def test_scalp_commands_and_stop(bot_env):
         assert "Режим $5 включён" in text and "треугольниками выключил" in text
         assert b.scalper.on and not b.trader.state.auto
         await send(b, "/scalp")
-        assert "ловец откатов" in session.sent[-1][1]
+        assert "Режим $5 (автопилот)" in session.sent[-1][1]
         await send(b, "/why")
         assert "Режим $5 включён" in session.sent[-1][1]
         await send(b, "/stop")
@@ -242,3 +246,68 @@ def test_paper_balance_follows_real_money_until_first_trade():
     assert run(sc._free_usd("a")) == 5.0 and "a" in sc._paper_virtual
     ex.balance["USDT"] = 5.54  # деньги пришли позже
     assert run(sc._free_usd("a")) == 5.54 and "a" not in sc._paper_virtual
+
+
+def test_walk_forward_rejects_strategy_that_stopped_working():
+    """В первой части истории откаты отрастают, а в последней — продолжают падать: проверка «вслепую» это ловит."""
+    good = dip_candles(cycles=10, end_in_dip=False)
+    closes = [c[4] for c in good]
+    last = closes[-1]
+    for _ in range(6):  # откат, ложный разворот и падение дальше до стоп-лосса вместо возврата
+        closes += [last * (1.0002 if i % 2 else 0.9998) for i in range(44)]
+        closes += [last * (1 - 0.025 * (k + 1) / 6) for k in range(6)]
+        closes.append(closes[-1] * 1.004)
+        for _ in range(18):
+            closes.append(closes[-1] * 0.995)  # ≈ −8,6%: срабатывает стоп-лосс
+        closes += [closes[-1] + (last - closes[-1]) * (k + 1) / 8 for k in range(8)]  # потом возврат к уровню
+    candles, prev = [], closes[0]
+    for i, c in enumerate(closes):
+        candles.append([i * 300_000, prev, max(prev, c) * 1.0005, min(prev, c) * 0.9995, c, 1000])
+        prev = c
+    res = best_params(candles, 0.001)
+    assert res and res["train_pct"] > 0 and res["test_pct"] < 0 and not res["ok"]
+
+
+def test_trend_strategy_buys_pullback_in_uptrend():
+    closes = [100 * 1.0006 ** i for i in range(260)]  # ровный рост
+    closes += [closes[-1] * (1 - 0.0015 * (k + 1)) for k in range(4)]  # откат к короткой средней
+    closes.append(closes[-1] * 1.0013)  # и разворот вверх (RSI ещё не перегрет)
+    ind = indicators(closes)
+    assert signal_at(closes, ind, len(closes) - 1, Params(0.006, 62, "trend"))
+    assert not signal_at(closes, ind, len(closes) - 1, Params(0.006, 30, "dip"))  # «Откат» тут молчит
+
+
+def test_market_brake_blocks_buying_when_btc_falls():
+    sc, trader, ex = make(balance=5.1)
+    ex.markets["BTC/USDT"] = mk_market("BTC", "USDT")
+    btc = [100.0] * 30 + [100 * (1 - 0.003 * k) for k in range(1, 14)]  # −3,9% за час
+    ex.ohlcv["BTC/USDT"] = [[i * 300_000, c, c, c, c, 1] for i, c in enumerate(btc)]
+    assert run(sc.step()) == []
+    assert "тормоз рынка" in sc.last_reason and not ex.created
+    ex.ohlcv["BTC/USDT"] = [[i * 300_000, 100, 100, 100, 100, 1] for i in range(40)]
+    sc._market.clear()
+    assert run(sc.step()) and ex.created  # рынок спокоен — покупает
+
+
+def test_webapp_autopilot_start_and_coins(bot_env, monkeypatch):
+    from tests import test_webapp as tw
+    from tests.test_telegram_flow import OWNER
+
+    monkeypatch.delenv("WEBAPP_DEV_USER", raising=False)
+    b, _ = bot_env
+    sc, trader, ex = make(balance=5.1, live=False)
+    sc.turn_off()
+    b.scanner, b.trader, b.scalper = trader.scanner, trader, sc
+    b.allowed_ids.add(tw.FRIEND)
+    from bot.webapp import WebApp
+    b.webapp = WebApp(b, tw.TOKEN)
+
+    async def flow(client):
+        st, r = await tw.post(client, "/api/scalp", {"on": True, "coins": True})
+        assert st == 200 and r["scalp"]["on"] and r["scalp"]["use_coins"]
+        st, _ = await tw.post(client, "/api/scalp", {"coins": False}, uid=tw.FRIEND)
+        assert st == 403  # только владелец
+        st, r = await tw.post(client, "/api/scalp", {"coins": False}, uid=OWNER)
+        assert st == 200 and r["scalp"]["on"] and not r["scalp"]["use_coins"]
+
+    tw.call(b, flow)

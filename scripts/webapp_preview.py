@@ -108,6 +108,7 @@ def build():
     b.demo = DemoManager(b.scanner, settings, tmp / "demo.json")
     env = {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s", "BINGX_API_KEY": "k", "BINGX_API_SECRET": "s"}
     b.trader = Trader(b.scanner, settings, env=env)
+    b.scalper.trader = b.trader  # автопилот должен смотреть на того же трейдера
     b.trader.key_status = {"bybit": "ok", "bingx": "ok"}
     for name in ("bybit", "bingx"):
         b.scanner.exchanges[name].apiKey = "k"
@@ -186,6 +187,19 @@ def build():
             ("Bybit запустила новый Launchpool с пулом USDT", "ForkLog", 3, []),
             ("Solana network activity hits record as memecoins return", "Cointelegraph", 5, ["SOL"]),
         ]]
+
+    # автопилот: пример результатов проверки на истории (3 стратегии, проверка на новых данных)
+    def _r(sym, strat, trades, wins, net, test, tp, ok=True):
+        return {"symbol": sym, "strategy": strat, "trades": trades, "wins": wins, "net_pct": net, "test_pct": test,
+                "worst_pct": -2.4, "tp": tp, "rsi_buy": 32.0, "open_pct": None, "days": 3.5, "ok": ok}
+
+    b.scalper.ranking["bybit"] = [_r("SOL/USDT", "bounce", 11, 10, 4.2, 1.1, 0.009),
+                                  _r("SUI/USDT", "dip", 8, 7, 2.6, 0.4, 0.006),
+                                  _r("ETH/USDT", "trend", 7, 6, 2.1, 0.0, 0.006),
+                                  _r("DOGE/USDT", "dip", 9, 6, 1.4, -0.8, 0.013, ok=False),
+                                  _r("TON/USDT", "bounce", 3, 2, 0.6, 0.2, 0.009, ok=False)]
+    b.scalper.ranked_at["bybit"] = time.time() + 10 ** 9  # не пересчитывать в предпросмотре
+    b.scalper.st["use_coins"] = True
 
     b.opps._get_json = opps_json
     b.opps.news = opps_news

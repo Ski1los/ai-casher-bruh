@@ -665,10 +665,17 @@ class WebApp:
         return {"auto": on}
 
     async def scalp(self, request: web.Request) -> dict:
-        """Режим $5 (ловец откатов) из приложения."""
+        """Режим $5 (автопилот) из приложения: {on} — включить/выключить, {coins} — «Монеты в дело»."""
         self._owner(request)
         body = await self._body(request)
         t, sc = self.b.trader, self.b.scalper
+        if "coins" in body:
+            sc.st["use_coins"] = bool(body["coins"])
+            self._changed("🪙 Монеты в дело: " + ("включено из приложения — лежащие монеты бот продаст в USDT и пустит "
+                                                  "в торговлю (только в реальном режиме)." if sc.st["use_coins"]
+                                                  else "выключено из приложения."))
+            if "on" not in body:
+                return {"scalp": sc.status_dict(), "auto": t.state.auto}
         on = bool(body.get("on"))
         if on and not t.working:
             raise ApiError("для режима $5 нужен рабочий ключ биржи")

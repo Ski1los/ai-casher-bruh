@@ -1436,7 +1436,7 @@ class Trader:
                 lines.append(f"  {html.escape(self.scanner.display_name(n))}: {html.escape(icon)}")
         sc = st.scalp or {}
         held = [p["symbol"].split("/")[0] for p in (sc.get("positions") or {}).values() if p]
-        lines.append(f"🎯 Режим $5 (ловец откатов): {'🟢 включён' if sc.get('on') else '⏸ выключен'}"
+        lines.append(f"🎯 Автопилот (режим $5): {'🟢 включён' if sc.get('on') else '⏸ выключен'}"
                      + (f", держу {html.escape(', '.join(held))}" if held else "") + " · /scalp")
         lines.append(
             f"Автоторговля треугольниками: {'🟢 включена' if st.auto else '⏸ выключена'} "

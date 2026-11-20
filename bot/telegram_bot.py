@@ -146,8 +146,9 @@ HELP_TEXT = """\
 Могу и торговать: кнопками, командами, через ИИ или автоматически (нужен API-ключ биржи, /keys).
 
 <b>💡 Заработок с маленькой суммы</b>
+/autopilot — 🤖 <b>бот торгует сам</b>: одна кнопка, дальше без тебя
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
-/scalp — режим $5: ловец откатов
+/scalp — состояние автопилота (режим $5)
 /news — новости крипты
 
 <b>Сигналы</b>
@@ -173,7 +174,8 @@ HELP_TEXT = """\
 <code>/limit bybit buy BTC 5 60000</code> — лимитный ордер
 /orders — открытые ордера и отмена
 /live — включить реальные ордера, /test — вернуть тест
-/scalp — 🎯 <b>режим $5</b>: ловец откатов, торгует даже с $5 (<code>/scalp on</code>, <code>/scalp off</code>)
+/autopilot — 🤖 <b>автопилот</b>: режим $5 + «Монеты в дело», сам выбирает монету и стратегию (<code>/autopilot off</code>)
+/scalp — 🎯 <b>режим $5</b>: состояние, проверка на истории, «Монеты в дело» (<code>/scalp on</code>, <code>/scalp off</code>)
 /autotrade on|off — автоторговля треугольниками (нужно от ~$10–20)
 /why — 🔍 что автоторговля делает и почему нет сделок
 /trades — журнал сделок
@@ -784,7 +786,7 @@ class ArbitrageBot:
         sc = self.scalper.status_dict()
         return {
             "mode": "live" if t.state.live else "test",
-            "scalp_mode_5usd": {k: sc[k] for k in ("on", "reasons", "paper", "stats", "positions", "top")},
+            "scalp_mode_5usd": {k: sc[k] for k in ("on", "use_coins", "reasons", "paper", "stats", "positions", "top")},
             "second_bot_copy_running": self.duplicate_running(),
             "autotrade_on": t.state.auto,
             "autotrade_paused_reason": t.state.paused_reason,
@@ -1704,7 +1706,8 @@ class ArbitrageBot:
                     BotCommand(command="alerts", description="Мои алерты"),
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
                     BotCommand(command="setup", description="🚀 Готовность к торговле: что осталось"),
-                    BotCommand(command="scalp", description="🎯 Режим $5: ловец откатов"),
+                    BotCommand(command="autopilot", description="🤖 Автопилот: бот торгует сам"),
+                    BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости крипты"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),

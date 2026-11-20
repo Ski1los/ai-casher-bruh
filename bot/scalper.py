@@ -1,14 +1,17 @@
-"""Режим $5: «ловец откатов» на одной монете. Работает с суммой от минимального ордера биржи (≈$5).
+"""Режим $5 (автопилот): одна сделка за раз на каждой бирже. Работает с суммой от минимального ордера биржи (≈$5).
 
 Зачем отдельный режим. Треугольник — это три ордера подряд, и Bybit требует от $5 на КАЖДЫЙ:
 с $5 на счёте после первого шага (минус комиссия) третий ордер уже меньше минимума. Здесь ордеров
 всего два: купить и продать, поэтому $5 хватает.
 
 Как работает (простыми словами):
-  1. Раз в несколько часов бот берёт свечи по 5 минут за последние ~3 дня по крупным монетам
-     и проверяет на истории, где эта стратегия заработала бы после комиссий. Торгует только те монеты,
-     где проверка в плюсе.
-  2. Ждёт отката: цена резко ушла ниже средней (RSI низкий), но это не обвал.
+  1. Раз в 6 часов бот берёт свечи по 5 минут за последние ~3,5 дня по 13 крупным монетам и для каждой
+     перебирает 3 стратегии: «Откат» (резко ниже средней, RSI низкий), «Отскок» (разворот от нижней
+     полосы Боллинджера) и «Тренд» (откат к средней в растущем рынке). Вариант выбирается на первых ~2/3
+     истории и проверяется на последней трети, которую он «не видел» (walk-forward). Торгуются только
+     монеты, где вариант в плюсе и не в минусе на новых данных — так меньше самообмана.
+  2. Ждёт сигнала своей стратегии. Обвал (−3% за час, −8% за сутки) — не сигнал. Если BTC упал больше
+     чем на 2% за час, новых покупок нет вообще («тормоз рынка»).
   3. Покупает на все свободные USDT (не больше /set max_trade) — так прибыль сразу идёт в оборот
      (сложный процент).
   4. Сразу ставит на бирже лимитную продажу на +0,6…1,3% (цель выбирается по проверке на истории,
@@ -16,6 +19,9 @@
   5. Если за 24 часа цель не достигнута, переставляет продажу в безубыток.
   6. Стоп-лосс (-6%) срабатывает, только если позиция стоит больше минимального ордера биржи:
      Bybit не даст продать монеты дешевле $5. С ровно $5 бот при просадке ждёт возврата цены.
+
+«Монеты в дело» (по желанию): если USDT мало, а на спот-счёте лежит монета дороже минимального ордера
+(например, SOL), бот продаёт её по рынку в USDT, чтобы торговать этими деньгами.
 
 Честно: это не гарантия прибыли. На падающем рынке деньги могут надолго «зависнуть» в монете.
 Проверка на истории показывает, как было, а не как будет.
@@ -42,7 +48,7 @@ COINS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "TON", "SUI", "ADA", "LINK", "AVAX"
 TIMEFRAME = "5m"
 CANDLE_SEC = 300
 HISTORY_CANDLES = 1000  # ≈ 3,5 дня свечей по 5 минут: на этом проверяем стратегию
-SIGNAL_CANDLES = 300  # сутки свечей: средняя и фильтр обвала за 24 ч считаются так же, как на истории
+SIGNAL_CANDLES = 500  # ≈1,7 суток свечей: средние (в т.ч. длинная на 200 свечей) и фильтр обвала как на истории
 BACKTEST_EVERY_SEC = 6 * 3600
 STEP_SEC = 30  # как часто проверять позицию и сигналы
 MAX_SPREAD = 0.0015  # спред больше 0,15% съедает прибыль
@@ -57,7 +63,20 @@ CRASH_24H = -0.08
 STOP_PCT = 0.06
 MAX_HOLD_SEC = 24 * 3600
 BREAKEVEN_EXTRA = 0.0005  # безубыток = комиссии + 0,05%
-TOP_COINS = 4  # сколько лучших по проверке монет смотреть на каждом шаге
+TOP_COINS = 5  # сколько лучших по проверке монет смотреть на каждом шаге
+TRAIN_SHARE = 0.65  # на этой доле истории выбираем вариант, на остальной — проверяем его «вслепую»
+# Порог «монета годится». Проверено на 300 случайных графиках (чистый шум, заработать на нём нельзя):
+# без порога шум проходит проверку в 41% случаев, с порогом «≥6 сделок и ≥+2%» — в 20%, а настоящие откаты
+# проходят всё равно. Строже (≥8 сделок, ≥+3%) шум проходит в 8%, но бот может сутками стоять без сделок.
+MIN_TRADES = 6
+MIN_NET_PCT = 2.0
+BB_LEN, BB_K = 20, 2.0  # полосы Боллинджера (стратегия «Отскок»)
+BOUNCE_RSI_MAX = 40.0
+TREND_FAST, TREND_SLOW = 20, 200  # короткая и длинная средние (стратегия «Тренд»)
+TREND_RSI_MIN, TREND_RSI_MAX = 40.0, 62.0
+MARKET_DROP_1H = -0.02  # BTC упал больше чем на 2% за час — новых покупок нет: весь рынок падает
+MARKET_CACHE_SEC = 60
+IDLE_RETRY_SEC = 3600  # «Монеты в дело»: если продажа монеты не прошла, следующая попытка через час
 EVENTS_KEEP = 8
 
 
@@ -96,28 +115,84 @@ def rsi(values: list[float], n: int = RSI_LEN) -> list[float]:
     return out
 
 
+STRATEGIES = {  # код -> (название, как объяснить новичку)
+    "dip": ("Откат", "резкий откат ниже средней при низком RSI"),
+    "bounce": ("Отскок", "цена ушла под нижнюю полосу Боллинджера и развернулась вверх"),
+    "trend": ("Тренд", "откат к короткой средней в растущем рынке"),
+}
+
+
 @dataclass
 class Params:
     tp: float = TP_GRID[1]
     rsi_buy: float = 30.0
+    strategy: str = "dip"
 
     def text(self) -> str:
-        return f"цель +{self.tp * 100:.1f}%, RSI < {self.rsi_buy:g}"
+        name = STRATEGIES.get(self.strategy, (self.strategy,))[0]
+        extra = f", RSI < {self.rsi_buy:g}" if self.strategy == "dip" else ""
+        return f"{name}: цель +{self.tp * 100:.1f}%{extra}"
 
 
-def signal_at(closes: list[float], ema_v: list[float], rsi_v: list[float], i: int, p: Params) -> bool:
-    """Покупать ли на закрытии свечи i: откат ниже средней при низком RSI, но не обвал."""
-    if i < EMA_LEN or i >= len(closes):
-        return False
+def variants() -> list[Params]:
+    """Сетка вариантов: 12 штук. Маленькая нарочно — чем больше вариантов, тем легче «подогнать» под историю."""
+    out = []
+    for tp in TP_GRID:
+        out += [Params(tp, r, "dip") for r in RSI_GRID]
+        out += [Params(tp, BOUNCE_RSI_MAX, "bounce"), Params(tp, TREND_RSI_MAX, "trend")]
+    return out
+
+
+def bollinger_low(values: list[float], n: int = BB_LEN, k: float = BB_K) -> tuple[list[float], list[float]]:
+    """(средняя, нижняя полоса) скользящим окном n."""
+    mid, low = [], []
+    s = s2 = 0.0
+    for i, v in enumerate(values):
+        s += v
+        s2 += v * v
+        if i >= n:
+            old = values[i - n]
+            s -= old
+            s2 -= old * old
+        w = min(i + 1, n)
+        m = s / w
+        sd = math.sqrt(max(s2 / w - m * m, 0.0))
+        mid.append(m)
+        low.append(m - k * sd)
+    return mid, low
+
+
+def indicators(closes: list[float]) -> dict[str, list[float]]:
+    mid, low = bollinger_low(closes)
+    return {"ema": ema(closes, EMA_LEN), "rsi": rsi(closes), "fast": ema(closes, TREND_FAST),
+            "slow": ema(closes, TREND_SLOW), "bb_mid": mid, "bb_low": low}
+
+
+def _no_crash(closes: list[float], i: int) -> bool:
     c = closes[i]
-    if rsi_v[i] >= p.rsi_buy or c > ema_v[i] * (1 - DEV_BELOW_EMA):
-        return False
-    if c / closes[i - 12] - 1 < CRASH_1H:
+    if i >= 12 and c / closes[i - 12] - 1 < CRASH_1H:
         return False
     day = i - 288
-    if day >= 0 and c / closes[day] - 1 < CRASH_24H:
+    return not (day >= 0 and c / closes[day] - 1 < CRASH_24H)
+
+
+def signal_at(closes: list[float], ind: dict[str, list[float]], i: int, p: Params) -> bool:
+    """Покупать ли на закрытии свечи i по стратегии p.strategy. Обвал (−3% за час, −8% за сутки) — никогда."""
+    if i < EMA_LEN or i >= len(closes):
         return False
-    return True
+    c, r = closes[i], ind["rsi"][i]
+    if p.strategy == "bounce":
+        low, mid = ind["bb_low"], ind["bb_mid"]
+        ok = (closes[i - 1] < low[i - 1] and c > low[i] and c > closes[i - 1] and r < p.rsi_buy
+              and c < mid[i] * (1 - DEV_BELOW_EMA))  # до средней ещё есть куда расти
+    elif p.strategy == "trend":
+        fast, mid, slow = ind["fast"], ind["ema"], ind["slow"]
+        ok = (i >= TREND_SLOW and fast[i] > mid[i] > slow[i] and mid[i] > mid[i - 12]  # рынок растёт
+              and closes[i - 1] <= fast[i - 1] and c > fast[i]  # откатились к средней и пошли вверх
+              and TREND_RSI_MIN <= r <= p.rsi_buy)
+    else:
+        ok = r < p.rsi_buy and c <= ind["ema"][i] * (1 - DEV_BELOW_EMA)
+    return ok and _no_crash(closes, i)
 
 
 def trade_return(entry: float, exit_: float, fee: float) -> float:
@@ -130,24 +205,27 @@ def target_price(entry: float, tp: float, fee: float) -> float:
     return entry * (1 + tp) / (1 - fee) ** 2
 
 
-def backtest(candles: list[list[float]], p: Params, fee: float) -> dict:
+def backtest(candles: list[list[float]], p: Params, fee: float, start: int = 0,
+             ind: dict[str, list[float]] | None = None) -> dict:
     """Проверка на истории. candles: [[время, open, high, low, close, объём], ...].
 
     Осторожные допущения: покупка по открытию следующей свечи чуть хуже цены, продажа по цели
     только если high выше цели; если в одной свече задеты и стоп, и цель — считаем, что стоп.
+    start: входить только начиная с этой свечи (индикаторы считаются по всей истории) —
+    так проверяем вариант на данных, которых он «не видел» при выборе.
     """
     opens = [float(c[1]) for c in candles]
     highs = [float(c[2]) for c in candles]
     lows = [float(c[3]) for c in candles]
     closes = [float(c[4]) for c in candles]
-    ema_v, rsi_v = ema(closes, EMA_LEN), rsi(closes)
+    ind = ind or indicators(closes)
     n = len(candles)
     equity, trades, wins, worst, hold = 1.0, 0, 0, 0.0, 0
     open_ret = None
-    i = EMA_LEN
+    i = max(EMA_LEN, start)
     max_hold = MAX_HOLD_SEC // CANDLE_SEC
     while i < n - 1:
-        if not signal_at(closes, ema_v, rsi_v, i, p):
+        if not signal_at(closes, ind, i, p):
             i += 1
             continue
         entry = opens[i + 1] * (1 + SLIPPAGE)
@@ -181,19 +259,40 @@ def backtest(candles: list[list[float]], p: Params, fee: float) -> dict:
         "open_pct": round(open_ret * 100, 3) if open_ret is not None else None,
         "worst_pct": round(worst * 100, 2),
         "avg_hold_min": round(hold * CANDLE_SEC / 60 / max(trades + (open_ret is not None), 1)),
-        "days": round(n * CANDLE_SEC / 86400, 1), "tp": p.tp, "rsi_buy": p.rsi_buy,
+        "days": round((n - start) * CANDLE_SEC / 86400, 1), "tp": p.tp, "rsi_buy": p.rsi_buy,
+        "strategy": p.strategy,
     }
 
 
 def best_params(candles: list[list[float]], fee: float) -> dict | None:
-    """Лучшие параметры из маленькой сетки (6 вариантов: чтобы не подгонять под историю)."""
+    """Выбор стратегии с проверкой на «новых» данных (walk-forward).
+
+    1. Первые ~65% истории: перебираем 12 вариантов (3 стратегии × цели) и берём лучший.
+    2. Оставшиеся ~35% этот вариант не видел. Если и там не в минус, а вся история в плюсе —
+       монета годится (ok=True). Так отсекаем варианты, которые просто «подогнались» под прошлое.
+    """
     if len(candles) < EMA_LEN + 50:
         return None
-    results = [backtest(candles, Params(tp, r), fee) for tp in TP_GRID for r in RSI_GRID]
-    results = [x for x in results if x["trades"] >= 2]
-    if not results:
+    split = int(len(candles) * TRAIN_SHARE)
+    train_c = candles[:split]
+    train_ind = indicators([float(c[4]) for c in train_c])
+    tried = [(p, backtest(train_c, p, fee, ind=train_ind)) for p in variants()]
+    tried = [x for x in tried if x[1]["trades"] >= 2]
+    if not tried:
         return None
-    return max(results, key=lambda x: (x["net_pct"], x["trades"]))
+    p, train = max(tried, key=lambda x: (x[1]["net_pct"], x[1]["trades"]))
+    full_ind = indicators([float(c[4]) for c in candles])
+    full = backtest(candles, p, fee, ind=full_ind)
+    test = backtest(candles, p, fee, start=split, ind=full_ind)
+    full.update(train_pct=train["net_pct"], test_pct=test["net_pct"], test_trades=test["trades"],
+                test_days=test["days"])
+    full["ok"] = (train["net_pct"] > 0 and test["net_pct"] >= 0
+                  and full["trades"] >= MIN_TRADES and full["net_pct"] >= MIN_NET_PCT)
+    return full
+
+
+def is_good(r: dict) -> bool:
+    return bool(r.get("ok", r.get("net_pct", 0) > 0))
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +303,9 @@ def best_params(candles: list[list[float]], fee: float) -> dict | None:
 def new_scalp_state() -> dict:
     # positions: биржа -> позиция (на каждой бирже своя, деньги разных бирж работают одновременно)
     # paper: биржа -> тестовый баланс
+    # use_coins: «Монеты в дело» — продавать лежащие без дела монеты в USDT, чтобы ими торговал режим $5
     return {"on": False, "positions": {}, "paper": {}, "stats": {"cycles": 0, "wins": 0, "pnl": 0.0, "since": 0.0},
-            "events": [], "last_buy_candle": {}}
+            "events": [], "last_buy_candle": {}, "use_coins": False, "convert_tried": {}}
 
 
 class Scalper:
@@ -217,6 +317,7 @@ class Scalper:
         self.reasons: dict[str, str] = {}  # биржа -> что режим делал на последнем шаге и почему
         self._cur: str | None = None  # биржа, с которой сейчас работает шаг
         self._paper_virtual: set[str] = set()  # биржи, где тест идёт на виртуальных $5 (реальных было меньше)
+        self._market: dict[str, tuple[float, float | None]] = {}  # биржа -> (когда, изменение BTC за час)
         self.last_step = 0.0
 
     @property
@@ -356,7 +457,7 @@ class Scalper:
             return res
 
         results = [r for r in await asyncio.gather(*(one(s) for s in self.symbols(name))) if r]
-        results.sort(key=lambda r: -r["net_pct"])
+        results.sort(key=lambda r: (not is_good(r), -r.get("test_pct", 0), -r["net_pct"]))
         self.ranking[name] = results
         self.ranked_at[name] = time.time()
         return results
@@ -368,20 +469,24 @@ class Scalper:
             return f"📊 Проверка на истории ({title}): нет данных. Биржа не отдала свечи, попробуй позже."
         days = rows[0]["days"]
         lines = [f"📊 <b>Проверка на истории</b>: {title}, свечи по 5 мин за {days:g} дн., комиссии учтены",
-                 "<i>Монета: сделок (в плюс) · итог · худшая просадка · цель</i>"]
+                 "Для каждой монеты бот перебрал 3 стратегии (Откат, Отскок, Тренд) на первых ~2/3 истории "
+                 "и проверил лучшую на последней трети, которую она «не видела».",
+                 "<i>Монета [стратегия]: сделок (в плюс) · итог · на новых данных · худшая просадка · цель</i>"]
         for r in rows[:10]:
-            icon = "🟢" if r["net_pct"] > 0 else "🔴"
+            icon = "🟢" if is_good(r) else "🔴"
             open_part = f", открыта {r['open_pct']:+.2f}%" if r["open_pct"] is not None else ""
-            lines.append(f"{icon} {html.escape(r['symbol'].split('/')[0])}: {r['trades']} ({r['wins']}) · "
-                         f"<b>{r['net_pct']:+.2f}%</b>{open_part} · {r['worst_pct']:.1f}% · +{r['tp'] * 100:.1f}%")
-        good = [r for r in rows if r["net_pct"] > 0]
+            strat = STRATEGIES.get(r.get("strategy", "dip"), ("?",))[0]
+            test = f" · новые {r['test_pct']:+.2f}%" if r.get("test_pct") is not None else ""
+            lines.append(f"{icon} {html.escape(r['symbol'].split('/')[0])} [{strat}]: {r['trades']} ({r['wins']}) · "
+                         f"<b>{r['net_pct']:+.2f}%</b>{open_part}{test} · {r['worst_pct']:.1f}% · +{r['tp'] * 100:.1f}%")
+        good = [r for r in rows if is_good(r)]
         lines.append("")
         if good:
-            lines.append(f"Бот торгует только 🟢 монеты (сейчас {len(good)}). Это прошлое, а не обещание: "
-                         "на другом рынке результат будет другим.")
+            lines.append(f"Бот торгует только 🟢 монеты (сейчас {len(good)}): от {MIN_TRADES} сделок и от "
+                         f"+{MIN_NET_PCT:g}% на всей истории и не в минусе на новых данных. Это прошлое, а не обещание: на другом рынке результат будет другим.")
         else:
-            lines.append("Сейчас ни одна монета не в плюсе на истории: бот ждёт и не покупает. Это правильно — "
-                         "лучше стоять, чем торговать в минус.")
+            lines.append("Сейчас ни одна монета не прошла проверку: бот ждёт и не покупает. Это правильно — "
+                         "лучше стоять, чем торговать в минус. Проверка повторяется каждые 6 часов.")
         return "\n".join(lines)
 
     # --- шаг -----------------------------------------------------------------
@@ -453,15 +558,29 @@ class Scalper:
         t = self.trader
         quote = t.settings.quote
         free = await self._free_usd(name)
+        if self.st["use_coins"] and free < self._min_cost(name, f"BTC/{quote}"):
+            converted = await self._convert_idle(name)
+            if converted:  # деньги пришли: покупать будем на следующем шаге, по свежему балансу
+                return converted
         cost = math.floor(min(free, t.settings.max_trade_usd) * 100 + 1e-6) / 100
         ranking = await self.rank(name)
-        good = [r for r in ranking if r["net_pct"] > 0][:TOP_COINS]
+        good = [r for r in ranking if is_good(r)][:TOP_COINS]
         if not good:
-            self.last_reason = ("жду: ни одна монета сейчас не в плюсе на проверке по истории" if ranking
+            self.last_reason = ("жду: ни одна монета сейчас не прошла проверку на истории (3 стратегии)" if ranking
                                 else "биржа не отдала свечи, попробую позже")
             return []
         min_need = min(self._min_cost(name, r["symbol"]) for r in good)
         if free < min_need:
+            await self._fresh_balances(name)
+            idle = self._idle_coins_text(name)
+            if idle and not self.st["use_coins"]:
+                self.last_reason = (f"на счёте {free:.2f} {quote}, а деньги лежат в монетах ({idle}). Включи «Монеты "
+                                    "в дело» (/autopilot) — бот сам продаст их в USDT и пустит в торговлю")
+                return []
+            if idle and not t.state.live:
+                self.last_reason = (f"тест: {free:.2f} {quote} на счёте. В реальном режиме «Монеты в дело» продаст "
+                                    f"{idle} в USDT и начнёт торговать")
+                return []
             self.last_reason = (f"мало денег на торговом счёте: {free:.2f} {quote}, биржа принимает ордер от "
                                 f"${min_need:.2f}. Если деньги на Funding — переведи на торговый счёт")
             return []
@@ -480,12 +599,17 @@ class Scalper:
                 continue
             closes = [float(c[4]) for c in candles[:-1]]  # последняя свеча ещё не закрылась
             i = len(closes) - 1
-            p = Params(r["tp"], r["rsi_buy"])
+            p = Params(r["tp"], r["rsi_buy"], r.get("strategy", "dip"))
             candle_ts = float(candles[-2][0])
             if self.st["last_buy_candle"].get(f"{name}:{symbol}") == candle_ts:
                 continue
-            if not signal_at(closes, ema(closes, EMA_LEN), rsi(closes), i, p):
+            if not signal_at(closes, indicators(closes), i, p):
                 continue
+            drop = await self.market_drop(name)
+            if drop is not None and drop < MARKET_DROP_1H:
+                self.last_reason = (f"тормоз рынка: BTC {drop * 100:+.1f}% за час — весь рынок падает, "
+                                    f"сигнал по {symbol.split('/')[0]} пропускаю")
+                return []
             ticker = await t.scanner.exchanges[name].fetch_ticker(symbol)
             bid, ask = float(ticker.get("bid") or 0), float(ticker.get("ask") or 0)
             if not bid or not ask or (ask - bid) / bid > MAX_SPREAD:
@@ -495,8 +619,9 @@ class Scalper:
                 continue
             self.st["last_buy_candle"][f"{name}:{symbol}"] = candle_ts
             return await self._buy(name, symbol, cost, ask, p, now)
-        names = ", ".join(r["symbol"].split("/")[0] for r in good)
-        self.last_reason = f"жду отката: слежу за {names} (${cost:.2f} готовы к покупке)"
+        names = ", ".join(f"{r['symbol'].split('/')[0]} ({STRATEGIES.get(r.get('strategy', 'dip'), ('?',))[0]})"
+                          for r in good)
+        self.last_reason = f"жду сигнала: слежу за {names}, ${cost:.2f} готовы к покупке"
         if skipped:
             self.last_reason += (f". Был откат на {', '.join(skipped)}, но с ${cost:.2f} продажу потом не пропустит "
                                  "минимум биржи (крупный шаг количества): нужно чуть больше денег")
@@ -521,22 +646,113 @@ class Scalper:
         entry = spent / got * (1 - fee)  # цена до комиссии: комиссию считаем в target_price
         pos = {"exchange": name, "symbol": symbol, "amount": got, "cost": spent, "entry": entry,
                "tp": target_price(entry, p.tp, fee), "tp_pct": p.tp, "fee": fee, "opened_at": now,
-               "order_id": None, "live": live, "breakeven": False}
+               "order_id": None, "live": live, "breakeven": False, "strategy": p.strategy}
         self.pos = pos
         t._record(TradeRecord(now, name, "buy", symbol, live, spent, t.settings.quote, got, coin, spent,
                               source="scalp", order_id=oid,
-                              note="режим $5: покупка на откате" + ("" if live else " (тест)")))
+                              note=f"режим $5: {p.text()}" + ("" if live else " (тест)")))
         mode = "" if live else "🧪 ТЕСТ: "
         tp_line = f"Продажа выставлена по {pos['tp']:.6g} (+{p.tp * 100:.1f}% после комиссий)."
         try:
             await self._place_tp(pos)
         except TradeError as e:
             tp_line = f"⚠️ {html.escape(str(e))}"
+        why = STRATEGIES.get(p.strategy, ("", ""))
         text = (f"🎯 {mode}<b>Режим $5: купил {html.escape(coin)}</b> на {html.escape(self._name(name))}\n"
-                f"${spent:.2f} → {got:.8g} {html.escape(coin)} по ≈{entry:.6g}\n" + tp_line)
+                f"${spent:.2f} → {got:.8g} {html.escape(coin)} по ≈{entry:.6g}\n"
+                f"Сигнал «{why[0]}»: {why[1]}.\n" + tp_line)
         self._event(f"купил {coin} на ${spent:.2f}")
         self.last_reason = f"держу {coin}, жду цели {pos['tp']:.6g}"
         return [text]
+
+    # --- тормоз рынка и «Монеты в дело» ---------------------------------------
+
+    async def market_drop(self, name: str, now: float | None = None) -> float | None:
+        """Изменение BTC за последний час на этой бирже (None — не узнали: тогда не мешаем торговле)."""
+        now = time.time() if now is None else now
+        cached = self._market.get(name)
+        if cached and now - cached[0] < MARKET_CACHE_SEC:
+            return cached[1]
+        symbol = f"BTC/{self.trader.settings.quote}"
+        drop = None
+        if self.trader.scanner.market(name, symbol):
+            candles = await self._candles(name, symbol, 14)
+            closes = [float(c[4]) for c in candles]
+            if len(closes) >= 13 and closes[-13] > 0:
+                drop = closes[-1] / closes[-13] - 1
+        self._market[name] = (now, drop)
+        return drop
+
+    def _idle_rows(self, name: str) -> list[tuple[str, float, float]]:
+        """Монеты на спот-счёте, которые можно продать в USDT: [(монета, свободно, ≈$)] из последнего баланса."""
+        at_rows = self.trader.balance_cache.get(name)
+        if not at_rows:
+            return []
+        quote = self.trader.settings.quote
+        busy = {p["symbol"].split("/")[0] for p in self.positions.values() if p and p.get("exchange") == name}
+        out = []
+        for coin, free, total, usd in at_rows[1]:
+            if coin == quote or coin in busy or not usd or not total or free <= 0:
+                continue
+            symbol = f"{coin}/{quote}"
+            m = self.trader.scanner.market(name, symbol)
+            if not m or m.get("active") is False:
+                continue
+            price = usd / total
+            if free * price >= self._min_cost(name, symbol, price) * 1.03:
+                out.append((coin, free, free * price))
+        return out
+
+    async def _fresh_balances(self, name: str, max_age: float = 300) -> None:
+        cached = self.trader.balance_cache.get(name)
+        if cached and time.time() - cached[0] < max_age:
+            return
+        try:
+            await self.trader.balances(name)
+        except Exception as e:
+            log.info("Баланс %s: %s", name, e)
+
+    def _idle_coins_text(self, name: str) -> str:
+        return ", ".join(f"{html.escape(c)} ≈${usd:.2f}" for c, _, usd in self._idle_rows(name))
+
+    async def _convert_idle(self, name: str) -> list[str]:
+        """«Монеты в дело»: продать по рынку монеты, которые лежат без дела, чтобы режим $5 торговал этими деньгами.
+        Только в реальном режиме, только больше минимального ордера, и не ту монету, что в открытой сделке."""
+        t = self.trader
+        await self._fresh_balances(name)
+        if not t.state.live:
+            return []
+        quote = t.settings.quote
+        tried = self.st["convert_tried"]
+        out = []
+        for coin, free, usd in self._idle_rows(name):
+            key = f"{name}:{coin}"
+            if time.time() - float(tried.get(key) or 0) < IDLE_RETRY_SEC:
+                continue
+            tried[key] = time.time()
+            symbol = f"{coin}/{quote}"
+            ex = t._ex(name)
+            try:
+                amount = t._amount(ex, symbol, free)
+                order = await ex.create_market_sell_order(symbol, amount)
+                _, got = await t._settle(ex, name, order, symbol, "sell", self._fee(name, symbol))
+            except Exception as e:
+                self._event(f"не смог продать {coin} в {quote}: {human_error(e)}")
+                out.append(f"⚠️ Автопилот: не смог продать {html.escape(coin)} в {quote} на "
+                           f"{html.escape(self._name(name))}: {html.escape(human_error(e))}. Попробую через час.")
+                continue
+            tried.pop(key, None)
+            t._record(TradeRecord(time.time(), name, "sell", symbol, True, amount, coin, got, quote, got,
+                                  source="scalp", order_id=str(order.get("id")),
+                                  note="автопилот: монета без дела → USDT для режима $5"))
+            self._event(f"продал {coin} → {got:.2f} {quote}: деньги в дело")
+            out.append(f"🪙 <b>Автопилот: {html.escape(coin)} → {got:.2f} {quote}</b> на {html.escape(self._name(name))}\n"
+                       "Монета лежала без дела, теперь эти деньги торгует режим $5. "
+                       "Выключить: /scalp → «Монеты в дело».")
+        if out:
+            t.balance_cache.pop(name, None)
+            self.last_reason = "деньги в USDT, ищу сигнал"
+        return out
 
     async def _place_tp(self, pos: dict) -> None:
         """Выставить (или переставить) лимитную продажу по цели. В тесте только запоминаем цену."""
@@ -692,18 +908,21 @@ class Scalper:
         coin = pos["symbol"].split("/")[0]
         hours = (time.time() - pos["opened_at"]) / 3600
         be = " (безубыток)" if pos["breakeven"] else ""
-        return (f"<b>{fmt(pos['amount'])} {html.escape(coin)}</b> за ${pos['cost']:.2f}, держу {hours:.1f} ч, "
+        strat = STRATEGIES.get(pos.get("strategy") or "dip", ("",))[0]
+        return (f"<b>{fmt(pos['amount'])} {html.escape(coin)}</b> за ${pos['cost']:.2f} [{strat}], держу {hours:.1f} ч, "
                 f"продажа по {pos['tp']:.6g}{be}")
 
     def status_text(self) -> str:
         st, t = self.st, self.trader
         live = t.state.live
-        lines = ["🎯 <b>Режим $5: ловец откатов</b>",
-                 "Покупает монету на откате на все свободные USDT и сразу ставит продажу на +0,6…1,3% после "
-                 "комиссий. Два ордера вместо трёх, поэтому хватает $5. Торгует на каждой бирже с ключом "
-                 "своими деньгами одновременно."]
+        lines = ["🎯 <b>Режим $5 (автопилот)</b>",
+                 "Сам выбирает монету и стратегию (Откат, Отскок или Тренд — что прошло проверку на истории), "
+                 "покупает на все свободные USDT и сразу ставит продажу на +0,6…1,3% после комиссий. "
+                 "Торгует на каждой бирже с ключом своими деньгами одновременно."]
         state = ("🟢 включён" if st["on"] else "⚪️ выключен") + (", 🔴 реальные деньги" if live else ", 🧪 тест")
         lines.append(f"Состояние: <b>{state}</b>")
+        lines.append("🪙 Монеты в дело: " + ("<b>вкл</b> — лежащие монеты бот продаёт в USDT и торгует ими"
+                                             if st["use_coins"] else "выкл (монеты на счёте не трогаю)"))
         names = self.exchanges() + [n for n in self.positions if n not in self.exchanges()]
         for n in names:
             lines.append(f"\n<b>{html.escape(self._name(n))}</b>")
@@ -744,15 +963,18 @@ class Scalper:
 
     def status_dict(self) -> dict:
         st = self.st
-        keys = ("exchange", "symbol", "amount", "cost", "entry", "tp", "opened_at", "breakeven")
+        keys = ("exchange", "symbol", "amount", "cost", "entry", "tp", "opened_at", "breakeven", "strategy")
         positions = [{k: p.get(k) for k in keys} for p in self.positions.values() if p]
         paper = {n: v for n, v in st["paper"].items() if v is not None}
         return {"on": st["on"], "live": self.trader.state.live, "reason": self.last_reason,
+                "use_coins": bool(st["use_coins"]),
                 "reasons": {n: r for n, r in self.reasons.items() if r},
                 "real": {n: self._real_line(n) for n in self.exchanges() if self._real_line(n)},
                 "paper": paper, "paper_usd": round(sum(paper.values()), 4) if paper else None,
                 "stats": dict(st["stats"]), "positions": positions, "pos": positions[0] if positions else None,
-                "top": [{k: r[k] for k in ("symbol", "trades", "wins", "net_pct", "worst_pct", "tp")}
+                "top": [{**{k: r.get(k) for k in ("symbol", "trades", "wins", "net_pct", "worst_pct", "tp",
+                                                   "strategy", "test_pct")},
+                         "ok": is_good(r), "strategy_name": STRATEGIES.get(r.get("strategy") or "dip", ("?",))[0]}
                         for r in (self.ranking.get(self.exchange() or "") or [])[:5]]}
 
 

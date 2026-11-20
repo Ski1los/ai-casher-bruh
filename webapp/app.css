@@ -384,3 +384,7 @@ img.coin { object-fit: cover; background: var(--card2); }
 .tok-stats .k { font-size: 10.5px; color: var(--muted); }
 .tok-stats .num { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .token .btn.sm { padding: 7px 12px; }
+
+/* Автопилот (режим $5) */
+.pilot-card { border: 1px solid var(--line); }
+.pilot-card.on { border-color: transparent; background: linear-gradient(var(--card), var(--card)) padding-box, linear-gradient(135deg, var(--accent, #7c5cff), var(--accent2, #22d3ee)) border-box; border: 1.5px solid transparent; }
