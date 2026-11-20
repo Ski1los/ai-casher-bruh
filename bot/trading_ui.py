@@ -230,6 +230,108 @@ async def keys_text(b: ArbitrageBot) -> str:
     return "\n".join(lines)
 
 
+async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
+    """/setup: чек-лист «готов ли бот торговать» — по шагам, с кнопками для следующего шага."""
+    t, sc, quote = b.trader, b.scalper, b.settings.quote
+    lines = ["🚀 <b>Готовность к торговле</b>", ""]
+    todo: list[str] = []
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # 1. ключи
+    if not t.creds:
+        lines.append("1️⃣ ❌ <b>Ключи бирж не подключены.</b> Без них бот только показывает сигналы.")
+        todo.append("подключить ключ Bybit или BingX (кнопка «Как подключить ключ»)")
+    else:
+        status = await t.check_keys()
+        try:
+            await t.inspect_keys()
+        except Exception:
+            pass
+        for name, st in status.items():
+            title = html.escape(b.scanner.display_name(name))
+            problem = key_trade_problem(name, t.key_info.get(name)) if st == "ok" else None
+            if st != "ok":
+                lines.append(f"1️⃣ ❌ {title}: ключ не работает — {html.escape(st)}")
+                todo.append(f"исправить ключ {title} (создай новый и замени в Render → Environment)")
+            elif problem:
+                lines.append(f"1️⃣ ⚠️ {title}: ключ работает, но {html.escape(problem)}")
+                todo.append(f"включить право «Спот-торговля» у ключа {title}")
+            else:
+                lines.append(f"1️⃣ ✅ {title}: ключ работает, торговать может")
+    name = sc.exchange()
+
+    # 2. деньги
+    if name:
+        title = html.escape(b.scanner.display_name(name))
+        try:
+            free = await t.free(name, quote)
+        except Exception as e:
+            free = None
+            lines.append(f"2️⃣ ⚠️ {title}: баланс не прочитан ({html.escape(human_error(e))})")
+        if free is not None:
+            if free >= 5:
+                lines.append(f"2️⃣ ✅ На торговом счёте {title}: <b>{free:.2f} {quote}</b> — режиму $5 хватает")
+            else:
+                funding = await t.funding_usd(name)
+                if funding and funding >= 1:
+                    lines.append(f"2️⃣ ❌ На торговом счёте {free:.2f} {quote}, а на <b>Funding ${funding:.2f}</b>. "
+                                 "Бот видит только торговый счёт")
+                    todo.append(f"перевести деньги: приложение {title} → Активы → Перевод → Funding → "
+                                + ("Unified Trading" if name == "bybit" else "Spot"))
+                else:
+                    lines.append(f"2️⃣ ❌ На торговом счёте {free:.2f} {quote}: биржа принимает ордер от $5")
+                    todo.append(f"пополнить торговый счёт {title} хотя бы до $5,5 (USDT)")
+    else:
+        lines.append("2️⃣ ➖ Деньги проверю, когда заработает ключ")
+
+    # 3. проверка стратегии на истории
+    if name:
+        try:
+            ranking = await sc.rank(name)
+        except Exception:
+            ranking = []
+        good = [r for r in ranking if r["net_pct"] > 0]
+        if good:
+            top = ", ".join(f"{html.escape(r['symbol'].split('/')[0])} {r['net_pct']:+.1f}%" for r in good[:3])
+            lines.append(f"3️⃣ ✅ Проверка на истории: в плюсе {len(good)} монет ({top})")
+        elif ranking:
+            lines.append("3️⃣ ⏳ Проверка на истории: сейчас ни одна монета не в плюсе — бот будет ждать, "
+                         "это нормально и бережёт деньги")
+        else:
+            lines.append("3️⃣ ⚠️ Биржа пока не отдала свечи для проверки, попробую позже")
+
+    # 4. режим $5 и реальный режим
+    lines.append(f"4️⃣ {'✅' if sc.on else '⬜️'} Режим $5 (ловец откатов): {'включён' if sc.on else 'выключен'}"
+                 + (f" — {html.escape(sc.last_reason)}" if sc.on and sc.last_reason else ""))
+    lines.append(f"5️⃣ {'🔴' if t.state.live else '🧪'} Режим: "
+                 + ("<b>реальный</b> — ордера уходят на биржу" if t.state.live else "<b>тест</b> — ордера не отправляются"))
+    if b.duplicate_running():
+        lines.append("⚠️ Работают две копии бота: удали лишний сервис в Render")
+        todo.append("удалить лишний сервис в Render")
+
+    lines.append("")
+    if todo:
+        lines.append("<b>Осталось сделать:</b>")
+        lines += [f"• {x}" for x in todo]
+    elif not sc.on:
+        lines.append("✅ Всё готово. Включи режим $5: сначала в тесте, посмотри пару сделок, потом реальный режим.")
+    elif not t.state.live:
+        lines.append("✅ Режим $5 работает в тесте. Когда увидишь, как он торгует, включи реальный режим.")
+    else:
+        lines.append("✅ <b>Бот торгует реально.</b> Состояние: /scalp · остановить всё: /stop")
+    lines.append("\n<i>Честно: прибыль не гарантирована. Ставь только деньги, которые не жалко.</i>")
+
+    if not t.creds or any(st != "ok" for st in t.key_status.values()):
+        rows.append([InlineKeyboardButton(text="🔑 Как подключить ключ", callback_data="su:keys")])
+    if name and not sc.on:
+        rows.append([InlineKeyboardButton(text="▶️ Включить режим $5", callback_data="sc:on")])
+    if name and sc.on and not t.state.live and not todo:
+        rows.append([InlineKeyboardButton(text="🔴 Включить реальный режим", callback_data="tr:live")])
+    rows.append([InlineKeyboardButton(text="📊 Проверка на истории", callback_data="sc:bt"),
+                 InlineKeyboardButton(text="🔄 Проверить снова", callback_data="su:again")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def preflight(b: ArbitrageBot) -> list[str]:
     """Что помешает автоторговле, ещё до первой сделки: права ключей и деньги на торговом счёте."""
     t = b.trader
@@ -305,6 +407,30 @@ def register(b: ArbitrageBot) -> None:
     async def cmd_trade(message: Message) -> None:
         if await owner_only(message):
             await b._answer(message, b.trader.panel_text(), panel_keyboard(b))
+
+    @dp.message(Command("setup", "ready", "go"))
+    async def cmd_setup(message: Message) -> None:
+        if not await owner_only(message):
+            return
+        wait = await message.answer("🔍 Проверяю ключи, деньги и стратегию…")
+        text, markup = await readiness(b)
+        try:
+            await wait.delete()
+        except Exception:
+            pass
+        await b._answer(message, text, markup)
+
+    @dp.callback_query(F.data.startswith("su:"))
+    async def cb_setup(cb: CallbackQuery) -> None:
+        if not await cb_owner(cb):
+            return
+        action = cb.data.split(":", 1)[1]
+        await cb.answer("Проверяю…" if action == "again" else None)
+        if action == "keys":
+            await b._send(chat_of(cb), await keys_text(b))
+        else:
+            text, markup = await readiness(b)
+            await b._send(chat_of(cb), text, markup)
 
     @dp.message(Command("keys"))
     async def cmd_keys(message: Message) -> None:
