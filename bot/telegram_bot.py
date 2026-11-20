@@ -32,7 +32,7 @@ from . import extras_ui, market_ui, trading_ui
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
-from .cloud import (TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
+from .cloud import (BOT_VERSION, TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
                     version_text)
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
@@ -134,6 +134,7 @@ HELP_TEXT = """\
 /demo_stop — остановить демо
 
 <b>Торговля</b> 💼 (сначала в тестовом режиме: ордера не отправляются)
+/setup — 🚀 <b>с чего начать</b>: проверка ключей, денег и стратегии, следующий шаг кнопкой
 /trade — панель: балансы, ордера, режим, автоторговля
 /keys — как подключить биржу (ключ без права вывода)
 /balance — балансы на биржах
@@ -473,6 +474,7 @@ class ArbitrageBot:
             "demo": self.demo.export(),
             "settings": self._settings_state(),
             "trading": self.trader.export(),
+            "bot_version": BOT_VERSION,
         }
 
     def save_trading(self) -> None:
@@ -562,13 +564,20 @@ class ArbitrageBot:
         self._last_backup = time.time()
         await self.backup.save(self._state())
 
-    async def _restore_backup(self) -> None:
+    async def _restore_backup(self) -> str | None:
+        """Подтягивает состояние из Telegram. Возвращает: "fresh" (бэкапа нет — новая установка),
+        "updated" (версия бота сменилась), None (обычный перезапуск или бэкап выключен)."""
         if self.backup is None:
             log.warning("ALLOWED_USER_IDS пустой: резервная копия в Telegram выключена")
-            return
-        state = await self.backup.restore()
+            return None
+        try:
+            state = await self.backup.restore()
+        except Exception as e:
+            log.warning("Бэкап не прочитан: %s", e)
+            return None
         if not state:
-            return
+            return "fresh"
+        result = "updated" if str(state.get("bot_version") or "") != BOT_VERSION else None
         if state.get("settings") and not self.settings_file.exists():
             self._apply_saved_settings(state["settings"])
             self._save_settings()
@@ -577,11 +586,30 @@ class ArbitrageBot:
             self.save_trading()
         if DEMO_FILE.exists():
             log.info("Бэкап найден, но есть локальные данные. Использую локальные")
-            return
+            return result
         if state.get("demo"):
             self.demo.restore(state["demo"])
         self.subscribers.replace(state.get("subscribers") or [])
         log.info("Состояние восстановлено из Telegram (демо-счетов: %d)", len(self.demo.accounts))
+        return result
+
+    async def _hello(self, kind: str | None) -> None:
+        """Первое сообщение владельцу после установки или обновления: что дальше нажать."""
+        if self.owner_id is None or kind is None:
+            return
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Проверить готовность",
+                                                                              callback_data="su:again")]])
+        if kind == "fresh":
+            text = (f"👋 <b>Бот установлен и работает</b> ({html.escape(version_text())}).\n\n"
+                    "Дальше всё по кнопке ниже (или /setup): бот проверит ключи бирж, деньги на торговом счёте "
+                    "и стратегию и подскажет следующий шаг.\n"
+                    "С суммой от $5 торгует <b>режим $5</b> (/scalp). Сначала всё работает в тесте, "
+                    "реальные деньги — только после твоего подтверждения.")
+        else:
+            text = (f"🆕 <b>Бот обновлён</b> до {html.escape(version_text())}. Настройки и история на месте.\n"
+                    "Проверить, всё ли готово к торговле: /setup")
+        await self._send(self.owner_id, text, markup)
+        await self._backup_now()  # запомнить версию, чтобы не здороваться при каждом перезапуске
 
     # --- отправка -----------------------------------------------------------
 
@@ -888,7 +916,10 @@ class ArbitrageBot:
             if not self._allowed(message):
                 await message.answer("⛔ Доступ закрыт. Твой ID: /myid")
                 return
-            await message.answer(HELP_TEXT, reply_markup=self.app_markup())
+            rows = list((self.app_markup() or InlineKeyboardMarkup(inline_keyboard=[])).inline_keyboard)
+            if message.from_user and message.from_user.id == self.owner_id:
+                rows.insert(0, [InlineKeyboardButton(text="🚀 С чего начать: готовность к торговле", callback_data="su:again")])
+            await message.answer(HELP_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
         @dp.message(Command("app"))
         async def cmd_app(message: Message) -> None:
@@ -1534,6 +1565,7 @@ class ArbitrageBot:
                     BotCommand(command="alert", description="🔔 Ценовой алерт"),
                     BotCommand(command="alerts", description="Мои алерты"),
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
+                    BotCommand(command="setup", description="🚀 Готовность к торговле: что осталось"),
                     BotCommand(command="scalp", description="🎯 Режим $5: ловец откатов"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
                     BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
@@ -1553,7 +1585,8 @@ class ArbitrageBot:
             if not self.allowed_ids:
                 log.warning("ALLOWED_USER_IDS пустой: ботом может пользоваться кто угодно")
 
-            await self._restore_backup()
+            hello = await self._restore_backup()
+            tasks.append(asyncio.create_task(self._hello(hello)))
             if self.trader.creds:
                 tasks.append(asyncio.create_task(self._check_keys_on_start()))
                 tasks.append(asyncio.create_task(self._keys_watch_loop()))
