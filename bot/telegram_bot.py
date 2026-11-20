@@ -13,6 +13,7 @@ from collections import OrderedDict
 from dataclasses import asdict
 from pathlib import Path
 
+import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
@@ -28,11 +29,11 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import extras_ui, market_ui, trading_ui
+from . import extras_ui, market_ui, trading_ui, updater
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
-from .cloud import (BOT_VERSION, TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
+from .cloud import (BOT_VERSION, STATUS, TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
                     version_text)
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
@@ -934,6 +935,30 @@ class ArbitrageBot:
     def _register_handlers(self) -> None:
         dp = self.dp
 
+        @dp.message(Command("update", "version"))
+        async def cmd_update(message: Message) -> None:
+            if not self._allowed(message):
+                return
+            text, markup = await self.update_text()
+            await self._answer(message, text, markup)
+
+        @dp.callback_query(F.data == "up:go")
+        async def cb_update(cb: CallbackQuery) -> None:
+            if self.owner_id is None or cb.from_user.id != self.owner_id:
+                await cb.answer("Только владелец", show_alert=True)
+                return
+            hook = updater.hook_url()
+            if not hook:
+                await cb.answer("Нет RENDER_DEPLOY_HOOK_URL: /update", show_alert=True)
+                return
+            await cb.answer()
+            async with aiohttp.ClientSession() as session:
+                ok, msg = await updater.trigger(session, hook)
+            if ok and updater.UPDATE.get("latest"):
+                updater.UPDATE["triggered"][updater.UPDATE["latest"]] = time.time()
+            await self._send(cb.message.chat.id, ("✅ " + msg + ". Через 3–5 минут бот перезапустится и напишет «🆕 Бот обновлён»."
+                                                  if ok else "❌ " + html.escape(msg)))
+
         @dp.message(Command("myid"))
         async def cmd_myid(message: Message) -> None:
             uid = message.from_user.id if message.from_user else "?"
@@ -1547,6 +1572,62 @@ class ArbitrageBot:
                 log.exception("Ошибка проверки ключей")
             await asyncio.sleep(KEYS_WATCH_SEC)
 
+    async def update_text(self) -> tuple[str, InlineKeyboardMarkup | None]:
+        """/update: какая версия стоит, какая последняя и как обновиться."""
+        async with aiohttp.ClientSession() as session:
+            latest = await updater.check(session)
+        lines = [f"⬆️ <b>Обновления</b>\nСейчас работает: <b>{html.escape(version_text())}</b>"]
+        if latest is None:
+            lines.append(f"Последнюю версию узнать не получилось ({html.escape(updater.UPDATE.get('error') or 'нет связи')}).")
+        else:
+            lines.append(f"Последняя версия в репозитории: <b>v{latest}</b>")
+        problem = updater.hook_problem()
+        if problem:
+            lines.append("⚠️ " + html.escape(problem))
+        markup = None
+        if updater.is_newer(latest):
+            if updater.hook_url():
+                lines.append("Нажми кнопку — Render поставит новую версию за 3–5 минут. Настройки и история сохранятся.")
+                markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                    text=f"🔄 Обновить до v{latest}", callback_data="up:go")]])
+            else:
+                lines += ["", updater.MANUAL_STEPS, "", updater.HOOK_STEPS]
+        elif latest is not None:
+            lines.append("✅ Стоит последняя версия." + ("" if updater.hook_url() else "\n\n" + updater.HOOK_STEPS))
+        STATUS["update"] = updater.status_line()
+        return "\n".join(lines), markup
+
+    async def _update_loop(self) -> None:
+        """Раз в 30 минут: есть ли новая версия. Есть deploy hook — обновляемся сами, нет — говорим, что нажать."""
+        await asyncio.sleep(90)
+        async with aiohttp.ClientSession() as session:
+            while True:
+                try:
+                    latest = await updater.check(session)
+                    STATUS["update"] = updater.status_line()
+                    if updater.is_newer(latest):
+                        await self._on_new_version(session, latest)
+                except Exception:
+                    log.exception("Ошибка проверки обновлений")
+                await asyncio.sleep(updater.CHECK_SEC)
+
+    async def _on_new_version(self, session, latest: str) -> None:
+        hook = updater.hook_url()
+        if hook and updater.should_trigger(latest):
+            updater.UPDATE["triggered"][latest] = time.time()
+            ok, msg = await updater.trigger(session, hook)
+            log.info("Самообновление до v%s: %s", latest, msg)
+            if self.owner_id:
+                await self._send(self.owner_id, (f"⬆️ Нашёл новую версию <b>v{latest}</b> (сейчас v{BOT_VERSION}). "
+                                                 + ("Обновляюсь сам, это 3–5 минут. Сделки и настройки сохранятся."
+                                                    if ok else f"Сам обновиться не смог: {html.escape(msg)}.\n\n"
+                                                    + updater.MANUAL_STEPS)))
+        elif not hook and updater.should_notify(latest) and self.owner_id:
+            updater.UPDATE["notified"][latest] = time.time()
+            await self._send(self.owner_id, (f"⬆️ <b>Вышла новая версия бота v{latest}</b>, а работает v{BOT_VERSION}: "
+                                             "Render сам не обновляет этот сервис.\n\n"
+                                             + updater.MANUAL_STEPS + "\n\n" + updater.HOOK_STEPS))
+
     async def _get_me_with_retry(self, tries: int = 8):
         """Связь с Telegram при старте иногда пропадает на секунды: не падаем сразу, пробуем ещё."""
         from aiogram.exceptions import TelegramNetworkError, TelegramServerError
@@ -1609,6 +1690,7 @@ class ArbitrageBot:
                     BotCommand(command="report", description="Отчёт о работе"),
                     BotCommand(command="status", description="Последний скан"),
                     BotCommand(command="settings", description="Настройки"),
+                    BotCommand(command="update", description="⬆️ Версия и обновление"),
                     BotCommand(command="help", description="Помощь"),
                 ]
             )
@@ -1635,6 +1717,8 @@ class ArbitrageBot:
                 except Exception as e:
                     log.warning("Не удалось поставить кнопку приложения: %s", e)
             tasks.append(asyncio.create_task(self._daily_report_loop()))
+            if cloud_port() or os.getenv("RENDER"):
+                tasks.append(asyncio.create_task(self._update_loop()))
             await self.dp.start_polling(self.bot)
         finally:
             aiogram_log.removeHandler(self.conflicts)

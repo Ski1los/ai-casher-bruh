@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 BACKUP_FILENAME = "bot_state.json"
 BACKUP_CAPTION = "💾 Резервная копия бота (демо-счёт и настройки). Не открепляй это сообщение."
 SELF_PING_SEC = 10 * 60
-BOT_VERSION = "15"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
+BOT_VERSION = "16"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
 
 
 def version_text() -> str:
@@ -51,6 +51,7 @@ ENV_SHOWN = (
     ("AI_API_KEY", "ключ ИИ (Groq)", False),
     ("PHANTOM_ADDRESS", "адрес Phantom", False),
     ("TINVEST_TOKEN", "токен Т-Инвестиций", False),
+    ("RENDER_DEPLOY_HOOK_URL", "ссылка Deploy Hook — бот обновляется сам", False),
 )
 
 # Что сейчас с ботом: starting | running | problem. Обновляют main.py и ArbitrageBot.run().
@@ -90,6 +91,8 @@ def status_html(env=None) -> str:
         note = "задана" if ok else ("<b>НЕ задана — обязательно</b>" if required else "не задана (по желанию)")
         lines.append(f"<tr><td>{icon}</td><td><code>{key}</code><br><small>{html.escape(what)}</small></td><td>{note}</td></tr>")
     lines.append("</table>")
+    if STATUS.get("update"):
+        lines.append(f"<p>⬆️ {html.escape(STATUS['update'])}. Подробно: команда /update в боте.</p>")
     lines.append(f"<p><small>Версия бота: {html.escape(version_text())}. Значения ключей здесь не показываются никогда. "
                  "Страница обновляется сама раз в 20 секунд.</small></p>")
     return ("<!doctype html><html lang=ru><head><meta charset=utf-8>"

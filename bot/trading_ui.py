@@ -16,6 +16,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .ai import OrderIntent
+from . import updater
 from .cloud import version_text
 from .trading import (KEY_PAGES, OrderPlan, TradeError, fmt_amount, human_error,
                       key_trade_problem)
@@ -372,6 +373,10 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
                  + (f" — {html.escape(sc.last_reason)}" if sc.on and sc.last_reason else ""))
     lines.append(f"5️⃣ {'🔴' if t.state.live else '🧪'} Режим: "
                  + ("<b>реальный</b> — ордера уходят на биржу" if t.state.live else "<b>тест</b> — ордера не отправляются"))
+    if updater.outdated():
+        lines.append(f"⚠️ {html.escape(updater.status_line())}")
+        if not updater.hook_url():
+            todo.append("обновить бота: /update (там кнопка и шаги на 1 минуту)")
     if b.duplicate_running():
         lines.append("⚠️ Работают две копии бота: удали лишний сервис в Render")
         todo.append("удалить лишний сервис в Render")
