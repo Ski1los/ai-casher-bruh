@@ -73,8 +73,11 @@ class FakeTradingExchange:
         if not self.apiKey:
             raise ccxt.AuthenticationError("apiKey required")
 
-    async def fetch_balance(self):
+    async def fetch_balance(self, params=None):
         self._auth()
+        if (params or {}).get("type") == "funding":
+            funding = getattr(self, "funding", {})
+            return {"free": dict(funding), "used": {}, "total": dict(funding)}
         total = {c: self.balance.get(c, 0) + self.locked.get(c, 0) for c in set(self.balance) | set(self.locked)}
         return {"free": dict(self.balance), "used": dict(self.locked), "total": total}
 

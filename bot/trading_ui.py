@@ -30,20 +30,23 @@ REFS_KEEP = 60
 KEYS_HELP = """\
 🔑 <b>Как подключить биржу для торговли</b>
 
-1. На сайте или в приложении биржи открой управление API ({links}).
+1. Открой управление API <b>на сайте</b> биржи (в браузере телефона: «версия для ПК»): {links}.
 2. Создай <b>системный API-ключ</b> (System-generated / HMAC).
-3. Права: включи только <b>Спот-торговлю</b> (Spot Trade / Read + Trade).
+3. Права: включи только <b>Чтение + Спот-торговлю</b> (Read + Spot Trade).
    ❗ <b>Вывод (Withdraw) НЕ включай.</b> Тогда даже при утечке ключа деньги нельзя вывести.
-4. IP-ограничение не ставь: у бесплатного Render адрес сервера меняется. Учти, что ключ без IP \
-на некоторых биржах действует ограниченный срок (у Bybit около 3 месяцев). Если бот напишет, что ключ \
-не работает, просто создай новый.
-5. Скопируй ключ и секрет. У OKX, KuCoin и Bitget есть ещё <b>passphrase</b>, который ты придумываешь сам.
-6. Render → сервис <b>ai-casher-bot</b> → <b>Environment</b> → <b>Add Environment Variable</b>, например для Bybit:
-   <code>BYBIT_API_KEY</code> = ключ
-   <code>BYBIT_API_SECRET</code> = секрет
+4. IP-ограничение не ставь: у бесплатного Render адрес сервера не твой личный. Особенности:
+   • <b>Bybit</b>: ключ без IP живёт ~3 месяца. Бот покажет дату и напомнит за 2 недели (/doctor).
+   • <b>BingX</b>: ключ без IP удаляется, если им 14 дней не пользовались. Бот обращается к бирже \
+каждые 15 минут, так что, пока бот работает, ключ живой.
+5. Скопируй ключ и секрет. У Bybit и BingX их два, у OKX, KuCoin и Bitget есть ещё <b>passphrase</b>.
+6. Render → сервис <b>ai-casher-bot</b> → <b>Environment</b> → <b>Add Environment Variable</b>:
+   <code>BYBIT_API_KEY</code> = ключ, <code>BYBIT_API_SECRET</code> = секрет
+   <code>BINGX_API_KEY</code> = ключ, <code>BINGX_API_SECRET</code> = секрет
    (для OKX ещё <code>OKX_API_PASSWORD</code> = passphrase)
    → <b>Save Changes</b>. Бот перезапустится примерно за минуту.
-7. Здесь отправь /keys: бот проверит ключ и покажет баланс.
+7. Здесь отправь /keys (или /doctor для полной проверки): бот проверит ключ, права и покажет баланс.
+8. Деньги для торговли должны лежать на <b>торговом</b> счёте: у Bybit это Unified Trading, у BingX Spot. \
+Если пополнил «Funding / Fund», сделай внутренний перевод (бесплатно). /doctor подскажет, если деньги не там.
 
 Ключи никогда не присылай в чат, только в Render.
 Сначала бот работает в <b>тестовом режиме</b>: считает всё по реальному балансу и стаканам, но ордера не отправляет.
@@ -214,7 +217,10 @@ def register(b: ArbitrageBot) -> None:
     @dp.message(Command("balance"))
     async def cmd_balance(message: Message) -> None:
         if await owner_only(message):
-            await b._answer(message, await b.trader.all_balances_text())
+            text = await b.trader.all_balances_text()
+            if b.phantom.address:
+                text += "\n\n" + b.phantom.text(await b.phantom_snapshot())
+            await b._answer(message, text)
 
     @dp.message(Command("buy", "sell"))
     async def cmd_buy_sell(message: Message, command: CommandObject) -> None:

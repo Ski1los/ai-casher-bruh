@@ -25,9 +25,13 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
+from . import extras_ui
 from .ai import AIError
+from .alerts import AlertError, build_alert, parse_alert
 from .config import BOUNDS, EDITABLE, RISK_KEYS
 from .demo_manager import REASONS, account_label
+from .doctor import doctor_dict, run_doctor
+from .solana import WalletError
 from .trading import STABLES, OrderPlan, TradeError, human_error
 
 if TYPE_CHECKING:
@@ -159,6 +163,7 @@ class WebApp:
         self._static: dict[str, tuple[bytes, bytes, str]] = {}
         self._version = "0"
         self._market_cache: dict[tuple, tuple[float, dict]] = {}
+        self._doctor_cache: dict | None = None
         self._tickers_cache: dict[str, tuple[float, list]] = {}
         self._scan_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task] = set()  # фоновые сохранения: держим ссылку, чтобы задачу не съел сборщик
@@ -230,6 +235,13 @@ class WebApp:
             ("POST", "/api/demo/stop"): self.demo_stop,
             ("POST", "/api/ai"): self.ai,
             ("POST", "/api/set"): self.set_setting,
+            ("GET", "/api/phantom"): self.phantom,
+            ("POST", "/api/phantom"): self.phantom_set,
+            ("GET", "/api/doctor"): self.doctor,
+            ("GET", "/api/alerts"): self.alerts,
+            ("POST", "/api/alerts"): self.alert_add,
+            ("POST", "/api/alerts/delete"): self.alert_delete,
+            ("GET", "/api/price"): self.price,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -407,6 +419,7 @@ class WebApp:
         return {
             "live": st.live, "auto": st.auto, "paused_reason": st.paused_reason,
             "keys": [{"exchange": n, "name": self._name(n), "status": t.key_status.get(n, "unchecked")} for n in t.creds],
+            "key_warnings": t.key_warnings(),
             "working": t.working,
             "today": {"trades": st.day_trades, "pnl": round(st.day_pnl_usd, 6)},
             "limits": {"max_trade": self.b.settings.max_trade_usd, "daily_loss": self.b.settings.daily_loss_usd,
@@ -674,6 +687,73 @@ class WebApp:
                 except Exception as e:
                     errors.append(f"{it.side} {it.coin}: {human_error(e)}")
         return {"html": answer.html, "model": answer.model, "proposals": proposals, "plans": plans, "errors": errors}
+
+    # --- Phantom, проверка, алерты, цена ---------------------------------------
+
+    async def phantom(self, request: web.Request) -> dict:
+        if not self.b.phantom.address:
+            return {"address": ""}
+        snap = await self.b.phantom_snapshot(force=request.query.get("force") == "1")
+        return snap or {"address": self.b.phantom.address, "assets": [], "total_usd": 0}
+
+    async def phantom_set(self, request: web.Request) -> dict:
+        self._owner(request)
+        body = await self._body(request)
+        address = str(body.get("address") or "").strip()
+        if len(address.split()) >= 10:
+            raise ApiError("Это похоже на сид-фразу! Её нельзя давать никому. Нужен только публичный адрес")
+        try:
+            self.b.phantom.set_address(address)
+        except WalletError as e:
+            raise ApiError(str(e)) from None
+        await self.b.save_extras()
+        return await self.phantom(request)
+
+    async def doctor(self, request: web.Request) -> dict:
+        cached = self._doctor_cache
+        if cached and time.time() - cached["at"] < 20:
+            return cached
+        self._doctor_cache = doctor_dict(await run_doctor(self.b))
+        return self._doctor_cache
+
+    def _alerts_list(self, chat_id: int) -> dict:
+        items = self.b.alerts.for_chat(chat_id)
+        return {"alerts": [{"id": a.id, "coin": a.coin, "op": a.op, "price": a.price, "exchange": a.exchange,
+                            "name": self.b.scanner.display_name(a.exchange), "start_price": a.start_price,
+                            "created_at": a.created_at} for a in items]}
+
+    async def alerts(self, request: web.Request) -> dict:
+        return self._alerts_list(request[USER]["id"])
+
+    async def alert_add(self, request: web.Request) -> dict:
+        body = await self._body(request)
+        uid = request[USER]["id"]
+        try:
+            spec = parse_alert(str(body.get("text") or ""), list(self.b.scanner.exchanges))
+            found = await extras_ui.first_exchange_with(self.b, spec.coin, spec.exchange)
+            if not found:
+                raise AlertError(f"не нашёл {spec.coin}/{self.b.settings.quote} на биржах из списка")
+            self.b.alerts.add(build_alert(spec, found[1], found[0], uid))
+        except AlertError as e:
+            raise ApiError(str(e)) from None
+        await self.b.save_extras()
+        return self._alerts_list(uid)
+
+    async def alert_delete(self, request: web.Request) -> dict:
+        body = await self._body(request)
+        uid = request[USER]["id"]
+        self.b.alerts.remove(str(body.get("id") or ""), uid)
+        await self.b.save_extras()
+        return self._alerts_list(uid)
+
+    async def price(self, request: web.Request) -> dict:
+        coin = (request.query.get("coin") or "").strip().upper().split("/")[0]
+        if not coin or len(coin) > 15:
+            raise ApiError("укажи монету")
+        rows = await extras_ui.prices_everywhere(self.b, coin)
+        return {"coin": coin, "quote": self.b.settings.quote, "rows": [
+            {"exchange": n, "name": self.b.scanner.display_name(n), "bid": t.get("bid"), "ask": t.get("ask"),
+             "last": t.get("last"), "change": t.get("percentage")} for n, t in rows]}
 
     async def set_setting(self, request: web.Request) -> dict:
         body = await self._body(request)
