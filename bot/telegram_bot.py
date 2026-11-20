@@ -787,7 +787,9 @@ class ArbitrageBot:
         if not stale:
             return
         try:
-            await asyncio.wait_for(asyncio.gather(*(self.trader.balances(n) for n in stale), return_exceptions=True), 8)
+            await asyncio.wait_for(asyncio.gather(*(self.trader.balances(n) for n in stale),
+                                                  *(self.trader.other_accounts(n) for n in stale),
+                                                  return_exceptions=True), 8)
         except asyncio.TimeoutError:
             pass
 

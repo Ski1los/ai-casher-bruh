@@ -47,6 +47,15 @@ AUTO_REASONS_KEEP = 6
 AUTO_MIN_FREE_USD = 5.0  # меньше этого на торговом счёте циклы почти всегда упираются в минимальный ордер
 FREE_CACHE_SEC = 300  # как часто автоторговля перечитывает свободный баланс
 FUNDING_CACHE_SEC = 600  # как часто проверять, не лежат ли деньги на счёте Funding
+ACCOUNTS_CACHE_SEC = 60  # обзор всех счетов биржи (где лежат деньги)
+
+# BingX: названия счетов из /openApi/account/v1/allAccountBalance — так, как они называются в приложении
+BINGX_ACCOUNTS = {
+    "sopt": "Спот/Фонд", "spot": "Спот", "fund": "Фонд (Fund)", "funding": "Фонд (Fund)",
+    "stdFutures": "Стандартные фьючерсы", "USDTMPerp": "Бессрочные фьючерсы USDT-M",
+    "coinMPerp": "Бессрочные фьючерсы Coin-M", "copyTrading": "Копитрейдинг", "grid": "Торговые боты (Grid)",
+    "eran": "Накопления (Wealth)", "earn": "Накопления (Wealth)", "c2c": "P2P (C2C)",
+}
 HISTORY_EVERY_SEC = 15 * 60  # как часто записывать стоимость портфеля для графика
 HISTORY_KEEP = 1000  # ≈ 10 дней по 15 минут
 
@@ -338,6 +347,7 @@ class Trader:
         self.auto_stats: dict = new_auto_stats()  # сводка с момента включения / последнего отчёта
         self.free_cache: dict[str, tuple[float, float]] = {}  # биржа -> (когда, свободно USDT)
         self.funding_cache: dict[str, tuple[float, float]] = {}  # биржа -> (когда, $ в стейблах на Funding)
+        self.accounts_cache: dict[str, tuple[float, dict[str, float]]] = {}  # биржа -> (когда, {счёт: $})
         self.balance_cache: dict[str, tuple[float, list]] = {}
         self._lock = asyncio.Lock()  # одна операция с деньгами за раз
         for name, cred in self.creds.items():
@@ -524,6 +534,62 @@ class Trader:
         self.funding_cache[name] = (now, usd)
         return usd
 
+    async def other_accounts(self, name: str, now: float | None = None) -> dict[str, float]:
+        """{название счёта: $} — деньги на счетах биржи, кроме торгового (бот ими не торгует).
+
+        BingX с 2025 года держит спот на отдельном «Спот»-счёте: деньги на «Фонде», фьючерсах,
+        копитрейдинге или в grid-ботах API спота не показывает, и человеку кажется, что бот «не видит» денег."""
+        now = time.time() if now is None else now
+        cached = self.accounts_cache.get(name)
+        if cached and now - cached[0] < ACCOUNTS_CACHE_SEC:
+            return cached[1]
+        out: dict[str, float] = {}
+        ex = self.scanner.exchanges.get(name)
+        if name == "bingx" and hasattr(ex, "accountV1PrivateGetAllAccountBalance"):
+            try:
+                res = await ex.accountV1PrivateGetAllAccountBalance()
+                for row in (res or {}).get("data") or []:
+                    acc = str(row.get("accountType") or "")
+                    usd = float(row.get("usdtBalance") or 0)
+                    if acc in ("spot",) or usd < 0.01:
+                        continue
+                    out[BINGX_ACCOUNTS.get(acc, acc)] = out.get(BINGX_ACCOUNTS.get(acc, acc), 0) + usd
+            except Exception as e:
+                log.info("Счета %s: %s", name, e)
+        funding = await self.funding_usd(name, now)
+        if funding and funding >= 0.01:
+            label = "Фонд (Fund)" if name == "bingx" else "Funding"
+            # «Спот/Фонд» у BingX = спот + фонд; если фонд прочитан точно, показываем его отдельно
+            out.pop("Спот/Фонд", None)
+            out[label] = funding
+        elif "Спот/Фонд" in out:
+            try:
+                spot = sum(r[3] or 0 for r in await self.balances(name))
+            except Exception:
+                spot = None
+            rest = out.pop("Спот/Фонд") - (spot or 0)
+            if spot is not None and rest >= 0.5:
+                out["Фонд (Fund)"] = rest
+        self.accounts_cache[name] = (now, out)
+        return out
+
+    def where_money_text(self, name: str, accounts: dict[str, float], spot_usd: float | None = None) -> str:
+        """Понятная подсказка: где лежат деньги и как перевести их на торговый счёт."""
+        big = {k: v for k, v in accounts.items() if v >= 0.5}
+        if not big:
+            return ""
+        title = self.scanner.display_name(name)
+        where = ", ".join(f"«{k}» ≈ ${v:.2f}" for k, v in sorted(big.items(), key=lambda kv: -kv[1]))
+        target = "Спот" if name == "bingx" else "Unified Trading" if name == "bybit" else "торговый (спот)"
+        first = max(big, key=big.get)
+        if first in ("Торговые боты (Grid)", "Копитрейдинг", "Накопления (Wealth)", "P2P (C2C)"):
+            return (f"на {title} деньги лежат в разделе {where}, а бот торгует только со счёта «{target}». "
+                    f"Сначала останови/закрой это в приложении {title} (деньги вернутся на «Фонд»), "
+                    f"потом Активы → Перевести → с «Фонд» на «{target}»")
+        return (f"на {title} деньги лежат на другом счёте: {where}. Бот торгует только со счёта «{target}»"
+                + (f" (там сейчас ≈ ${spot_usd:.2f})" if spot_usd is not None else "")
+                + f". Переведи бесплатно: приложение {title} → Активы → Перевести → с «{first}» на «{target}»")
+
     async def usd_prices(self, name: str, coins: list[str]) -> dict[str, float]:
         prices = {c: 1.0 for c in coins if c in STABLES}
         need = [c for c in coins if c not in prices]
@@ -576,9 +642,17 @@ class Trader:
                 locked = f" (в ордерах {fmt_amount(t - f)})" if t - f > 1e-12 else ""
                 lines.append(f"  {html.escape(c)}: {fmt_amount(t)}{usd_txt}{locked}")
                 total += usd or 0
-            if not shown:
-                lines.append("  пусто. Если деньги на бирже есть: переведи их внутри биржи на торговый счёт "
-                             "(Funding → Trading / Unified)")
+            free_q = next((f for c, f, _, _ in res if c == self.settings.quote), 0.0)
+            lines.append(f"  <i>свободно для сделок: {free_q:.2f} {self.settings.quote}</i>")
+            try:
+                elsewhere = await self.other_accounts(name)
+            except Exception:
+                elsewhere = {}
+            hint = self.where_money_text(name, elsewhere, sum(r[3] or 0 for r in res))
+            if hint:
+                lines.append("  💡 " + html.escape(hint))
+            elif not shown:
+                lines.append("  пусто. Если деньги на бирже есть: переведи их внутри биржи на торговый (спот) счёт")
             dust = len(res) - len(shown)
             if dust > 0:
                 lines.append(f"  <i>и ещё {dust} монет меньше $0.01</i>")
@@ -603,6 +677,13 @@ class Trader:
                 item["coins"] = coins
                 item["total_usd"] = sum(c["usd"] or 0 for c in coins)
                 total += item["total_usd"]
+                try:
+                    elsewhere = await self.other_accounts(name)
+                except Exception:
+                    elsewhere = {}
+                if elsewhere:
+                    item["other_accounts"] = {k: round(v, 2) for k, v in elsewhere.items()}
+                    item["hint"] = self.where_money_text(name, elsewhere, item["total_usd"])
             exchanges.append(item)
         for name in self.creds:
             if name not in names:
@@ -629,6 +710,9 @@ class Trader:
                 "minutes_ago": round((time.time() - at) / 60, 1),
                 "coins": {c: {"amount": round(t, 8), "usd": round(u, 2) if u is not None else None} for c, _, t, u in rows[:12]},
             }
+            other = (self.accounts_cache.get(name) or (0, {}))[1]
+            if other:
+                out[name]["money_on_other_accounts_bot_cannot_trade"] = {k: round(v, 2) for k, v in other.items()}
         return out
 
     # --- предпросмотр ордера ------------------------------------------------
