@@ -44,6 +44,10 @@ class FakeTradingExchange:
     async def fetch_ticker(self, symbol):
         return self.tickers[symbol]
 
+    async def fetch_ohlcv(self, symbol, timeframe="5m", since=None, limit=None, params=None):
+        candles = getattr(self, "ohlcv", {}).get(symbol) or []
+        return [list(c) for c in candles[-(limit or len(candles)):]]
+
     async def fetch_order_book(self, symbol, limit=None):
         t = self.tickers[symbol]
         return {"asks": [[t["ask"], self.depth]], "bids": [[t["bid"], self.depth]]}

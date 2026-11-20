@@ -281,6 +281,7 @@ class TradingState:
     paused_reason: str | None = None
     log: list[dict] = field(default_factory=list)
     history: list[list[float]] = field(default_factory=list)  # [[время, стоимость портфеля $], ...]
+    scalp: dict = field(default_factory=dict)  # режим $5 (bot/scalper.py): включён ли, позиция, итоги
 
 
 @dataclass
@@ -923,10 +924,13 @@ class Trader:
     async def panic(self) -> str:
         """Стоп-кран: выключить автоторговлю и реальный режим, отменить все открытые ордера."""
         self.state.auto = False
+        scalp_pos = bool(self.state.scalp.get("pos"))
+        if self.state.scalp:
+            self.state.scalp["on"] = False
         was_live = self.state.live
         self.state.live = False
         self.pending.clear()
-        lines = ["🛑 <b>Стоп</b>: автоторговля выключена, режим переключён на тестовый."]
+        lines = ["🛑 <b>Стоп</b>: автоторговля и режим $5 выключены, режим переключён на тестовый."]
         for name in self.working:
             title = html.escape(self.scanner.display_name(name))
             try:
@@ -945,6 +949,9 @@ class Trader:
                 lines.append(f"{title}: отменено ордеров {cancelled}" + (f", не удалось {failed}" if failed else ""))
         if was_live:
             lines.append("Монеты на балансе не продавались. Посмотреть: /balance, продать: /sell")
+        if scalp_pos:
+            lines.append("У режима $5 была открыта позиция: её продажа по цели отменена. Включишь режим снова (/scalp on) — "
+                         "бот выставит продажу заново.")
         return "\n".join(lines)
 
     # --- треугольник --------------------------------------------------------
@@ -1343,6 +1350,10 @@ class Trader:
                 status = self.key_status.get(n)
                 icon = "✅" if status == "ok" else ("❔ не проверен" if status is None else f"❌ {status}")
                 lines.append(f"  {html.escape(self.scanner.display_name(n))}: {html.escape(icon)}")
+        sc = st.scalp or {}
+        pos = sc.get("pos")
+        lines.append(f"🎯 Режим $5 (ловец откатов): {'🟢 включён' if sc.get('on') else '⏸ выключен'}"
+                     + (f", держу {html.escape(pos['symbol'].split('/')[0])}" if pos else "") + " · /scalp")
         lines.append(
             f"Автоторговля треугольниками: {'🟢 включена' if st.auto else '⏸ выключена'} "
             f"(циклы от {s.auto_min_profit_percent:g}% по стакану)"
@@ -1377,7 +1388,7 @@ class Trader:
         for r in reversed(self.state.log[-limit:]):
             when = time.strftime("%d.%m %H:%M", time.gmtime(r["at"] + self.settings.report_utc_offset * 3600))
             mode = "" if r["live"] else "🧪"
-            src = {"ai": "🤖", "auto": "⚙️"}.get(r.get("source"), "")
+            src = {"ai": "🤖", "auto": "⚙️", "scalp": "🎯"}.get(r.get("source"), "")
             icon = "✅" if r.get("ok", True) else "⚠️"
             body = (
                 f"{fmt_amount(r['spent'])} {r['spent_ccy']} → {fmt_amount(r['got'])} {r['got_ccy']}"
@@ -1388,7 +1399,7 @@ class Trader:
                 f"{when} {icon}{mode}{src} {html.escape(self.scanner.display_name(r['exchange']))} "
                 f"{html.escape(r['what'])}: {html.escape(body)}{pnl}"
             )
-        lines.append("\n🧪 тест · 🤖 по предложению ИИ · ⚙️ автоторговля")
+        lines.append("\n🧪 тест · 🤖 по предложению ИИ · ⚙️ автоторговля · 🎯 режим $5")
         return "\n".join(lines)
 
     def record_text(self, rec: TradeRecord) -> str:

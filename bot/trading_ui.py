@@ -67,7 +67,8 @@ def panel_keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Балансы", callback_data="tr:bal"),
          InlineKeyboardButton(text="📋 Ордера", callback_data="tr:orders")],
-        [InlineKeyboardButton(text="⏸ Выключить автоторговлю" if st.auto else "⚙️ Включить автоторговлю",
+        [InlineKeyboardButton(text="🎯 Режим $5: ловец откатов" + (" 🟢" if b.scalper.on else ""), callback_data="sc:show")],
+        [InlineKeyboardButton(text="⏸ Выключить треугольники" if st.auto else "⚙️ Автоторговля треугольниками",
                               callback_data="tr:auto")],
         [InlineKeyboardButton(text="🧪 Вернуть тестовый режим" if st.live else "🔴 Включить реальный режим",
                               callback_data="tr:live")],
@@ -89,6 +90,64 @@ LIVE_WARNING = """\
 Честно: прибыль не гарантирована. Треугольники живут доли секунды, и в реальности часть сделок \
 будет в минус из-за проскальзывания. Ставь только те деньги, которые не жалко потерять.
 Остановить всё в любой момент: /stop"""
+
+
+def scalp_keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
+    sc = b.scalper
+    rows = [[InlineKeyboardButton(text="⏸ Выключить режим $5" if sc.on else "▶️ Включить режим $5",
+                                  callback_data="sc:off" if sc.on else "sc:on")],
+            [InlineKeyboardButton(text="📊 Проверка на истории", callback_data="sc:bt"),
+             InlineKeyboardButton(text="🔄 Обновить", callback_data="sc:show")]]
+    if sc.st["pos"]:
+        rows.append([InlineKeyboardButton(text="💸 Продать позицию сейчас", callback_data="sc:sell")])
+    if not b.trader.state.live:
+        rows.append([InlineKeyboardButton(text="🔴 Включить реальный режим", callback_data="tr:live")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def why_text(b: ArbitrageBot) -> str:
+    sc = b.scalper
+    head = ""
+    if sc.on:
+        head = (f"🎯 <b>Режим $5 включён</b>: {html.escape(sc.last_reason or 'запускаюсь')}. Подробно: /scalp\n\n")
+    elif not b.trader.state.auto:
+        head = "💡 На $5 треугольники не проходят минимум биржи. Для маленькой суммы есть режим $5: /scalp\n\n"
+    if b.duplicate_running():
+        head = "⚠️ <b>Работают две копии бота</b>: новые сделки на паузе. Удали лишний сервис в Render (/doctor).\n\n" + head
+    return head + b.trader.auto_status_text() + f"\n\n<i>Версия бота: {version_text()}</i>"
+
+
+async def scalp_preflight(b: ArbitrageBot) -> list[str]:
+    """Что помешает режиму $5: ключ, права, деньги на торговом счёте, вторая копия бота."""
+    t = b.trader
+    name = b.scalper.exchange()
+    out: list[str] = []
+    if name is None:
+        return ["нет рабочего ключа биржи: /keys"]
+    title = b.scanner.display_name(name)
+    try:
+        await t.inspect_keys()
+    except Exception:
+        pass
+    problem = key_trade_problem(name, t.key_info.get(name))
+    if problem:
+        out.append(f"{title}: {problem}" + ("" if t.state.live else " (в тесте не мешает)"))
+    try:
+        free = await t.free(name, b.settings.quote)
+    except Exception as e:
+        out.append(f"{title}: не смог прочитать баланс ({human_error(e)})")
+        free = None
+    if free is not None and free < 5:
+        funding = await t.funding_usd(name)
+        if funding and funding >= 1:
+            out.append(t._funding_text({name: funding}))
+        else:
+            out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}, а биржа принимает ордер от $5. "
+                       "Пополни хотя бы до $5,5 (с запасом на округление)"
+                       + ("" if t.state.live else " (в тесте бот возьмёт виртуальные $5)"))
+    if b.duplicate_running():
+        out.append("работают две копии бота: покупки на паузе, пока не удалишь лишний сервис в Render")
+    return out
 
 
 def live_keyboard() -> InlineKeyboardMarkup:
@@ -362,6 +421,9 @@ def register(b: ArbitrageBot) -> None:
             return
         was_on = st.auto
         st.auto = on
+        if on and b.scalper.on:
+            b.scalper.turn_off()
+            await b._send(chat_id, "🎯 Режим $5 выключен: обе стратегии берут одни и те же USDT и мешали бы друг другу.")
         if on:
             st.paused_reason = None
             if not was_on:
@@ -387,10 +449,101 @@ def register(b: ArbitrageBot) -> None:
         else:
             await b._send(chat_id, "⏸ Автоторговля выключена.")
 
+    async def toggle_scalp(chat_id: int, on: bool | None = None) -> None:
+        sc = b.scalper
+        on = (not sc.on) if on is None else on
+        if not on:
+            sc.turn_off()
+            await after_change()
+            pos = sc.st["pos"]
+            extra = ("\nОткрытая позиция осталась: продажа по цели стоит на бирже. Продать сразу: кнопка в /scalp."
+                     if pos and pos.get("live") else "")
+            await b._send(chat_id, "⏸ Режим $5 выключен." + extra)
+            return
+        if not b.trader.working:
+            await b._send(chat_id, "Для режима $5 нужен рабочий ключ биржи: /keys")
+            return
+        if b.trader.state.auto:
+            b.trader.state.auto = False
+            await b._send(chat_id, "⚙️ Автоторговлю треугольниками выключил: на $5 она не проходит минимум биржи "
+                                   "(нужно $5 на каждый из трёх ордеров), а деньги теперь нужны режиму $5.")
+        sc.turn_on()
+        await after_change()
+        warnings = await scalp_preflight(b)
+        mode = ("🔴 <b>РЕАЛЬНО</b>, с настоящими деньгами" if b.trader.state.live
+                else "🧪 в <b>ТЕСТЕ</b> на виртуальном балансе (ордера не уходят). Для реальной торговли: /live")
+        await b._send(chat_id,
+                      f"🎯 <b>Режим $5 включён</b>, {mode}.\n"
+                      "1) Проверяю стратегию на истории по 13 крупным монетам (свечи за ~3 дня).\n"
+                      "2) Жду отката и покупаю на все свободные USDT (не больше "
+                      f"${b.settings.max_trade_usd:g}, <code>/set max_trade</code>).\n"
+                      "3) Сразу ставлю продажу на бирже по цели +0,6…1,3% после комиссий. Прибыль идёт в оборот.\n"
+                      "Сделка может длиться от минут до суток и дольше: откаты бывают не каждый час.\n"
+                      + "".join(f"\n⚠️ {html.escape(w)}" for w in warnings)
+                      + "\n\nСостояние: /scalp · остановить всё: /stop", scalp_keyboard(b))
+        try:
+            await sc.rank(sc.exchange() or "", force=False)
+        except Exception as e:
+            log.info("Проверка на истории: %s", e)
+
+    async def scalp_backtest(chat_id: int) -> None:
+        sc = b.scalper
+        name = sc.exchange()
+        if name is None:
+            await b._send(chat_id, "Нужен рабочий ключ биржи: /keys")
+            return
+        await b._send(chat_id, "📊 Беру свечи за ~3 дня по 13 монетам и проверяю стратегию с комиссиями…")
+        try:
+            await sc.rank(name, force=True)
+        except Exception as e:
+            await b._send(chat_id, f"❌ Не получилось: {html.escape(human_error(e))}")
+            return
+        await b._send(chat_id, sc.backtest_text(name))
+
+    @dp.message(Command("scalp", "five", "dip"))
+    async def cmd_scalp(message: Message, command: CommandObject) -> None:
+        if not await owner_only(message):
+            return
+        arg = (command.args or "").strip().lower()
+        if arg in ("on", "1", "вкл", "да"):
+            await toggle_scalp(message.chat.id, True)
+        elif arg in ("off", "0", "выкл", "нет"):
+            await toggle_scalp(message.chat.id, False)
+        elif arg in ("test", "bt", "история", "проверка"):
+            await scalp_backtest(message.chat.id)
+        else:
+            await b._answer(message, b.scalper.status_text(), scalp_keyboard(b))
+
+    @dp.callback_query(F.data.startswith("sc:"))
+    async def cb_scalp(cb: CallbackQuery) -> None:
+        if not await cb_owner(cb):
+            return
+        action = cb.data.split(":", 1)[1]
+        chat_id = chat_of(cb)
+        await cb.answer()
+        if action == "on":
+            await toggle_scalp(chat_id, True)
+        elif action == "off":
+            await toggle_scalp(chat_id, False)
+        elif action == "bt":
+            await scalp_backtest(chat_id)
+        elif action == "sell":
+            try:
+                text = await b.scalper.sell_now()
+            except TradeError as e:
+                text = f"❌ {html.escape(str(e))}"
+            except Exception as e:
+                log.exception("Продажа позиции режима $5")
+                text = f"❌ {html.escape(human_error(e))}"
+            await after_change()
+            await b._send(chat_id, text)
+        else:
+            await b._send(chat_id, b.scalper.status_text(), scalp_keyboard(b))
+
     @dp.message(Command("why", "autostatus"))
     async def cmd_why(message: Message) -> None:
         if await owner_only(message):
-            await b._answer(message, b.trader.auto_status_text() + f"\n\n<i>Версия бота: {version_text()}</i>")
+            await b._answer(message, why_text(b))
 
     @dp.message(Command("autotrade"))
     async def cmd_autotrade(message: Message, command: CommandObject) -> None:
@@ -522,7 +675,7 @@ def register(b: ArbitrageBot) -> None:
         elif action == "log":
             await b._send(chat_id, b.trader.log_text())
         elif action == "why":
-            await b._send(chat_id, b.trader.auto_status_text() + f"\n\n<i>Версия бота: {version_text()}</i>")
+            await b._send(chat_id, why_text(b))
         elif action == "keys":
             await b._send(chat_id, await keys_text(b))
         elif action == "stop":
