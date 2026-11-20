@@ -190,6 +190,7 @@ canvas { display: block; width: 100%; height: 100%; touch-action: pan-y; }
 .seg button.on { background: var(--card); color: var(--text); box-shadow: 0 2px 8px rgba(0,0,0,.18); }
 .seg.buy-sell button.on.buy { background: var(--green); color: #fff; }
 .seg.buy-sell button.on.sell { background: var(--red); color: #fff; }
+.seg.tabs4 button { font-size: 12.5px; padding-left: 2px; padding-right: 2px; white-space: nowrap; display: flex; align-items: center; justify-content: center; gap: 3px; }
 
 .pill {
   display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 999px;

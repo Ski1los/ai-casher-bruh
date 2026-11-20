@@ -535,6 +535,7 @@ function renderHome() {
         <label class="switch"><input type="checkbox" data-act="auto" ${t.auto ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
         <div class="small muted" style="margin-top:6px">${t.auto ? (t.live ? "🔴 реально" : "🧪 в тесте") + `, от ${t.limits.auto_min}%` : "треугольники, по стакану"}</div></div>
     </div>
+    <div class="banner info press" data-act="opps" style="margin-top:10px"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
     ${scalpCard()}
     ${autoCard()}
     <div class="grid4" style="margin-top:10px">
@@ -1375,6 +1376,68 @@ function dexSheet(tab = "hot") {
   if (tab === "hot") loadDexHot(); else if (store.get("dexQ", "")) loadDexSearch(); else $("#dexBox").innerHTML = "";
 }
 
+// ---------------------------------------------------------------------------
+// «Как заработать сейчас»: акции Bybit, проценты Earn, листинги, новости
+// ---------------------------------------------------------------------------
+
+const OPPS_TABS = [["promos", "🎁 Акции"], ["earn", "💰 Проценты"], ["list", "🆕 Листинги"], ["news", "📰 Новости"]];
+const fitPill = (f) => ({ yes: "ok", maybe: "gray", no: "bad", info: "gray" }[f] || "gray");
+const ddmm = (ts) => { const d = new Date(ts * 1000); return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`; };
+
+function promoCard(p) {
+  return `<div class="card press" data-act="open" data-url="${esc(p.url)}" style="margin-top:8px">
+    <div class="row between"><div class="b">${p.icon} ${esc(p.kind_name)}</div><span class="pill ${fitPill(p.fit)}">${esc(p.fit_text)}</span></div>
+    <div class="small" style="margin-top:6px;white-space:normal">${esc(p.title)}</div>
+    <div class="tiny muted" style="margin-top:6px;white-space:normal">${esc(p.todo)}</div>
+    <div class="row between" style="margin-top:8px"><span class="tiny ${p.held ? "" : "muted"}" ${p.held ? 'style="color:var(--red)"' : ""}>${p.held ? "🚨 эта монета есть у тебя — продай заранее" : p.end ? "до " + ddmm(p.end) : ddmm(p.published)}</span><span class="link tiny">Открыть →</span></div>
+  </div>`;
+}
+
+function oppsBody(r, tab) {
+  if (!r) return `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Собираю акции, проценты и новости…</div>`;
+  const err = Object.keys(r.errors || {}).length ? `<div class="banner red" style="margin-top:8px">⚠️ Не загрузилось: ${esc(Object.keys(r.errors).join(", "))}. Попробую позже</div>` : "";
+  const held = (r.delistings || []).filter((p) => p.held);
+  const top = held.length ? held.map(promoCard).join("") : "";
+  if (tab === "promos") return top + ((r.promos || []).length ? r.promos.map(promoCard).join("") : `<div class="card empty">Активных акций сейчас нет. Включи уведомления — бот напишет, как только появятся</div>`)
+    + `<div class="tiny muted" style="margin-top:10px;white-space:normal">Участвовать — в приложении Bybit по ссылке. Бот сам в акции не вкладывает: у его ключа есть права только на спот-торговлю, так безопаснее.</div>` + err;
+  if (tab === "earn") return ((r.earn || []).length ? `<div class="list" style="margin-top:8px">${r.earn.map((e) => `<div class="item"><div class="grow"><div class="t">${esc(e.coin)}</div><div class="s">${e.category === "FlexibleSaving" ? "гибкий, забрать в любой момент" : "on-chain стейкинг"}</div></div><div class="r"><div class="b num">${e.apr.toFixed(2)}%</div><div class="s num">$5 → $${(5 * e.apr / 100 / 12).toFixed(3)}/мес</div></div></div>`).join("")}</div>` : `<div class="card empty">Проценты не загрузились</div>`)
+    + `<div class="tiny muted" style="margin-top:10px;white-space:normal">Куда нажать: Bybit → Финансы (Earn) → Easy Earn → монета → Подписаться. Деньги в Earn не торгуются в режиме $5 — это для денег, которые просто лежат.</div>` + err;
+  if (tab === "list") { const items = [...(r.delistings || []), ...(r.listings || [])]; return (items.length ? items.map(promoCard).join("") : `<div class="card empty">Новых листингов и делистингов нет</div>`) + err; }
+  return ((r.news || []).length ? `<div class="list" style="margin-top:8px">${r.news.map((n) => `<div class="item press" data-act="open" data-url="${esc(n.url)}"><div class="grow"><div class="t" style="white-space:normal">${esc(n.title)}</div><div class="s">${esc(n.source)}${n.published ? " · " + ago(n.published) : ""}${n.coins.length ? " · " + n.coins.map(esc).join(", ") : ""}</div></div></div>`).join("")}</div>` : `<div class="card empty">Новости не загрузились</div>`)
+    + `<div class="tiny muted" style="margin-top:10px;white-space:normal">Новость — не сигнал покупать: к моменту публикации цена обычно уже сдвинулась.</div>` + err;
+}
+
+function oppsSheet(tab) {
+  tab = tab || S.oppsTab || "promos"; S.oppsTab = tab;
+  const r = S.opps;
+  Sheet.open("Как заработать сейчас", `
+    <div class="seg tabs4">${OPPS_TABS.map(([k, t]) => `<button data-act="opps-tab" data-v="${k}" class="${k === tab ? "on" : ""}">${t}</button>`).join("")}</div>
+    <button class="btn primary" data-act="opps-plan" style="width:100%;margin-top:10px">🤖 План для моих $5 от ИИ</button>
+    ${owner() ? `<div class="row between card" style="margin-top:10px"><div><div class="b">🔔 Уведомления об акциях</div><div class="tiny muted">Новые Launchpool, аирдропы, Earn — сразу в чат</div></div><label class="switch"><input type="checkbox" data-act="opps-notify" ${r && r.notify ? "checked" : ""}><span></span></label></div>` : ""}
+    <div id="oppsBox">${oppsBody(r, tab)}</div>
+    <div class="tiny muted" style="margin-top:12px;white-space:normal">Честно: с $5 самые большие проценты дают бесплатные акции, а не трейдинг, но в долларах это центы и единицы долларов. Гарантий нет.</div>`, { full: true });
+  if (!r || Date.now() / 1000 - r.updated_at > 300) loadOpps();
+}
+
+async function loadOpps(force = false) {
+  try {
+    S.opps = await api("/api/opps" + (force ? "?force=1" : ""), undefined, { timeout: 40000 });
+    const box = $("#oppsBox"); if (box) box.innerHTML = oppsBody(S.opps, S.oppsTab || "promos");
+    const sw = $('[data-act="opps-notify"]'); if (sw) sw.checked = !!S.opps.notify;
+  } catch (e) { const box = $("#oppsBox"); if (box) box.innerHTML = `<div class="banner red">❌ ${esc(e.message)}</div>`; }
+}
+
+async function toggleOppsNotify(el) {
+  try { const r = await api("/api/opps/notify", { on: el.checked }); if (S.opps) S.opps.notify = r.notify; toast(r.notify ? "Уведомления включены 🔔" : "Уведомления выключены"); }
+  catch (e) { el.checked = !el.checked; fail(e); }
+}
+
+function oppsPlan() {
+  const q = (S.opps && S.opps.plan_q) || "Составь честный план, как максимально поднять мои $5 с текущими акциями Bybit.";
+  aiSheet();
+  if (S.ov && S.ov.ai) askAI(q);
+}
+
 async function loadDexHot() {
   try {
     const r = await api("/api/dex/hot");
@@ -1524,6 +1587,9 @@ document.addEventListener("click", async (e) => {
     case "phantom": haptic.tap(); phantomSheet(); loadPhantom(); break;
     case "why": haptic.tap(); whySheet(); break;
     case "dex": haptic.tap(); dexSheet(d.v || "hot"); break;
+    case "opps": haptic.tap(); oppsSheet(); break;
+    case "opps-tab": haptic.sel(); S.oppsTab = d.v; $$('[data-act="opps-tab"]').forEach((b) => b.classList.toggle("on", b.dataset.v === d.v)); $("#oppsBox").innerHTML = oppsBody(S.opps, d.v); break;
+    case "opps-plan": haptic.tap(); oppsPlan(); break;
     case "dex-tab": haptic.sel(); dexSheet(d.v); break;
     case "dex-go": loadDexSearch(el); break;
     case "dex-q": $("#dexQ").value = d.v; loadDexSearch(); break;
@@ -1597,6 +1663,7 @@ document.addEventListener("change", (e) => {
   if (el.dataset.act === "auto") toggleAuto(el);
   else if (el.dataset.act === "scalp") toggleScalp(el);
   else if (el.dataset.act === "radar") toggleRadar(el);
+  else if (el.dataset.act === "opps-notify") toggleOppsNotify(el);
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.set) saveSetting(el);
 });
