@@ -156,3 +156,20 @@ def test_restore_old_v1_backup_format(tmp_path, monkeypatch):
 
     acc = asyncio.run(run())
     assert acc is not None and acc.rejects == {"fees": 3} and acc.scans == 10
+
+
+def test_status_page_shows_problem_and_env_without_secrets():
+    from bot import cloud
+
+    cloud.set_status("problem", "Не задан TELEGRAM_BOT_TOKEN", ["Открой @BotFather"])
+    try:
+        env = {"BYBIT_API_KEY": "SUPERSECRETKEY", "ALLOWED_USER_IDS": "6069246522"}
+        page = cloud.status_html(env)
+        assert "❌ Не задан TELEGRAM_BOT_TOKEN" in page and "Открой @BotFather" in page
+        assert "SUPERSECRETKEY" not in page and "6069246522" not in page  # значения не показываются
+        assert "<b>НЕ задана — обязательно</b>" in page  # токена нет
+        cloud.set_status("running", bot="my_bot")
+        assert "✅ Бот работает" in cloud.status_html(env) and "@my_bot" in cloud.status_html(env)
+    finally:
+        cloud.set_status("starting")
+        cloud.STATUS["bot"] = None
