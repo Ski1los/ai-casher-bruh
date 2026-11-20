@@ -245,6 +245,27 @@ class DemoManager:
             self.chat_id = acc.chat_id
             self.created_at = acc.created_at
             self.accounts = {account_id("cross", acc.start_balance): acc} if acc.start_balance else {}
+        self._forget_removed_exchanges()
+        for acc in self.accounts.values():
+            del acc.trades[:-MAX_TRADES_KEPT]
+
+    def _forget_removed_exchanges(self) -> None:
+        """Счета, которые «стоят» на бирже, убранной из бота, снова свободны.
+
+        Иначе такой счёт навсегда отклонял бы сделки с причиной «деньги на другой бирже».
+        Открытую сделку через такую биржу закрыть нечем, поэтому возвращаем её стоимость на баланс.
+        """
+        known = set(getattr(self.scanner, "exchanges", None) or ())
+        if not known:
+            return
+        for acc in self.accounts.values():
+            t = acc.open_trade
+            if t is not None and (t.buy_exchange not in known or t.sell_exchange not in known):
+                acc.balance += t.cost_usd
+                acc.open_trade = None
+                acc.location = None
+            if acc.location and acc.location not in known:
+                acc.location = None
 
     def export(self) -> dict:
         for acc in self.accounts.values():

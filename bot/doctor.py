@@ -10,15 +10,14 @@ import asyncio
 import html
 import logging
 import os
-import resource
-import sys
 import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 import ccxt.async_support as ccxt
 
-from .trading import AUTO_MIN_FREE_USD, NEEDS_PASSWORD, STABLES, days_left, human_error, is_geo_block
+from .memory import RENDER_RAM_MB, memory_line, rss_mb
+from .trading import AUTO_MIN_FREE_USD, STABLES, days_left, human_error, is_geo_block
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -27,7 +26,6 @@ log = logging.getLogger(__name__)
 
 EXCHANGE_TIMEOUT = 25
 ICONS = {"ok": "✅", "warn": "⚠️", "bad": "❌", "info": "ℹ️"}
-RENDER_RAM_MB = 512
 
 
 @dataclass
@@ -43,12 +41,7 @@ def geo_hint(name: str) -> str:
         return ("Bybit не пускает сервер из этой страны. Попробуй запасной домен: в Render → Environment добавь "
                 "BYBIT_HOSTNAME = bytick.com и сохрани. Если не поможет, торгуй через BingX: он работает с того же сервера.")
     return (f"Биржа не пускает сервер из этой страны. Можно попробовать переменную {name.upper()}_HOSTNAME с запасным "
-            f"доменом биржи или просто убрать её из EXCHANGES: сканер продолжит работать с остальными.")
-
-
-def memory_mb() -> float:
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024  # Linux отдаёт КБ
+            f"доменом биржи. Сканер тем временем работает со второй биржей.")
 
 
 async def _check_exchange(b: ArbitrageBot, name: str) -> Check:
@@ -76,7 +69,7 @@ async def _funding_hint(b: ArbitrageBot, name: str) -> Check | None:
     ex = b.scanner.exchanges[name]
     accounts = (getattr(ex, "options", None) or {}).get("accountsByType") or {}
     if "funding" not in accounts or str(accounts["funding"]).lower() == str(accounts.get("spot", "spot")).lower():
-        return None  # у биржи нет отдельного счёта финансирования (Gate, Bitget: это и есть спот)
+        return None  # у биржи нет отдельного счёта финансирования
     try:
         bal = await asyncio.wait_for(ex.fetch_balance({"type": "funding"}), EXCHANGE_TIMEOUT)
     except Exception:
@@ -88,8 +81,7 @@ async def _funding_hint(b: ArbitrageBot, name: str) -> Check | None:
         return None
     what = f"${stable:.2f} в стейблкоинах" + (f" и {', '.join(others[:5])}" if others else "")
     where = {"bybit": "Bybit → Активы → Перевод → со счёта Funding на Unified Trading",
-             "bingx": "BingX → Активы → Перевод → со счёта Fund на Spot",
-             "okx": "OKX → Активы → Перевод → с Funding на Trading"}.get(
+             "bingx": "BingX → Активы → Перевод → со счёта Fund на Spot"}.get(
         name, "в приложении биржи: Активы → Перевод → с Funding на спотовый (торговый) счёт")
     return Check("Ключи", f"{b.scanner.display_name(name)}: счёт Funding", "warn",
                  f"там лежит {what}. Бот видит и торгует только торговым счётом. Переведи: {where}")
@@ -150,8 +142,9 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
     env_keys = {k[: -len("_API_KEY")].lower() for k in os.environ if k.endswith("_API_KEY") and os.environ[k].strip()}
     for name in sorted(env_keys - set(names)):
         if name in ccxt.exchanges:
-            checks.append(Check("Ключи", name.upper(), "warn",
-                                f"ключ {name.upper()}_API_KEY есть, но биржи {name} нет в EXCHANGES. Добавь её туда"))
+            checks.append(Check("Ключи", name.upper(), "info",
+                                f"бот работает только с Bybit и BingX, ключ {name.upper()}_API_KEY не используется. "
+                                f"Его можно удалить в Render → Environment"))
     if not t.creds:
         checks.append(Check("Ключи", "API-ключи", "info",
                             "ключей нет: работают сигналы, демо и графики. Чтобы торговать: /keys"))
@@ -179,10 +172,6 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
             hint = await _funding_hint(b, name)
             if hint:
                 checks.append(hint)
-        for name in NEEDS_PASSWORD & set(t.creds):
-            if "password" not in t.creds[name]:
-                checks.append(Check("Ключи", b.scanner.display_name(name), "bad",
-                                    f"нужен ещё {name.upper()}_API_PASSWORD (passphrase)"))
 
     # --- торговля ------------------------------------------------------------
     s = b.settings
@@ -208,10 +197,10 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
         checks.append(Check("Сервис", "ИИ", "ok", f"подключён: {titles}"))
     else:
         checks.append(Check("Сервис", "ИИ", "info", "не подключён (по желанию): бесплатный ключ Groq, см. /ai"))
-    mem = memory_mb()
+    mem = rss_mb()
     checks.append(Check("Сервис", "Память", "ok" if mem < RENDER_RAM_MB * 0.75 else "warn",
-                        f"{mem:.0f} МБ из {RENDER_RAM_MB} МБ бесплатного Render"
-                        + ("" if mem < RENDER_RAM_MB * 0.75 else ". Если бот перезапускается, убери пару бирж из EXCHANGES")))
+                        memory_line() + " бесплатного Render"
+                        + ("" if mem < RENDER_RAM_MB * 0.75 else ". Нажми /clean, чтобы освободить кэши")))
 
     if b.tinvest.configured:
         snap = await b.tinvest.get(force=True)

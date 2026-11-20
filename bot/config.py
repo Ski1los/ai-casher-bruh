@@ -1,5 +1,6 @@
 """Загрузка настроек из файла .env."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 
@@ -8,7 +9,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-DEFAULT_EXCHANGES = "bybit,bingx,okx,gate,mexc,kucoin,htx,bitget"
+log = logging.getLogger(__name__)
+
+# Бот работает только с биржами, где у владельца есть аккаунт. Каждая лишняя биржа съедает
+# память (список пар, тикеры) и время скана, а без аккаунта на ней всё равно нельзя торговать.
+SUPPORTED_EXCHANGES = ("bybit", "bingx")
+DEFAULT_EXCHANGES = ",".join(SUPPORTED_EXCHANGES)
+
+
+def exchanges_from_env() -> list[str]:
+    """EXCHANGES из окружения, но только поддерживаемые. Пусто или мусор → Bybit и BingX."""
+    wanted = [x.lower() for x in _list("EXCHANGES", DEFAULT_EXCHANGES)]
+    dropped = [x for x in wanted if x not in SUPPORTED_EXCHANGES]
+    if dropped:
+        log.warning("Биржи %s больше не поддерживаются и пропущены (остались Bybit и BingX)", ", ".join(dropped))
+    out = list(dict.fromkeys(x for x in wanted if x in SUPPORTED_EXCHANGES))
+    return out or list(SUPPORTED_EXCHANGES)
 
 
 def _list(name: str, default: str = "") -> list[str]:
@@ -97,7 +113,7 @@ BOUNDS = {
 
 
 def parse_fee_overrides(raw: str) -> dict[str, float]:
-    """«bybit:0.1, mexc:0.05» (в процентах) → {"bybit": 0.001, "mexc": 0.0005}."""
+    """«bybit:0.1, bingx:0.05» (в процентах) → {"bybit": 0.001, "bingx": 0.0005}."""
     out: dict[str, float] = {}
     for item in raw.replace(";", ",").split(","):
         if ":" not in item and "=" not in item:
@@ -114,7 +130,7 @@ def parse_fee_overrides(raw: str) -> dict[str, float]:
 
 def load_settings() -> Settings:
     return Settings(
-        exchanges=_list("EXCHANGES", DEFAULT_EXCHANGES),
+        exchanges=exchanges_from_env(),
         quote=os.getenv("QUOTE", "USDT").strip().upper() or "USDT",
         min_profit_percent=_float("MIN_PROFIT_PERCENT", 0.5),
         max_profit_percent=_float("MAX_PROFIT_PERCENT", 15),

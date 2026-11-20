@@ -5,9 +5,10 @@ import asyncio
 import ccxt.async_support as ccxt
 import pytest
 
+from bot.config import SUPPORTED_EXCHANGES
 from bot.scanner import make_exchange
 
-EXCHANGES = ["bybit", "bingx", "okx", "gate", "mexc", "kucoin", "htx", "bitget"]
+EXCHANGES = list(SUPPORTED_EXCHANGES)
 FUTURES_MARKERS = ["linear", "inverse", "option", "swap", "futures", "contract", "delivery", "FUTURES", "SWAP", "OPTION"]
 
 

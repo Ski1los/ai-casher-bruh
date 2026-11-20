@@ -262,6 +262,11 @@ class DexClient:
             await self._session.close()
             self._session = None
 
+    def clear_cache(self) -> int:
+        n = len(self._cache)
+        self._cache.clear()
+        return n
+
     async def _get(self, url: str, ttl: float = CACHE_SEC):
         cached = self._cache.get(url)
         if cached and time.time() - cached[0] < ttl:

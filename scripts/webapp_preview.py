@@ -103,8 +103,6 @@ def build():
     b.scanner.exchanges = {
         "bybit": PreviewExchange("Bybit", 0.0, {"USDT": 41.27, "BTC": 0.00031, "ETH": 0.0042, "TON": 3.1, "PEPE": 152_000}),
         "bingx": PreviewExchange("BingX", 0.0011, {"USDT": 18.4, "SOL": 0.052}),
-        "okx": PreviewExchange("OKX", 0.0006, {}),
-        "mexc": PreviewExchange("MEXC Global", -0.0009, {}),
     }
     b.subscribers = tb.SubscriberStore(tmp / "subs.json")
     b.demo = DemoManager(b.scanner, settings, tmp / "demo.json")
@@ -160,7 +158,7 @@ def build():
             exp = rnd.uniform(0.15, 0.6)
             real = exp - rnd.uniform(-0.05, 0.45) - (0.3 if acc.strategy == "cross" and acc.start_balance < 50 else 0)
             t = DemoTrade(symbol="USDT → PEPE → BTC → USDT" if acc.strategy == "tri" else "TON/USDT", buy_exchange="bybit",
-                          sell_exchange="bybit" if acc.strategy == "tri" else "okx", opened_at=now - (30 - k * 2) * 3600,
+                          sell_exchange="bybit" if acc.strategy == "tri" else "bingx", opened_at=now - (30 - k * 2) * 3600,
                           cost_usd=bal, buy_price=0, coins_bought=0, withdraw_fee_coins=0, withdraw_fee_known=True,
                           coins_arrived=0, expected_usd=bal * (1 + exp / 100), signal_percent=exp,
                           closed_at=now - (30 - k * 2) * 3600 + 5, received_usd=bal * (1 + real / 100), strategy=acc.strategy)
