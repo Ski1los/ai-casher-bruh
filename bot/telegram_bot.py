@@ -28,8 +28,9 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import trading_ui
+from . import extras_ui, trading_ui
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
+from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
 from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start_health_server
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
@@ -37,7 +38,8 @@ from .demo import DEMO_FILE
 from .demo_manager import DemoManager
 from .report import ScanStats, seconds_until, split_message
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
-from .trading import Trader
+from .solana import PhantomWatcher
+from .trading import Trader, days_left
 from .triangular import TriOpportunity
 from .webapp import WebApp
 
@@ -51,6 +53,7 @@ EXPLAIN_KEEP = 30  # для скольких последних сообщени
 MAX_IN_MESSAGE = 10  # сколько связок показывать в одном сообщении
 MAX_TRI_IN_MESSAGE = 5  # сколько треугольников показывать
 BACKUP_EVERY_SEC = 30 * 60  # как часто сохранять статистику демо в Telegram
+KEYS_WATCH_SEC = 12 * 3600  # как часто перепроверять ключи бирж (права, срок действия)
 
 HELP_TEXT = """\
 <b>Арбитражный сканер</b> 🤖
@@ -97,6 +100,13 @@ HELP_TEXT = """\
 <b>Анализ без ИИ</b>
 /analysis — комиссии, безубыточность, узкие места, рекомендации
 /fees — комиссии бирж; <code>/fee bybit 0.08</code> — задать свою ставку в %
+
+<b>Полезное</b> ✨
+/doctor — 🩺 проверить всё: биржи, ключи, сроки ключей, приложение, ИИ
+<code>/price TON</code> — цена монеты на всех биржах сразу и разница между ними
+<code>/alert TON &lt; 5</code> — сообщить, когда цена дойдёт до уровня (или <code>/alert SOL +5%</code>)
+/alerts — мои алерты (удаление кнопками)
+<code>/phantom АДРЕС</code> — 👻 баланс кошелька Phantom (только просмотр, сид-фразу не нужно!)
 
 <b>Прочее</b>
 /report — отчёт о работе прямо сейчас (он же приходит каждый день)
@@ -349,6 +359,9 @@ class ArbitrageBot:
         self._explain_seq = 0
         self._changed: dict[str, float] = {}  # что меняли через /set и кнопки
         self._fee_changes: dict[str, float | None] = {}  # что меняли через /fee (None = сброс)
+        self.alerts = AlertBook()  # ценовые алерты (/alert)
+        self.phantom = PhantomWatcher(os.getenv("PHANTOM_ADDRESS", "") or os.getenv("SOLANA_ADDRESS", ""))
+        self._key_warned: dict[str, float] = {}  # о чём уже предупреждали (чтобы не спамить)
         self.settings_file = SETTINGS_FILE
         if self.settings_file.exists():
             try:
@@ -397,7 +410,8 @@ class ArbitrageBot:
     # --- сохранение настроек ------------------------------------------------
 
     def _settings_state(self) -> dict:
-        return {"values": dict(self._changed), "fees": dict(self._fee_changes)}
+        return {"values": dict(self._changed), "fees": dict(self._fee_changes),
+                "alerts": self.alerts.export(), "phantom": self.phantom.address}
 
     def _apply_saved_settings(self, raw: dict) -> None:
         for key, value in (raw.get("values") or {}).items():
@@ -415,6 +429,24 @@ class ArbitrageBot:
             elif 0 <= float(fee) < 0.05:
                 self.settings.fee_overrides[ex] = float(fee)
         self.scanner.apply_fee_overrides()
+        if "alerts" in raw:
+            self.alerts.restore(raw.get("alerts"))
+        if raw.get("phantom") is not None:
+            try:
+                self.phantom.set_address(raw.get("phantom") or "")
+            except Exception:
+                pass
+
+    async def save_extras(self) -> None:
+        """Алерты и адрес кошелька: в файл и в резервную копию."""
+        self._save_settings()
+        try:
+            await self._backup_now()
+        except Exception as e:
+            log.warning("Бэкап не удался: %s", e)
+
+    async def phantom_snapshot(self, force: bool = False) -> dict | None:
+        return await self.phantom.get(lambda coins: extras_ui.public_prices(self, coins), force=force)
 
     def _save_settings(self) -> None:
         try:
@@ -538,6 +570,29 @@ class ArbitrageBot:
             "period": period,
             "last_scan": last,
             "trading": self._trading_context(),
+            "extras": self._extras_context(),
+        }
+
+    def _extras_context(self) -> dict:
+        """Кошелёк Phantom (только просмотр), ценовые алерты и состояние ключей (без секретов)."""
+        snap = self.phantom.snapshot
+        phantom = None
+        if self.phantom.address:
+            phantom = {"connected": True, "read_only": True, "error": (snap or {}).get("error"),
+                       "total_usd": round((snap or {}).get("total_usd") or 0, 2),
+                       "assets": [{"coin": a["coin"], "amount": round(a["amount"], 6),
+                                   "usd": round(a["usd"], 2) if a["usd"] is not None else None}
+                                  for a in (snap or {}).get("assets", [])[:10]]}
+        keys = {}
+        for name, info in self.trader.key_info.items():
+            days = days_left(info)
+            keys[name] = {"days_until_expiry": round(days, 1) if days is not None else None,
+                          "withdraw_enabled": bool(info.get("withdraw")), "ip_bound": bool(info.get("ip_bound"))}
+        return {
+            "phantom_wallet": phantom or {"connected": False, "how": "/phantom АДРЕС (только публичный адрес)"},
+            "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
+            "api_keys": keys,
+            "useful_commands": ["/doctor", "/price COIN", "/alert COIN < PRICE", "/phantom"],
         }
 
     def _trading_context(self) -> dict:
@@ -1034,8 +1089,9 @@ class ArbitrageBot:
             chat_id = cb.message.chat.id if cb.message else cb.from_user.id
             await self._ai_respond(chat_id, lambda: self.ai.explain(items, self.ai_context()))
 
-        # --- торговля (до обработчика обычного текста) ---------------------------
+        # --- торговля и полезные мелочи (до обработчика обычного текста) ----------
         trading_ui.register(self)
+        extras_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1179,6 +1235,31 @@ class ArbitrageBot:
                 lines.append("Автоторговля на этих биржах не работает, пока ключ не исправлен.")
             await self._send(self.owner_id, "\n".join(lines))
 
+    async def _keys_watch_loop(self) -> None:
+        """Раз в 12 часов перепроверяет ключи: не сломался ли, не истекает ли (Bybit), нет ли права вывода."""
+        await asyncio.sleep(60)
+        while True:
+            try:
+                before = dict(self.trader.key_status)
+                status = await self.trader.check_keys()
+                await self.trader.inspect_keys()
+                notes = []
+                for name, st in status.items():
+                    if st != "ok" and before.get(name, "ok") == "ok":
+                        notes.append(f"{self.scanner.display_name(name)}: ключ перестал работать: {st}")
+                    elif st == "ok" and before.get(name, "ok") != "ok":
+                        notes.append(f"{self.scanner.display_name(name)}: ключ снова работает ✅")
+                for w in self.trader.key_warnings():
+                    if time.time() - self._key_warned.get(w, 0) > 3 * 86400:  # не чаще раза в 3 дня
+                        self._key_warned[w] = time.time()
+                        notes.append(w)
+                if notes and self.owner_id:
+                    lines = ["🔑 <b>Ключи бирж</b>"] + [f"• {html.escape(n)}" for n in notes]
+                    await self._send(self.owner_id, "\n".join(lines + ["Подробно: /doctor"]))
+            except Exception:
+                log.exception("Ошибка проверки ключей")
+            await asyncio.sleep(KEYS_WATCH_SEC)
+
     async def run(self) -> None:
         tasks: list[asyncio.Task] = []
         runner = None
@@ -1205,6 +1286,11 @@ class ArbitrageBot:
                     BotCommand(command="orders", description="Открытые ордера"),
                     BotCommand(command="stop", description="🛑 Остановить торговлю"),
                     BotCommand(command="ai", description="🧠 ИИ: разбор и вопросы"),
+                    BotCommand(command="doctor", description="🩺 Проверить всё"),
+                    BotCommand(command="price", description="💲 Цена монеты на всех биржах"),
+                    BotCommand(command="alert", description="🔔 Ценовой алерт"),
+                    BotCommand(command="alerts", description="Мои алерты"),
+                    BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
                     BotCommand(command="analysis", description="Анализ: комиссии и узкие места"),
                     BotCommand(command="fees", description="Комиссии бирж"),
                     BotCommand(command="report", description="Отчёт о работе"),
@@ -1220,6 +1306,8 @@ class ArbitrageBot:
             await self._restore_backup()
             if self.trader.creds:
                 tasks.append(asyncio.create_task(self._check_keys_on_start()))
+                tasks.append(asyncio.create_task(self._keys_watch_loop()))
+            tasks.append(asyncio.create_task(extras_ui.alerts_loop(self)))
             tasks.append(asyncio.create_task(self._auto_loop()))
             tasks.append(asyncio.create_task(self._equity_loop()))
             if self.app_url():
@@ -1239,4 +1327,5 @@ class ArbitrageBot:
                 await runner.cleanup()
             await self.scanner.close()
             await self.ai.client.close()
+            await self.phantom.close()
             await self.bot.session.close()

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import html
 import logging
 import os
@@ -39,6 +40,7 @@ KEY_PAGES = {
     "kucoin": "https://www.kucoin.com/account/api",
     "htx": "https://www.htx.com/apikey/",
     "bitget": "https://www.bitget.com/account/newapi",
+    "bingx": "https://bingx.com/en/account/api",
 }
 STABLES = {"USDT", "USDC", "FDUSD", "DAI", "TUSD", "USDD", "PYUSD"}
 TRADE_LOG_KEEP = 200
@@ -75,9 +77,81 @@ def human_error(e: BaseException) -> str:
         return "слишком много запросов, биржа просит подождать"
     if isinstance(e, ccxt.InvalidNonce):
         return "время запроса не совпало с биржей, попробуй ещё раз"
+    if is_geo_block(e):
+        return ("биржа не пускает сервер из его страны (ошибка 403 «block access from your country»). "
+                "Проверь /doctor: там подсказка, как это обойти")
     if isinstance(e, (ccxt.NetworkError, asyncio.TimeoutError)):
         return f"биржа не отвечает или не пускает сервер: {text}"
     return f"{type(e).__name__}: {text}"
+
+
+def is_geo_block(e: BaseException) -> bool:
+    """Биржа (через CloudFront) блокирует страну сервера, а не ключ и не запрос."""
+    text = str(e).lower()
+    return "block access from your country" in text or ("cloudfront" in text and "403" in text)
+
+
+KEY_INFO_EXCHANGES = ("bybit", "bingx")
+KEY_WARN_DAYS = 14  # за сколько дней предупреждать, что ключ скоро истечёт
+
+
+def parse_bybit_key(r: dict, now: float | None = None) -> dict:
+    """Ответ Bybit /v5/user/query-api → права и срок действия ключа."""
+    now = time.time() if now is None else now
+    perms = r.get("permissions") or {}
+    ips = [ip for ip in (r.get("ips") or []) if ip]
+    out = {
+        "withdraw": "Withdraw" in (perms.get("Wallet") or []),
+        "spot_trade": "SpotTrade" in (perms.get("Spot") or []),
+        "read_only": str(r.get("readOnly")) == "1",
+        "ip_bound": bool(ips) and ips != ["*"],
+        "unified": str(r.get("uta") or r.get("unified") or "0") not in ("0", "False", "false"),
+    }
+    expired = str(r.get("expiredAt") or "").strip()
+    if expired:
+        try:
+            out["expires_at"] = dt.datetime.fromisoformat(expired.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    if "expires_at" not in out:
+        try:
+            days = float(r.get("deadlineDay"))
+            if days >= 0:
+                out["expires_at"] = now + days * 86400
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+BINGX_PERMS = {1: "spot_trade", 2: "read", 3: "futures", 4: "transfer", 5: "withdraw", 7: "sub_transfer"}
+
+
+def parse_bingx_key(data) -> dict:
+    """Ответ BingX /openApi/v1/account/apiPermissions → права ключа.
+
+    Формат: {"apiKey", "permissions": [1, 2, ...], "ipAddresses": [...], "note"}, где
+    1 — спот, 2 — чтение, 3 — фьючерсы, 4 — переводы, 5 — ВЫВОД, 7 — переводы субаккаунтов.
+    """
+    data = data if isinstance(data, dict) else {}
+    out: dict = {}
+    for p in data.get("permissions") or []:
+        try:
+            name = BINGX_PERMS.get(int(p))
+        except (TypeError, ValueError):
+            continue
+        if name:
+            out[name] = True
+    ips = [ip for ip in (data.get("ipAddresses") or []) if ip]
+    out["ip_bound"] = bool(ips)
+    out["inactive_rule"] = not ips  # ключ без IP BingX удаляет после 14 дней без запросов
+    return out
+
+
+def days_left(info: dict, now: float | None = None) -> float | None:
+    exp = info.get("expires_at")
+    if not exp:
+        return None
+    return (exp - (time.time() if now is None else now)) / 86400
 
 
 def credentials_from_env(names, env=None) -> dict[str, dict]:
@@ -239,6 +313,7 @@ class Trader:
         self.state = TradingState()
         self.creds = credentials_from_env(scanner.exchanges, env)
         self.key_status: dict[str, str] = {}  # биржа -> "ok" или текст ошибки
+        self.key_info: dict[str, dict] = {}  # права и срок действия ключа (где биржа это сообщает)
         self.pending: OrderedDict[str, OrderPlan] = OrderedDict()
         self.recent_tri: dict[str, float] = {}
         self.balance_cache: dict[str, tuple[float, list]] = {}
@@ -283,6 +358,42 @@ class Trader:
         self.key_status = dict(results)
         return self.key_status
 
+    async def inspect_keys(self) -> dict[str, dict]:
+        """Права и срок действия ключей там, где биржа это сообщает (Bybit, BingX)."""
+
+        async def one(name: str) -> tuple[str, dict]:
+            ex = self.scanner.exchanges[name]
+            try:
+                if name == "bybit":
+                    res = await ex.privateGetV5UserQueryApi()
+                    return name, parse_bybit_key((res or {}).get("result") or {})
+                if name == "bingx":
+                    res = await ex.accountV1PrivateGetAccountApiPermissions()
+                    return name, parse_bingx_key((res or {}).get("data"))
+            except Exception as e:
+                return name, {"error": human_error(e)}
+            return name, {}
+
+        names = [n for n in self.working if n in KEY_INFO_EXCHANGES]
+        for name, info in await asyncio.gather(*(one(n) for n in names)):
+            info["checked_at"] = time.time()
+            self.key_info[name] = info
+        return self.key_info
+
+    def key_warnings(self, now: float | None = None) -> list[str]:
+        """Короткие предупреждения о ключах: скоро истекает, включён вывод."""
+        now = time.time() if now is None else now
+        out = []
+        for name, info in self.key_info.items():
+            title = self.scanner.display_name(name)
+            days = days_left(info, now)
+            if days is not None and days <= KEY_WARN_DAYS:
+                out.append(f"ключ {title} перестанет работать через {max(days, 0):.0f} дн. "
+                           f"Создай новый и замени в Render (как в /keys)")
+            if info.get("withdraw"):
+                out.append(f"у ключа {title} включено право вывода: создай ключ без Withdraw")
+        return out
+
     def _ex(self, name: str):
         if name not in self.creds:
             raise TradeError(
@@ -296,7 +407,8 @@ class Trader:
         raw = raw.strip().lower()
         aliases = {self.scanner.display_name(n).lower(): n for n in self.scanner.exchanges}
         aliases.update({"байбит": "bybit", "окх": "okx", "гейт": "gate", "мекс": "mexc", "мексик": "mexc",
-                        "кукоин": "kucoin", "хтх": "htx", "битгет": "bitget", "gateio": "gate", "huobi": "htx"})
+                        "кукоин": "kucoin", "хтх": "htx", "битгет": "bitget", "gateio": "gate", "huobi": "htx",
+                        "бингх": "bingx", "бингикс": "bingx", "бинг": "bingx", "bing x": "bingx", "бинкс": "bingx"})
         name = aliases.get(raw, raw)
         if name not in self.scanner.exchanges:
             raise TradeError(f"не знаю биржу «{raw}». Есть: {', '.join(self.scanner.exchanges)}")

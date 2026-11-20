@@ -7,7 +7,7 @@ import pytest
 
 from bot.scanner import make_exchange
 
-EXCHANGES = ["bybit", "okx", "gate", "mexc", "kucoin", "htx", "bitget"]
+EXCHANGES = ["bybit", "bingx", "okx", "gate", "mexc", "kucoin", "htx", "bitget"]
 FUTURES_MARKERS = ["linear", "inverse", "option", "swap", "futures", "contract", "delivery", "FUTURES", "SWAP", "OPTION"]
 
 

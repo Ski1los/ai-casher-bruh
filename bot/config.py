@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+DEFAULT_EXCHANGES = "bybit,bingx,okx,gate,mexc,kucoin,htx,bitget"
+
+
 def _list(name: str, default: str = "") -> list[str]:
     raw = os.getenv(name, default)
     return [x.strip() for x in raw.split(",") if x.strip()]
@@ -108,7 +111,7 @@ def parse_fee_overrides(raw: str) -> dict[str, float]:
 
 def load_settings() -> Settings:
     return Settings(
-        exchanges=_list("EXCHANGES", "bybit,okx,gate,mexc,kucoin,htx,bitget"),
+        exchanges=_list("EXCHANGES", DEFAULT_EXCHANGES),
         quote=os.getenv("QUOTE", "USDT").strip().upper() or "USDT",
         min_profit_percent=_float("MIN_PROFIT_PERCENT", 0.5),
         max_profit_percent=_float("MAX_PROFIT_PERCENT", 15),

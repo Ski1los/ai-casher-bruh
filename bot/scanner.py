@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -47,9 +48,14 @@ def make_exchange(name: str):
         return None
     options = {"defaultType": "spot", **SPOT_ONLY_OPTIONS.get(name, {})}
     ex = cls({"enableRateLimit": True, "timeout": 20_000, "options": options})
-    # MEXC игнорирует опцию типов и всегда грузит ещё и фьючерсы, отключаем напрямую
-    if name == "mexc" and hasattr(ex, "fetch_spot_markets"):
-        ex.fetch_markets = ex.fetch_spot_markets
+    # MEXC и BingX игнорируют опцию типов и всегда грузят ещё и фьючерсы: отключаем напрямую
+    if name in ("mexc", "bingx") and hasattr(ex, "fetch_spot_markets"):
+        spot = ex.fetch_spot_markets
+        ex.fetch_markets = lambda params=None: spot(params or {})
+    # Запасной домен API, если основной не пускает сервер (например BYBIT_HOSTNAME=bytick.com)
+    host = os.getenv(f"{name.upper()}_HOSTNAME", "").strip()
+    if host:
+        ex.hostname = host
     return ex
 
 

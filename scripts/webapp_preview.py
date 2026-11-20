@@ -102,14 +102,43 @@ def build():
     b._send = no_send
     b.scanner.exchanges = {
         "bybit": PreviewExchange("Bybit", 0.0, {"USDT": 41.27, "BTC": 0.00031, "ETH": 0.0042, "TON": 3.1, "PEPE": 152_000}),
-        "okx": PreviewExchange("OKX", 0.0011, {"USDT": 18.4, "SOL": 0.052}),
+        "bingx": PreviewExchange("BingX", 0.0011, {"USDT": 18.4, "SOL": 0.052}),
+        "okx": PreviewExchange("OKX", 0.0006, {}),
         "mexc": PreviewExchange("MEXC Global", -0.0009, {}),
     }
     b.subscribers = tb.SubscriberStore(tmp / "subs.json")
     b.demo = DemoManager(b.scanner, settings, tmp / "demo.json")
-    env = {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s", "OKX_API_KEY": "k", "OKX_API_SECRET": "s", "OKX_API_PASSWORD": "p"}
+    env = {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s", "BINGX_API_KEY": "k", "BINGX_API_SECRET": "s"}
     b.trader = Trader(b.scanner, settings, env=env)
-    b.trader.key_status = {"bybit": "ok", "okx": "ok"}
+    b.trader.key_status = {"bybit": "ok", "bingx": "ok"}
+    for name in ("bybit", "bingx"):
+        b.scanner.exchanges[name].apiKey = "k"
+    b.scanner.exchanges["bingx"].funding = {"USDT": 12.5}  # деньги «не на том счёте» — /doctor подскажет
+    b.scanner.exchanges["bingx"].options = {"accountsByType": {"funding": "fund", "spot": "spot"}}
+
+    async def bybit_key_info(params=None):  # как отвечает Bybit: ключ без IP, истекает через 76 дней
+        return {"result": {"readOnly": 0, "ips": ["*"], "deadlineDay": 76,
+                           "permissions": {"Spot": ["SpotTrade"], "Wallet": ["AccountTransfer"]}}}
+
+    async def bingx_key_info(params=None):
+        return {"code": 0, "data": {"apiKey": "k", "permissions": [1, 2], "ipAddresses": [], "note": ""}}
+
+    b.scanner.exchanges["bybit"].privateGetV5UserQueryApi = bybit_key_info
+    b.scanner.exchanges["bingx"].accountV1PrivateGetAccountApiPermissions = bingx_key_info
+
+    # Phantom: адрес-пример и снимок без обращения к сети Solana
+    from bot.solana import PhantomWatcher
+    b.phantom = PhantomWatcher("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU")
+
+    async def fake_phantom(price_fn, force=False):
+        prices = await price_fn(["SOL", "BONK"])
+        assets = [{"coin": "SOL", "amount": 0.84, "usd": 0.84 * prices.get("SOL", 0)},
+                  {"coin": "USDC", "amount": 12.0, "usd": 12.0},
+                  {"coin": "BONK", "amount": 250000, "usd": None}]
+        return {"address": b.phantom.address, "assets": assets, "updated_at": time.time(),
+                "total_usd": sum(a["usd"] or 0 for a in assets)}
+
+    b.phantom.get = fake_phantom
 
     # история: портфель за 3 дня, демо-счета со сделками, журнал реальных сделок
     rnd = random.Random(7)

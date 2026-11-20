@@ -359,3 +359,16 @@ nav.tabbar button.on svg { transform: translateY(-1px); color: var(--accent2); }
 .setting + .setting { border-top: 1px solid var(--line); }
 .setting input { width: 92px; text-align: right; border: 1px solid var(--line); background: var(--card2); border-radius: 10px; padding: 8px 10px; font-weight: 650; outline: none; }
 .lock { font-size: 11px; color: var(--yellow); }
+
+/* --- Phantom, проверка, алерты, цены --- */
+.input { width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--card2); border-radius: 12px; padding: 11px 12px; outline: none; font-weight: 600; }
+.input:focus { border-color: var(--accent); }
+.input:disabled { opacity: 0.6; }
+.ic-round { width: 40px; height: 40px; flex: none; border-radius: 13px; background: rgba(171, 159, 242, 0.16); display: grid; place-items: center; }
+.ic-round svg { width: 22px; height: 22px; }
+.doc-ic { width: 22px; height: 22px; flex: none; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 800; color: #fff; margin-top: 1px; }
+.doc-ic.ok { background: var(--green); }
+.doc-ic.warn { background: var(--yellow); }
+.doc-ic.bad { background: var(--red); }
+.doc-ic.info { background: var(--muted); }
+.doc-ic svg { width: 14px; height: 14px; }

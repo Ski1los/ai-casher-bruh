@@ -80,6 +80,11 @@ const ICON = {
   stop: svg('<rect x="6" y="6" width="12" height="12" rx="2.5"/>', 'style="color:var(--red)"'),
   arrow: svg('<path d="M5 12h14M13 6l6 6-6 6"/>'),
   refresh: svg('<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>'),
+  doctor: svg('<path d="M3 12h4l2-5 4 10 2-5h6"/>', 'style="color:var(--green)"'),
+  bell: svg('<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>', 'style="color:var(--yellow)"'),
+  price: svg('<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>', 'style="color:#4f8cff"'),
+  x: svg('<path d="M6 6l12 12M18 6 6 18"/>', 'style="color:var(--red)"'),
+  ghost: svg('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.5-2-2.3 2-2.2-2-2.2 2-2.3-2z"/><circle cx="9.5" cy="11" r="1"/><circle cx="14.5" cy="11" r="1"/>', 'style="color:#ab9ff2"'),
 };
 const ARR = `<span class="arr">${ICON.arrow}</span>`;
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -424,7 +429,7 @@ const S = {
   homeMode: store.get("homeMode", null),
   sigTab: store.get("sigTab", "tri"),
   m: Object.assign({ ex: null, symbol: "BTC/USDT", tf: "15m", side: "buy", type: "market", amount: "", price: "" }, store.get("m", {})),
-  market: null, portfolio: store.get("portfolio", null), orders: null, demo: null,
+  market: null, portfolio: store.get("portfolio", null), orders: null, demo: null, phantom: store.get("phantom", null),
   chat: [], symbols: {}, scanning: false, sigs: {},
 };
 const owner = () => !!(S.ov && S.ov.user && S.ov.user.owner);
@@ -510,6 +515,8 @@ function renderHome() {
   if (!t.keys || !t.keys.length) banners.push(`<div class="banner info press" data-act="keys"><div>🔑</div><div><b>Подключи биржу, чтобы торговать.</b><br><span class="muted">5 минут с телефона. Без ключа работают сигналы и демо.</span> <span class="link">Как подключить →</span></div></div>`);
   else if (t.keys.some((k) => k.status !== "ok" && k.status !== "unchecked")) banners.push(`<div class="banner red">⚠️ Ключ не работает: ${t.keys.filter((k) => k.status !== "ok" && k.status !== "unchecked").map((k) => `${esc(k.name)} — ${esc(k.status)}`).join("; ")}</div>`);
 
+  for (const w of t.key_warnings || []) banners.push(`<div class="banner red press" data-act="doctor"><div>🔑</div><div>${esc(w)} <span class="link">Проверить →</span></div></div>`);
+
   const sc = S.ov.scan;
   const sigs = sc ? [...sc.tri.map((s) => [s, "tri"]), ...sc.cross.map((s) => [s, "cross"])]
     .sort((a, b) => (b[0].depth_pct ?? b[0].net) - (a[0].depth_pct ?? a[0].net)).slice(0, 3) : [];
@@ -529,6 +536,12 @@ function renderHome() {
       <div class="action" data-act="quick" data-side="buy"><div class="ic" style="background:var(--green-bg)">${ICON.buy}</div>Купить</div>
       <div class="action" data-act="quick" data-side="sell"><div class="ic" style="background:var(--red-bg)">${ICON.sell}</div>Продать</div>
       <div class="action danger" data-act="stop"><div class="ic">${ICON.stop}</div>Стоп</div>
+    </div>
+    <div class="grid4" style="margin-top:8px">
+      <div class="action" data-act="doctor"><div class="ic">${ICON.doctor}</div>Проверка</div>
+      <div class="action" data-act="alerts"><div class="ic">${ICON.bell}</div>Алерты</div>
+      <div class="action" data-act="prices"><div class="ic">${ICON.price}</div>Цены</div>
+      <div class="action" data-act="phantom"><div class="ic">${ICON.ghost}</div>Phantom</div>
     </div>
     <div class="section-title">Лучшие сигналы <a data-act="goto" data-tab="signals">Все</a></div>
     ${sigs.length ? `<div class="list">${sigs.map(([s, k]) => signalMini(s, k)).join("")}</div>` : `<div class="card empty"><div class="e">🔍</div>${sc ? "Прибыльных связок сейчас нет. Это нормально: рынок эффективен." : "Сканирований ещё не было"}<div style="margin-top:12px"><button class="btn primary sm" data-act="scan">Сканировать</button></div></div>`}
@@ -870,7 +883,7 @@ function renderWallet() {
   if (!S.ov) { v.innerHTML = skeleton(); return; }
   const t = tr();
   if (!t.keys || !t.keys.length) {
-    v.innerHTML = `${keysHelp()}<div class="section-title">Журнал сделок</div>${(t.log || []).length ? `<div class="list">${t.log.map(tradeRow).join("")}</div>` : `<div class="card empty">Сделок пока нет</div>`}`;
+    v.innerHTML = `${keysHelp()}${phantomBlock()}<div class="section-title">Журнал сделок</div>${(t.log || []).length ? `<div class="list">${t.log.map(tradeRow).join("")}</div>` : `<div class="card empty">Сделок пока нет</div>`}`;
     return;
   }
   const p = S.portfolio;
@@ -894,6 +907,7 @@ function renderWallet() {
     ${items.length ? `<div class="card" style="margin-top:10px"><div class="donut-wrap" id="donut"><div class="col grow">${items.map((i) => `<div class="row between small"><span><i style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${i.color};margin-right:6px"></i>${esc(i.label)}</span><span class="num b">${((i.value / (total || 1)) * 100).toFixed(1)}%</span></div>`).join("")}</div></div></div>` : ""}
     ${p ? p.exchanges.map((e) => `<div class="section-title">${esc(e.name)} ${e.error ? "" : `<span class="num" style="text-transform:none">${money(e.total_usd)}</span>`}</div>
       ${e.error ? `<div class="banner red">❌ ${esc(e.error)}</div>` : (e.coins || []).length ? `<div class="list">${e.coins.filter((c) => (c.usd || 0) >= 0.01 || c.usd == null).slice(0, 20).map((c) => `<div class="item press" data-act="coin" data-ex="${esc(e.exchange)}" data-coin="${esc(c.coin)}">${coinIcon(c.coin)}<div class="grow"><div class="t">${esc(c.coin)}</div><div class="s num">${amount(c.total)}${c.total - c.free > 1e-12 ? ` · в ордерах ${amount(c.total - c.free)}` : ""}</div></div><div class="r"><div class="b num">${c.usd != null ? money(c.usd) : "—"}</div><div class="s">${c.coin === S.ov.quote ? "" : "продать →"}</div></div></div>`).join("")}</div>` : `<div class="card empty">Пусто. Если деньги на бирже есть, переведи их на торговый счёт (Funding → Trading / Unified)</div>`}`).join("") : ""}
+    ${phantomBlock()}
     <div class="section-title">Открытые ордера <a data-act="load-orders">Обновить</a></div>
     <div id="ordersBox">${ordersHtml()}</div>
     ${pnlCurve.length > 1 ? `<div class="section-title">Результат циклов</div><div class="card"><div class="chart-wrap mid" id="pnlChart"></div></div>` : ""}
@@ -928,15 +942,158 @@ async function loadOrders() {
   const box = $("#ordersBox"); if (box) box.innerHTML = ordersHtml();
 }
 
+// ---------------------------------------------------------------------------
+// Phantom, проверка, алерты, цены
+// ---------------------------------------------------------------------------
+
+function phantomBlock() {
+  const ph = S.phantom;
+  if (!ph || !ph.address) return `<div class="section-title">Кошелёк Phantom</div><div class="card press" data-act="phantom"><div class="row" style="gap:12px"><div class="ic-round">${ICON.ghost}</div><div class="grow"><div class="b">Подключить Phantom</div><div class="small muted">Только просмотр баланса по публичному адресу. Сид-фраза не нужна</div></div><span class="link">→</span></div></div>`;
+  const rows = (ph.assets || []).slice(0, 15).map((a) => `<div class="item">${coinIcon(a.coin)}<div class="grow"><div class="t">${esc(a.coin)}</div><div class="s num">${amount(a.amount)}</div></div><div class="r"><div class="b num">${a.usd != null ? money(a.usd) : "—"}</div></div></div>`).join("");
+  return `<div class="section-title">👻 Phantom <span class="num" style="text-transform:none">${money(ph.total_usd || 0)}</span> <a data-act="phantom-refresh">Обновить</a></div>
+    ${ph.error ? `<div class="banner red" style="margin-bottom:8px"><div>⚠️ ${esc(ph.error)}</div></div>` : ""}
+    ${rows ? `<div class="list">${rows}</div>` : `<div class="card empty" style="padding:16px">${ph.error ? "Нет данных" : "Кошелёк пуст"}</div>`}
+    <div class="tiny dim" style="margin-top:6px">${esc(shortAddr(ph.address))} · только просмотр · обновлено ${ph.updated_at ? ago(ph.updated_at) : "—"}</div>`;
+}
+
+const shortAddr = (a) => (a && a.length > 10 ? a.slice(0, 4) + "…" + a.slice(-4) : a || "");
+
+async function loadPhantom(force = false) {
+  try {
+    S.phantom = await api("/api/phantom" + (force ? "?force=1" : ""), undefined, { timeout: 30000 });
+    store.set("phantom", S.phantom);
+    if (S.tab === "wallet") renderActive(true);
+    const box = $("#phBlock"); if (box && S.phantom && S.phantom.address) box.innerHTML = phantomBlock();
+    const inp = $("#phAddr"); if (inp && !inp.value && document.activeElement !== inp && S.phantom) inp.value = S.phantom.address || "";
+  } catch (e) { if (force) fail(e); }
+}
+
+function phantomSheet() {
+  const ph = S.phantom;
+  Sheet.open("Кошелёк Phantom", `
+    <div class="banner red" style="margin-bottom:12px"><div>🔒 <b>Сид-фразу (12 слов) и приватный ключ не вводи никуда</b>: ни сюда, ни боту, ни «поддержке». По ним крадут деньги. Здесь нужен только <b>публичный адрес</b>.</div></div>
+    <div class="card">
+      <div class="b">Публичный адрес Solana</div>
+      <div class="small muted" style="margin:4px 0 10px">Phantom → «Получить» (Receive) → Solana → «Копировать». По адресу можно только смотреть баланс.</div>
+      <input id="phAddr" class="input" placeholder="например 7xKX…" value="${esc((ph && ph.address) || "")}" autocomplete="off" autocapitalize="off" spellcheck="false" ${owner() ? "" : "disabled"}>
+      <div class="row" style="gap:8px;margin-top:10px">
+        <button class="btn primary grow" data-act="phantom-save" ${owner() ? "" : "disabled"}>Сохранить</button>
+        ${ph && ph.address ? `<button class="btn soft-red" data-act="phantom-off" ${owner() ? "" : "disabled"}>Отключить</button>` : ""}
+      </div>
+    </div>
+    <div id="phBlock">${ph && ph.address ? phantomBlock() : ""}</div>
+    <div class="tiny dim" style="margin-top:12px">Phantom не биржа: это твой личный кошелёк, и бот им не торгует. Чтобы торговать монетами из Phantom, переведи их на Bybit или BingX (сеть Solana, адрес пополнения на бирже).</div>`, { full: true });
+}
+
+async function savePhantom(btn, off = false) {
+  const address = off ? "" : ($("#phAddr").value || "").trim();
+  if (!off && address.split(/\s+/).length >= 10) { toast("Это сид-фраза! Не вводи её никуда. Нужен публичный адрес", true); $("#phAddr").value = ""; return; }
+  btn.disabled = true;
+  try {
+    S.phantom = await api("/api/phantom", { address }, { timeout: 30000 });
+    haptic.ok(); toast(off ? "Кошелёк отключён" : "Кошелёк подключён 👻");
+    phantomSheet(); if (S.tab === "wallet") renderActive(true);
+  } catch (e) { fail(e); } finally { btn.disabled = false; }
+}
+
+const docSvg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+const DOC_ICON = { ok: docSvg('<path d="M6 12.5l4 4 8-9"/>'), warn: docSvg('<path d="M12 6v7M12 17.5v.5"/>'), bad: docSvg('<path d="M7 7l10 10M17 7 7 17"/>'), info: docSvg('<path d="M12 11v6M12 7v.5"/>') };
+
+async function doctorSheet() {
+  Sheet.open("Проверка всего", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Проверяю биржи, ключи, сервис… до 30 секунд</div>`, { full: true });
+  try {
+    const r = await api("/api/doctor", undefined, { timeout: 90000 });
+    if (!Sheet.isOpen() || $("#sheetTitle").textContent !== "Проверка всего") return;
+    const groups = {};
+    for (const c of r.checks) (groups[c.group] = groups[c.group] || []).push(c);
+    const s = r.summary;
+    const verdict = s.bad ? ["red", "Есть проблемы: исправь красные пункты"] : s.warn ? ["", "Работает, но посмотри жёлтые пункты"] : ["info", "Всё в порядке"];
+    Sheet.body().innerHTML = `
+      <div class="grid4" style="margin-bottom:10px">
+        <div class="stat center"><div class="v num up">${s.ok}</div><div class="k">ок</div></div>
+        <div class="stat center"><div class="v num" style="color:var(--yellow)">${s.warn}</div><div class="k">внимание</div></div>
+        <div class="stat center"><div class="v num down">${s.bad}</div><div class="k">ошибки</div></div>
+        <div class="stat center"><div class="v num">${s.info}</div><div class="k">инфо</div></div>
+      </div>
+      <div class="banner ${verdict[0]}">${verdict[1]}</div>
+      ${Object.entries(groups).map(([g, list]) => `<div class="section-title">${esc(g)}</div><div class="list">${list.map((c) => `<div class="item" style="align-items:flex-start"><div class="doc-ic ${c.status}">${DOC_ICON[c.status]}</div><div class="grow"><div class="t">${esc(c.title)}</div><div class="s" style="white-space:normal">${esc(c.text)}</div></div></div>`).join("")}</div>`).join("")}
+      <button class="btn block ghost" style="margin-top:14px" data-act="doctor">Проверить ещё раз</button>`;
+    s.bad ? haptic.err() : haptic.ok();
+  } catch (e) { Sheet.body().innerHTML = `<div class="banner red">❌ ${esc(e.message)}</div>`; }
+}
+
+function alertsHtml(list) {
+  if (!list.length) return `<div class="card empty" style="padding:16px"><div class="e">🔔</div>Алертов нет. Бот пришлёт сообщение в Telegram, когда цена дойдёт до уровня</div>`;
+  return `<div class="list">${list.map((a) => {
+    const dist = a.start_price ? ((a.price / a.start_price - 1) * 100) : null;
+    return `<div class="item">${coinIcon(a.coin)}<div class="grow"><div class="t">${esc(a.coin)} ${a.op === "<" ? "≤" : "≥"} ${price(a.price)}</div><div class="s">${esc(a.name)}${dist != null ? ` · ${dist > 0 ? "+" : ""}${dist.toFixed(2)}% от цены создания` : ""}</div></div><button class="icon-btn" style="width:36px;height:36px;background:var(--red-bg)" data-act="alert-del" data-id="${esc(a.id)}" aria-label="Удалить">${ICON.x}</button></div>`;
+  }).join("")}</div>`;
+}
+
+async function alertsSheet() {
+  Sheet.open("Ценовые алерты", `
+    <div class="card">
+      <div class="row" style="gap:8px"><input id="alertText" class="input grow" placeholder="TON < 5" autocomplete="off" autocapitalize="characters"><button class="btn primary" data-act="alert-add">Добавить</button></div>
+      <div class="chips" style="margin-top:10px">${["TON < 5", "BTC > 100000", "SOL +5%", "ETH -3%"].map((x) => `<button class="chip" data-act="alert-ex" data-v="${esc(x)}">${esc(x)}</button>`).join("")}</div>
+      <div class="tiny dim" style="margin-top:8px">Цена или процент от текущей. Можно указать биржу: «TON &lt; 5 bingx». Срабатывает один раз, проверка каждые 30 секунд.</div>
+    </div>
+    <div class="section-title">Активные</div><div id="alertsBox"><div class="skel" style="height:60px"></div></div>`, { full: true });
+  try { const r = await api("/api/alerts"); $("#alertsBox").innerHTML = alertsHtml(r.alerts); } catch (e) { $("#alertsBox").innerHTML = `<div class="banner red">${esc(e.message)}</div>`; }
+}
+
+async function addAlert(btn) {
+  const text = ($("#alertText").value || "").trim();
+  if (!text) { $("#alertText").focus(); return; }
+  btn.disabled = true;
+  try {
+    const r = await api("/api/alerts", { text });
+    $("#alertsBox").innerHTML = alertsHtml(r.alerts); $("#alertText").value = "";
+    haptic.ok(); toast("🔔 Алерт добавлен");
+  } catch (e) { fail(e); } finally { btn.disabled = false; }
+}
+
+async function delAlert(id) {
+  try { const r = await api("/api/alerts/delete", { id }); $("#alertsBox").innerHTML = alertsHtml(r.alerts); haptic.tap(); } catch (e) { fail(e); }
+}
+
+function pricesSheet() {
+  Sheet.open("Цена на всех биржах", `
+    <div class="card">
+      <div class="row" style="gap:8px"><input id="priceCoin" class="input grow" placeholder="TON" autocomplete="off" autocapitalize="characters" value="${esc(store.get("priceCoin", "TON"))}"><button class="btn primary" data-act="price-go">Найти</button></div>
+      <div class="chips" style="margin-top:10px">${["BTC", "ETH", "SOL", "TON", "XRP", "DOGE"].map((x) => `<button class="chip" data-act="price-coin" data-v="${x}">${x}</button>`).join("")}</div>
+    </div>
+    <div id="pricesBox" style="margin-top:10px"></div>`, { full: true });
+  loadPrices();
+}
+
+async function loadPrices(btn) {
+  const coin = ($("#priceCoin").value || "").trim().toUpperCase();
+  if (!coin) return;
+  store.set("priceCoin", coin);
+  const box = $("#pricesBox");
+  box.innerHTML = `<div class="skel" style="height:120px"></div>`;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/price?coin=" + encodeURIComponent(coin), undefined, { timeout: 40000 });
+    const mid = (x) => (x.bid && x.ask ? (x.bid + x.ask) / 2 : x.last || x.bid || x.ask);
+    const rows = r.rows.filter(mid).sort((a, b) => mid(a) - mid(b));
+    if (!rows.length) { box.innerHTML = `<div class="card empty">Не нашёл ${esc(coin)}/${esc(r.quote)} на биржах из списка</div>`; return; }
+    const lo = rows[0], hi = rows[rows.length - 1];
+    const gap = rows.length > 1 ? ((hi.bid || mid(hi)) / (lo.ask || mid(lo)) - 1) * 100 : null;
+    box.innerHTML = `<div class="list">${rows.map((x) => `<div class="item"><div class="grow"><div class="t">${esc(x.name)}</div><div class="s num">${x.ask ? `купить ${price(x.ask)} · продать ${price(x.bid)}` : ""}</div></div><div class="r"><div class="b num">${price(mid(x))}</div><div class="s num ${cls(x.change || 0)}">${x.change != null ? pct(x.change) : ""}</div></div></div>`).join("")}</div>
+      ${gap != null ? `<div class="banner ${gap > 1.5 ? "info" : ""}" style="margin-top:10px"><div>Купить на ${esc(lo.name)}, продать на ${esc(hi.name)}: <b class="num">${pct(gap)}</b> до комиссий. ${gap < 1.5 ? "Перевод между биржами съест эту разницу комиссиями." : "Разница заметная: проверь комиссию вывода и сеть, прежде чем переводить."}</div></div>` : ""}`;
+  } catch (e) { box.innerHTML = `<div class="banner red">❌ ${esc(e.message)}</div>`; } finally { if (btn) btn.disabled = false; }
+}
+
 function keysHelp() {
   return `<div class="card">
     <div class="b" style="font-size:17px">🔑 Подключи биржу</div>
     <div class="muted small" style="margin-top:4px">Чтобы торговать из приложения, нужен API-ключ биржи. Это 5 минут с телефона.</div>
     <ol class="steps">
-      <li>В приложении биржи: <b>Профиль → API → Создать ключ</b> (системный).</li>
-      <li>Права: <b>только спотовая торговля</b>. <b>Вывод (Withdraw) не включай</b>: тогда деньги нельзя вывести даже при утечке ключа.</li>
-      <li>IP-ограничение не ставь (у бесплатного сервера адрес меняется).</li>
-      <li>Render → сервис <b>ai-casher-bot</b> → <b>Environment</b>: <b>BYBIT_API_KEY</b> и <b>BYBIT_API_SECRET</b> (для OKX ещё <b>OKX_API_PASSWORD</b>) → <b>Save</b>.</li>
+      <li>На <b>сайте</b> биржи (в браузере, «версия для ПК»): <b>Профиль → API → Создать ключ</b> (системный).</li>
+      <li>Права: <b>чтение + спотовая торговля</b>. <b>Вывод (Withdraw) не включай</b>: тогда деньги нельзя вывести даже при утечке ключа.</li>
+      <li>IP-ограничение не ставь. Ключ Bybit без IP живёт ~3 месяца (бот напомнит), ключ BingX живёт, пока бот им пользуется.</li>
+      <li>Render → сервис <b>ai-casher-bot</b> → <b>Environment</b>: <b>BYBIT_API_KEY</b> и <b>BYBIT_API_SECRET</b>, <b>BINGX_API_KEY</b> и <b>BINGX_API_SECRET</b> (для OKX ещё <b>OKX_API_PASSWORD</b>) → <b>Save</b>.</li>
       <li>Через минуту бот перезапустится, и здесь появится твой баланс.</li>
     </ol>
     <div class="banner" style="margin-top:12px">Ключи никогда не присылай в чат. Только в настройки Render.</div>
@@ -1081,7 +1238,7 @@ function go(tab) {
   renderActive(true);
   if (tab === "market") loadMarket(true);
   if (tab === "demo") loadDemo();
-  if (tab === "wallet") { loadPortfolio(); loadOrders(); }
+  if (tab === "wallet") { loadPortfolio(); loadOrders(); loadPhantom(); }
 }
 
 let refreshing = false;
@@ -1118,6 +1275,18 @@ document.addEventListener("click", async (e) => {
     case "scan": doScan(el); break;
     case "stop": haptic.tap(); panic(); break;
     case "keys": Sheet.open("Подключение биржи", keysHelp()); break;
+    case "doctor": haptic.tap(); doctorSheet(); break;
+    case "alerts": haptic.tap(); alertsSheet(); break;
+    case "alert-add": addAlert(el); break;
+    case "alert-del": delAlert(d.id); break;
+    case "alert-ex": $("#alertText").value = d.v; $("#alertText").focus(); break;
+    case "prices": haptic.tap(); pricesSheet(); break;
+    case "price-go": loadPrices(el); break;
+    case "price-coin": $("#priceCoin").value = d.v; loadPrices(); break;
+    case "phantom": haptic.tap(); phantomSheet(); loadPhantom(); break;
+    case "phantom-save": savePhantom(el); break;
+    case "phantom-off": savePhantom(el, true); break;
+    case "phantom-refresh": haptic.tap(); loadPhantom(true); break;
     case "quick": S.m.side = d.side; store.set("m", S.m); go("market"); break;
     case "m-ex": S.m.ex = d.v; S.market = null; store.set("m", S.m); haptic.sel(); renderMarket(); loadMarket(true); break;
     case "m-tf": S.m.tf = d.v; store.set("m", S.m); haptic.sel(); $$('[data-act="m-tf"]').forEach((c) => c.classList.toggle("on", c.dataset.v === d.v)); loadMarket(true); break;
