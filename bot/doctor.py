@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import ccxt.async_support as ccxt
 
+from . import updater
 from .cloud import version_text
 from .memory import RENDER_RAM_MB, memory_line, rss_mb
 from .trading import days_left, human_error, is_geo_block
@@ -180,6 +181,10 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                         f"включён: {sc.last_reason or 'запускается'}" if sc.on else
                         "выключен. Торгует даже с $5: два ордера (купить на откате → продать с прибылью). /scalp on"))
     checks.append(_auto_check(b))
+    if updater.outdated():
+        checks.append(Check("Сервис", "Версия", "warn", updater.status_line() + ". Как обновить: /update"))
+    elif updater.hook_problem():
+        checks.append(Check("Сервис", "Самообновление", "warn", updater.hook_problem()))
     if b.duplicate_running():
         checks.append(Check("Сервис", "Две копии бота", "bad",
                             "тем же токеном пользуется второй сервис. Сделки на паузе, бот отвечает через раз, "

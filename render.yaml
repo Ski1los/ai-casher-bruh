@@ -43,6 +43,9 @@ services:
       # Т-Инвестиции: токен T-Invest API с доступом «Только чтение» (бот только показывает портфель)
       - key: TINVEST_TOKEN
         sync: false
+      # Самообновление: Render → Settings → Deploy Hook → скопировать сюда (секрет, не публикуй)
+      - key: RENDER_DEPLOY_HOOK_URL
+        sync: false
       # Сводка автоторговли в чат раз в N часов (0 = не присылать)
       - key: AUTO_REPORT_HOURS
         value: "6"
