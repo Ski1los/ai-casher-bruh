@@ -45,6 +45,8 @@ TRADE_LOG_KEEP = 200
 PENDING_KEEP = 30
 PENDING_TTL_SEC = 300  # предпросмотр ордера действует 5 минут
 TRI_REPEAT_SEC = 600  # один и тот же цикл автоторговля повторяет не чаще раза в 10 минут
+HISTORY_EVERY_SEC = 15 * 60  # как часто записывать стоимость портфеля для графика
+HISTORY_KEEP = 1000  # ≈ 10 дней по 15 минут
 
 
 class TradeError(Exception):
@@ -188,6 +190,7 @@ class TradingState:
     day_trades: int = 0  # реальных сделок бота за сутки
     paused_reason: str | None = None
     log: list[dict] = field(default_factory=list)
+    history: list[list[float]] = field(default_factory=list)  # [[время, стоимость портфеля $], ...]
 
 
 @dataclass
@@ -416,6 +419,39 @@ class Trader:
             if name not in self.working:
                 parts.append(f"<b>{html.escape(self.scanner.display_name(name))}</b>: ❌ {html.escape(self.key_status[name])}")
         return "💰 <b>Балансы</b>\n\n" + "\n\n".join(parts) + f"\n\nВсего ≈ <b>${total:.2f}</b>"
+
+    async def portfolio(self) -> dict:
+        """Балансы всех бирж с ключами + общая стоимость. Заодно пишет точку в историю для графика."""
+        names = self.working
+        results = await asyncio.gather(*(self.balances(n) for n in names), return_exceptions=True)
+        exchanges, total, ok = [], 0.0, False
+        for name, res in zip(names, results):
+            item = {"exchange": name, "name": self.scanner.display_name(name)}
+            if isinstance(res, BaseException):
+                item["error"] = human_error(res)
+            else:
+                ok = True
+                coins = [{"coin": c, "free": f, "total": t, "usd": u} for c, f, t, u in res]
+                item["coins"] = coins
+                item["total_usd"] = sum(c["usd"] or 0 for c in coins)
+                total += item["total_usd"]
+            exchanges.append(item)
+        for name in self.creds:
+            if name not in names:
+                exchanges.append({"exchange": name, "name": self.scanner.display_name(name),
+                                  "error": self.key_status.get(name, "ключ не работает")})
+        if ok:
+            self.record_equity(total)
+        return {"total_usd": total, "exchanges": exchanges, "updated_at": time.time()}
+
+    def record_equity(self, total: float, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        hist = self.state.history
+        if len(hist) >= 2 and now - hist[-2][0] < HISTORY_EVERY_SEC:
+            hist[-1] = [now, round(total, 4)]  # последняя точка «плавает», остальные не чаще раза в 15 минут
+        else:
+            hist.append([now, round(total, 4)])
+        del hist[:-HISTORY_KEEP]
 
     def balances_for_ai(self) -> dict:
         """Последние известные балансы (без запросов к бирже) для контекста ИИ."""
