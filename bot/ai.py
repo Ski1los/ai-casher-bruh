@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 import aiohttp
 
-from .config import BOUNDS, EDITABLE
+from .config import BOUNDS, EDITABLE, RISK_KEYS
 
 log = logging.getLogger(__name__)
 
@@ -358,10 +358,47 @@ def extract_proposals(text: str) -> tuple[str, list[Proposal]]:
             value = float(m.group(2).replace(",", ".").rstrip("."))
         except ValueError:
             continue
+        if key in RISK_KEYS:  # лимиты риска меняет только человек
+            continue
         if validate_setting(key, value) is None and all(p.key != key for p in proposals):
             proposals.append(Proposal(key, value, (m.group(3) or "").strip(" *_`")))
     cleaned = SET_LINE.sub("", text).strip()
     return cleaned, proposals[:4]
+
+
+@dataclass
+class OrderIntent:
+    """Ордер, который ИИ предлагает по просьбе пользователя. Исполняется только после кнопки."""
+
+    side: str  # buy / sell
+    exchange: str
+    coin: str
+    amount: str  # для buy — USDT; для sell — монеты, all или 50%
+    price: float | None = None  # для лимитного ордера
+    reason: str = ""
+
+
+ORDER_LINE = re.compile(
+    r"^[^\w\n]*ORDER[^\w\n]+(buy|sell)\s+([a-z0-9._-]+)\s+([a-z0-9]{1,15})\s+(\d[\d.,]*%?|all)"
+    r"(?:\s*@\s*(\d[\d.,]*))?[*_`\s]*(?:[-—–:|#][*_`\s]*(.*))?$",
+    re.M | re.I,
+)
+
+
+def extract_orders(text: str) -> tuple[str, list[OrderIntent]]:
+    orders: list[OrderIntent] = []
+    for m in ORDER_LINE.finditer(text):
+        price = None
+        if m.group(5):
+            try:
+                price = float(m.group(5).replace(",", ".").rstrip("."))
+            except ValueError:
+                continue
+        orders.append(OrderIntent(
+            m.group(1).lower(), m.group(2).lower(), m.group(3).upper(), m.group(4).lower().rstrip("."),
+            price, (m.group(6) or "").strip(" *_`"),
+        ))
+    return ORDER_LINE.sub("", text).strip(), orders[:3]
 
 
 def validate_setting(key: str, value: float) -> str | None:
@@ -394,7 +431,21 @@ SYSTEM_PROMPT = """\
 - Комиссии в данных: типичные taker из ccxt. Реальные для аккаунта могут быть ниже (VIP-уровень, \
 скидка за оплату токеном биржи, maker-ордера). Не называй точные размеры скидок, если не уверен: \
 советуй проверить страницу комиссий биржи и, если ставка другая, задать её командой /fee биржа процент.
-- Бот сам реальными деньгами не торгует. Биржи меняются только в настройках Render (EXCHANGES).
+- Биржи для сканирования меняются только в настройках Render (EXCHANGES).
+
+Торговля. В боте есть реальная торговля через API-ключи бирж (блок trading в ДАННЫХ: режим test/live, \
+биржи с ключами, последние балансы, лимиты). Если пользователь ЯВНО просит купить или продать \
+(например «купи эфира на 5 долларов на байбите»), добавь в конце ответа строку строго в формате:
+ORDER buy биржа МОНЕТА сумма_в_USDT — короткая причина
+ORDER sell биржа МОНЕТА количество|all|50% — короткая причина
+Для лимитного ордера добавь @цена: ORDER buy bybit BTC 5 @60000 — причина
+Биржа — id из trading.exchanges_with_keys, монета торгуется против USDT, сумма покупки не больше \
+trading.max_trade_usd. Бот сам покажет предпросмотр с реальной ценой и комиссией и кнопку «Подтвердить»: \
+без кнопки ничего не исполнится. Если просьба неоднозначна (не ясна биржа или сумма), переспроси, а не угадывай.
+Не предлагай ORDER по своей инициативе ради спекуляции и не предсказывай цены: куда пойдёт курс, не знает никто, \
+говори это честно. Можно предложить вернуть в USDT монеты, застрявшие после сбоя цикла. \
+Если ключей нет, объясни, что нужно подключить их: /keys. Реальный режим (/live) и автоторговлю \
+(/autotrade) включает только сам пользователь, ты их не включаешь.
 - Оформление: обычный текст для Telegram, можно **жирный** и списки через «- ». Без таблиц и заголовков #.
 
 Изменение настроек бота. Если по данным видно, что настройку стоит поменять, в самом конце ответа \
@@ -409,6 +460,8 @@ SET ключ=число — короткая причина
 def _keys_help() -> str:
     lines = []
     for key, (_, desc) in EDITABLE.items():
+        if key in RISK_KEYS:
+            continue
         lo, hi = BOUNDS.get(key, (0, float("inf")))
         lines.append(f"{key} ({desc}, от {lo:g} до {hi:g})")
     return "\n".join(lines)
@@ -445,6 +498,7 @@ class Answer:
     html: str
     proposals: list[Proposal]
     model: str | None = None
+    orders: list[OrderIntent] = field(default_factory=list)
 
 
 class AIAssistant:
@@ -471,16 +525,18 @@ class AIAssistant:
             "content": SYSTEM_PROMPT.format(keys=_keys_help()) + "\n\nДАННЫЕ (JSON):\n" + compact_json(context),
         }
 
-    async def _run(self, messages: list[dict], max_tokens: int = 1200) -> Answer:
+    async def _run(self, messages: list[dict], max_tokens: int = 1200, allow_orders: bool = False) -> Answer:
         raw = await self.client.chat(messages, max_tokens=max_tokens)
         text, proposals = extract_proposals(raw)
-        return Answer(to_telegram_html(text) or "🤷 Пустой ответ", proposals, self.client.last_model)
+        text, orders = extract_orders(text)  # из разборов ордера выкидываются: только по прямой просьбе
+        return Answer(to_telegram_html(text) or "🤷 Пустой ответ", proposals, self.client.last_model,
+                      orders if allow_orders else [])
 
     async def ask(self, chat_id: int, question: str, context: dict) -> Answer:
         question = question.strip()[:2000]
         hist = self.history.setdefault(chat_id, deque(maxlen=HISTORY_TURNS * 2))
         messages = [self._system(context), *hist, {"role": "user", "content": question}]
-        answer = await self._run(messages)
+        answer = await self._run(messages, allow_orders=True)
         hist.append({"role": "user", "content": question})
         hist.append({"role": "assistant", "content": re.sub(r"<[^>]+>", "", answer.html)[:1500]})
         return answer

@@ -1,0 +1,930 @@
+"""Реальная торговля через API бирж: ручные ордера, исполнение треугольников, автоторговля.
+
+Безопасность прежде всего:
+  * ключи берутся ТОЛЬКО из переменных окружения (Render → Environment), в чат и в код не попадают;
+  * ключу нужны только права на спотовую торговлю, БЕЗ права на вывод: даже если ключ утечёт,
+    деньги нельзя вывести с биржи;
+  * по умолчанию включён ТЕСТОВЫЙ режим: всё считается по реальным стаканам и реальному балансу,
+    но ордера на биржу не отправляются. Реальный режим включается отдельно кнопкой;
+  * лимиты: максимум на сделку, максимум сделок в сутки, лимит дневного убытка автоторговли;
+  * перед каждым ордером цена перепроверяется по свежему стакану;
+  * /stop: выключает автоторговлю и реальный режим и отменяет открытые ордера.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import html
+import logging
+import os
+import secrets
+import time
+from collections import OrderedDict
+from dataclasses import asdict, dataclass, field
+
+import ccxt.async_support as ccxt
+
+from .config import Settings
+from .sim import simulate_buy, simulate_sell
+from .triangular import TriOpportunity, path_min_order_ok, simulate_path
+
+log = logging.getLogger(__name__)
+
+NEEDS_PASSWORD = {"okx", "kucoin", "bitget"}  # этим биржам кроме ключа нужен passphrase
+KEY_PAGES = {
+    "bybit": "https://www.bybit.com/app/user/api-management",
+    "okx": "https://www.okx.com/account/my-api",
+    "gate": "https://www.gate.io/myaccount/apikeys",
+    "mexc": "https://www.mexc.com/user/openapi",
+    "kucoin": "https://www.kucoin.com/account/api",
+    "htx": "https://www.htx.com/apikey/",
+    "bitget": "https://www.bitget.com/account/newapi",
+}
+STABLES = {"USDT", "USDC", "FDUSD", "DAI", "TUSD", "USDD", "PYUSD"}
+TRADE_LOG_KEEP = 200
+PENDING_KEEP = 30
+PENDING_TTL_SEC = 300  # предпросмотр ордера действует 5 минут
+TRI_REPEAT_SEC = 600  # один и тот же цикл автоторговля повторяет не чаще раза в 10 минут
+
+
+class TradeError(Exception):
+    """Понятная пользователю ошибка торговли."""
+
+
+def human_error(e: BaseException) -> str:
+    """ccxt-исключение → объяснение по-русски."""
+    text = str(e)[:200]
+    if isinstance(e, TradeError):
+        return str(e)
+    # порядок важен: подклассы раньше родителей
+    if isinstance(e, ccxt.InsufficientFunds):
+        return "недостаточно средств на бирже"
+    if isinstance(e, ccxt.PermissionDenied):
+        return "у ключа нет нужных прав (включи «Спотовая торговля» / Spot Trade) или IP сервера не в белом списке"
+    if isinstance(e, ccxt.AccountSuspended):
+        return "аккаунт на бирже ограничен"
+    if isinstance(e, ccxt.AuthenticationError):
+        return "ключ не подходит: проверь API key, secret и passphrase (и что ключ не удалён)"
+    if isinstance(e, ccxt.OrderNotFound):
+        return "ордер не найден (уже исполнен или отменён)"
+    if isinstance(e, ccxt.InvalidOrder):
+        return f"биржа отклонила ордер: {text}"
+    if isinstance(e, ccxt.RateLimitExceeded):
+        return "слишком много запросов, биржа просит подождать"
+    if isinstance(e, ccxt.InvalidNonce):
+        return "время запроса не совпало с биржей, попробуй ещё раз"
+    if isinstance(e, (ccxt.NetworkError, asyncio.TimeoutError)):
+        return f"биржа не отвечает или не пускает сервер: {text}"
+    return f"{type(e).__name__}: {text}"
+
+
+def credentials_from_env(names, env=None) -> dict[str, dict]:
+    """Ключи вида BYBIT_API_KEY / BYBIT_API_SECRET / OKX_API_PASSWORD."""
+    env = os.environ if env is None else env
+    out: dict[str, dict] = {}
+    for name in names:
+        up = name.upper()
+        key = (env.get(f"{up}_API_KEY") or "").strip()
+        secret = (env.get(f"{up}_API_SECRET") or "").strip()
+        if not key or not secret:
+            continue
+        cred = {"apiKey": key, "secret": secret}
+        password = (env.get(f"{up}_API_PASSWORD") or env.get(f"{up}_API_PASSPHRASE") or "").strip()
+        if password:
+            cred["password"] = password
+        out[name] = cred
+    return out
+
+
+def parse_amount(spec: str, available: float | None) -> float:
+    """«10», «0,5», «all»/«всё», «50%» → число."""
+    s = str(spec).strip().lower().replace(",", ".").lstrip("$")
+    if s in ("all", "max", "всё", "все", "весь", "вся"):
+        if available is None:
+            raise TradeError("не знаю баланс, укажи количество числом")
+        return available
+    if s.endswith("%"):
+        pct = float(s[:-1])
+        if not 0 < pct <= 100:
+            raise TradeError("процент от 0 до 100")
+        if available is None:
+            raise TradeError("не знаю баланс, укажи количество числом")
+        return available * pct / 100
+    try:
+        value = float(s)
+    except ValueError:
+        raise TradeError(f"«{spec}» не похоже на число") from None
+    if value <= 0:
+        raise TradeError("количество должно быть больше нуля")
+    return value
+
+
+def fmt_amount(x: float) -> str:
+    if x == 0:
+        return "0"
+    if abs(x) >= 1000:
+        return f"{x:,.2f}".replace(",", " ")
+    if abs(x) >= 1:
+        return f"{x:.4f}".rstrip("0").rstrip(".")
+    return f"{x:.8g}"
+
+
+# ---------------------------------------------------------------------------
+# Структуры
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OrderPlan:
+    """Предпросмотр ордера: что будет, если нажать «Подтвердить»."""
+
+    exchange: str
+    symbol: str
+    side: str  # buy / sell
+    type: str  # market / limit
+    spent: float  # сколько отдаём
+    spent_ccy: str
+    est_got: float  # сколько получим после комиссии (оценка по стакану)
+    got_ccy: str
+    est_price: float  # средняя цена исполнения
+    fee_rate: float
+    usd_value: float
+    price: float | None = None  # цена лимитного ордера
+    source: str = "manual"  # manual / ai / auto
+    warnings: list[str] = field(default_factory=list)
+    id: str = field(default_factory=lambda: secrets.token_hex(4))
+    created_at: float = field(default_factory=time.time)
+
+    @property
+    def base(self) -> str:
+        return self.symbol.split("/")[0]
+
+
+@dataclass
+class TradeRecord:
+    at: float
+    exchange: str
+    kind: str  # buy / sell / limit / triangle
+    what: str  # пара или путь цикла
+    live: bool
+    spent: float
+    spent_ccy: str
+    got: float
+    got_ccy: str
+    usd_value: float
+    pnl_usd: float | None = None  # для треугольника: USDT в конце минус в начале
+    source: str = "manual"
+    ok: bool = True
+    note: str = ""
+    order_id: str | None = None
+
+
+@dataclass
+class TradingState:
+    live: bool = False  # False = тестовый режим, ордера не отправляются
+    auto: bool = False  # автоторговля треугольниками
+    day: str = ""
+    day_pnl_usd: float = 0.0  # результат автоторговли/треугольников за сутки (только реальный режим)
+    day_trades: int = 0  # реальных сделок бота за сутки
+    paused_reason: str | None = None
+    log: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class TriExecution:
+    executed: bool
+    live: bool
+    opp: TriOpportunity
+    amount: float = 0.0
+    final: float = 0.0
+    reason: str = ""  # почему не исполнили / что пошло не так
+    steps: list[str] = field(default_factory=list)
+    stuck: str | None = None  # что осталось не в USDT после сбоя
+
+    @property
+    def pnl(self) -> float:
+        return self.final - self.amount
+
+    def text(self, name) -> str:
+        title = f"{html.escape(self.opp.path_text)} на {html.escape(name(self.opp.exchange))}"
+        mode = "" if self.live else "🧪 ТЕСТ (ордера не отправлялись): "
+        if not self.executed:
+            return f"⏭ {mode}{title}: не исполнял, {html.escape(self.reason)}"
+        icon = "✅" if self.pnl >= 0 else "🔻"
+        pct = self.pnl / self.amount * 100 if self.amount else 0
+        lines = [
+            f"{icon} {mode}<b>Треугольник исполнен</b>: {title}",
+            f"${self.amount:.4f} → ${self.final:.4f} = <b>{self.pnl:+.4f}$</b> ({pct:+.3f}%)",
+        ]
+        lines += [f"   {html.escape(s)}" for s in self.steps]
+        if self.reason:
+            lines.append(f"⚠️ {html.escape(self.reason)}")
+        if self.stuck:
+            lines.append(f"⚠️ Осталось не в USDT: {html.escape(self.stuck)}. Продать: /sell")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Трейдер
+# ---------------------------------------------------------------------------
+
+
+class Trader:
+    def __init__(self, scanner, settings: Settings, env=None):
+        self.scanner = scanner
+        self.settings = settings
+        self.state = TradingState()
+        self.creds = credentials_from_env(scanner.exchanges, env)
+        self.key_status: dict[str, str] = {}  # биржа -> "ok" или текст ошибки
+        self.pending: OrderedDict[str, OrderPlan] = OrderedDict()
+        self.recent_tri: dict[str, float] = {}
+        self.balance_cache: dict[str, tuple[float, list]] = {}
+        self._lock = asyncio.Lock()  # одна операция с деньгами за раз
+        for name, cred in self.creds.items():
+            self._apply_creds(name, cred)
+
+    # --- ключи --------------------------------------------------------------
+
+    def _apply_creds(self, name: str, cred: dict) -> None:
+        ex = self.scanner.exchanges[name]
+        for k, v in cred.items():
+            setattr(ex, k, v)
+        options = getattr(ex, "options", None)
+        if name == "bybit" and isinstance(options, dict):
+            # Bybit без этого флага отказывается отдавать статус ордера
+            options.setdefault("fetchOrder", {})["acknowledged"] = True
+
+    @property
+    def connected(self) -> list[str]:
+        """Биржи, для которых заданы ключи."""
+        return list(self.creds)
+
+    @property
+    def working(self) -> list[str]:
+        """Биржи с проверенными рабочими ключами (или ещё не проверенными)."""
+        return [n for n in self.creds if self.key_status.get(n, "ok") == "ok"]
+
+    async def check_keys(self) -> dict[str, str]:
+        async def one(name: str) -> tuple[str, str]:
+            if name in NEEDS_PASSWORD and "password" not in self.creds[name]:
+                return name, f"нужен ещё {name.upper()}_API_PASSWORD (passphrase, который ты придумал при создании ключа)"
+            ex = self.scanner.exchanges[name]
+            try:
+                await self.scanner._ensure_markets(name, ex)
+                await ex.fetch_balance()
+                return name, "ok"
+            except Exception as e:
+                return name, human_error(e)
+
+        results = await asyncio.gather(*(one(n) for n in self.creds))
+        self.key_status = dict(results)
+        return self.key_status
+
+    def _ex(self, name: str):
+        if name not in self.creds:
+            raise TradeError(
+                f"для {self.scanner.display_name(name)} нет API-ключа. Как подключить: /keys"
+            )
+        if self.key_status.get(name, "ok") != "ok":
+            raise TradeError(f"ключ {self.scanner.display_name(name)} не работает: {self.key_status[name]}")
+        return self.scanner.exchanges[name]
+
+    def resolve_exchange(self, raw: str) -> str:
+        raw = raw.strip().lower()
+        aliases = {self.scanner.display_name(n).lower(): n for n in self.scanner.exchanges}
+        aliases.update({"байбит": "bybit", "окх": "okx", "гейт": "gate", "мекс": "mexc", "мексик": "mexc",
+                        "кукоин": "kucoin", "хтх": "htx", "битгет": "bitget", "gateio": "gate", "huobi": "htx"})
+        name = aliases.get(raw, raw)
+        if name not in self.scanner.exchanges:
+            raise TradeError(f"не знаю биржу «{raw}». Есть: {', '.join(self.scanner.exchanges)}")
+        return name
+
+    # --- сутки и лимиты -------------------------------------------------------
+
+    def _today(self) -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime(time.time() + self.settings.report_utc_offset * 3600))
+
+    def _roll_day(self) -> None:
+        today = self._today()
+        if self.state.day != today:
+            self.state.day = today
+            self.state.day_pnl_usd = 0.0
+            self.state.day_trades = 0
+
+    def _check_limits(self, usd: float, is_buy: bool, source: str) -> None:
+        self._roll_day()
+        s = self.settings  # в тесте лимиты тоже проверяем, чтобы тест был честным
+        if self.state.day_trades >= s.daily_trades:
+            raise TradeError(f"лимит {s.daily_trades:g} сделок за сутки исчерпан (/set daily_trades)")
+        if is_buy and usd > s.max_trade_usd * 1.0001:
+            raise TradeError(f"${usd:.2f} больше лимита ${s.max_trade_usd:g} на сделку (/set max_trade)")
+        if source == "auto" and self.state.day_pnl_usd <= -s.daily_loss_usd:
+            raise TradeError(f"автоторговля на паузе: дневной убыток достиг ${s.daily_loss_usd:g}")
+
+    def _record(self, rec: TradeRecord) -> None:
+        if rec.live and rec.ok:
+            self._roll_day()
+            self.state.day_trades += 1
+            if rec.pnl_usd is not None:
+                self.state.day_pnl_usd += rec.pnl_usd
+                if self.state.auto and self.state.day_pnl_usd <= -self.settings.daily_loss_usd:
+                    self.state.auto = False
+                    self.state.paused_reason = (
+                        f"дневной убыток {self.state.day_pnl_usd:.2f}$ достиг лимита ${self.settings.daily_loss_usd:g}"
+                    )
+        self.state.log.append(asdict(rec))
+        del self.state.log[:-TRADE_LOG_KEEP]
+
+    # --- сохранение ---------------------------------------------------------
+
+    def export(self) -> dict:
+        return asdict(self.state)
+
+    def restore(self, raw: dict) -> None:
+        known = {f for f in TradingState.__dataclass_fields__}
+        self.state = TradingState(**{k: v for k, v in (raw or {}).items() if k in known})
+
+    # --- баланс -------------------------------------------------------------
+
+    async def _fetch_balance(self, name: str) -> dict:
+        return await self._ex(name).fetch_balance()
+
+    async def free(self, name: str, ccy: str) -> float:
+        bal = await self._fetch_balance(name)
+        return float((bal.get("free") or {}).get(ccy) or 0)
+
+    async def usd_prices(self, name: str, coins: list[str]) -> dict[str, float]:
+        prices = {c: 1.0 for c in coins if c in STABLES}
+        need = [c for c in coins if c not in prices]
+        if not need:
+            return prices
+        quote = self.settings.quote
+        ex = self.scanner.exchanges[name]
+
+        async def one(c: str) -> None:
+            symbol = f"{c}/{quote}"
+            if symbol not in (ex.markets or {}):
+                return
+            try:
+                t = await ex.fetch_ticker(symbol)
+                price = t.get("bid") or t.get("last")
+                if price:
+                    prices[c] = float(price)
+            except Exception:
+                pass
+
+        await asyncio.gather(*(one(c) for c in need[:15]))
+        return prices
+
+    async def balances(self, name: str) -> list[tuple[str, float, float, float | None]]:
+        """[(монета, свободно, всего, ≈$)] по убыванию стоимости."""
+        bal = await self._fetch_balance(name)
+        free = bal.get("free") or {}
+        items = [(c, float(free.get(c) or 0), float(t)) for c, t in (bal.get("total") or {}).items() if t and float(t) > 0]
+        prices = await self.usd_prices(name, [c for c, _, _ in items])
+        out = [(c, f, t, t * prices[c] if c in prices else None) for c, f, t in items]
+        out.sort(key=lambda x: -(x[3] or 0))
+        self.balance_cache[name] = (time.time(), out)
+        return out
+
+    async def all_balances_text(self) -> str:
+        if not self.creds:
+            return "Ключи бирж не подключены. Как подключить: /keys"
+        results = await asyncio.gather(*(self.balances(n) for n in self.working), return_exceptions=True)
+        parts = []
+        total = 0.0
+        for name, res in zip(self.working, results):
+            title = html.escape(self.scanner.display_name(name))
+            if isinstance(res, BaseException):
+                parts.append(f"<b>{title}</b>: ❌ {html.escape(human_error(res))}")
+                continue
+            lines = [f"<b>{title}</b>"]
+            shown = [r for r in res if (r[3] or 0) >= 0.01 or r[3] is None][:15]
+            for c, f, t, usd in shown:
+                usd_txt = f" ≈ ${usd:.2f}" if usd is not None else ""
+                locked = f" (в ордерах {fmt_amount(t - f)})" if t - f > 1e-12 else ""
+                lines.append(f"  {html.escape(c)}: {fmt_amount(t)}{usd_txt}{locked}")
+                total += usd or 0
+            if not shown:
+                lines.append("  пусто. Если деньги на бирже есть: переведи их внутри биржи на торговый счёт "
+                             "(Funding → Trading / Unified)")
+            dust = len(res) - len(shown)
+            if dust > 0:
+                lines.append(f"  <i>и ещё {dust} монет меньше $0.01</i>")
+            parts.append("\n".join(lines))
+        for name in self.creds:
+            if name not in self.working:
+                parts.append(f"<b>{html.escape(self.scanner.display_name(name))}</b>: ❌ {html.escape(self.key_status[name])}")
+        return "💰 <b>Балансы</b>\n\n" + "\n\n".join(parts) + f"\n\nВсего ≈ <b>${total:.2f}</b>"
+
+    def balances_for_ai(self) -> dict:
+        """Последние известные балансы (без запросов к бирже) для контекста ИИ."""
+        out = {}
+        for name, (at, rows) in self.balance_cache.items():
+            out[name] = {
+                "minutes_ago": round((time.time() - at) / 60, 1),
+                "coins": {c: {"amount": round(t, 8), "usd": round(u, 2) if u is not None else None} for c, _, t, u in rows[:12]},
+            }
+        return out
+
+    # --- предпросмотр ордера ------------------------------------------------
+
+    def _market(self, name: str, symbol: str) -> dict:
+        m = self.scanner.market(name, symbol)
+        if not m:
+            raise TradeError(f"на {self.scanner.display_name(name)} нет пары {symbol}")
+        if m.get("active") is False:
+            raise TradeError(f"пара {symbol} на {self.scanner.display_name(name)} сейчас не торгуется")
+        return m
+
+    @staticmethod
+    def _limits(m: dict) -> tuple[float, float]:
+        limits = m.get("limits") or {}
+        return (
+            float((limits.get("amount") or {}).get("min") or 0),
+            float((limits.get("cost") or {}).get("min") or 0),
+        )
+
+    async def plan_market(self, name: str, side: str, coin: str, amount_spec: str, source: str = "manual") -> OrderPlan:
+        """Покупка за USDT (amount_spec в USDT) или продажа монеты (amount_spec в монетах)."""
+        ex = self._ex(name)
+        await self.scanner._ensure_markets(name, ex)
+        quote = self.settings.quote
+        coin = coin.upper().strip()
+        if coin == quote:
+            raise TradeError(f"{quote} и так валюта счёта. Укажи монету, например BTC")
+        symbol = f"{coin}/{quote}"
+        m = self._market(name, symbol)
+        fee = float(m.get("taker") or 0.001)
+        bal = await self._fetch_balance(name)
+        free = bal.get("free") or {}
+        book = await self.scanner.order_book(name, symbol)
+        min_amount, min_cost = self._limits(m)
+        warnings: list[str] = []
+
+        if side == "buy":
+            available = float(free.get(quote) or 0)
+            cost = parse_amount(amount_spec, min(available, self.settings.max_trade_usd))
+            self._check_funds(name, cost, available, quote, warnings)
+            self._check_limits(cost, True, source)
+            spent, coins = simulate_buy(book.get("asks") or [], cost, fee)
+            if coins <= 0:
+                raise TradeError("стакан пустой")
+            if spent < cost * 0.999:
+                warnings.append(f"в стакане хватает только на {spent:.2f} {quote}")
+            price = spent / (coins / (1 - fee))
+            if cost < min_cost or coins < min_amount:
+                raise TradeError(f"меньше минимального ордера биржи (мин. ≈{max(min_cost, min_amount * price):.2f} {quote})")
+            plan = OrderPlan(name, symbol, "buy", "market", cost, quote, coins, coin, price, fee, cost, source=source, warnings=warnings)
+        else:
+            available = float(free.get(coin) or 0)
+            amount = parse_amount(amount_spec, available)
+            self._check_funds(name, amount, available, coin, warnings)
+            received, left = simulate_sell(book.get("bids") or [], amount, fee)
+            if received <= 0:
+                raise TradeError("стакан пустой")
+            if left > 0:
+                warnings.append(f"в стакане не хватает покупателей на {fmt_amount(left)} {coin}")
+            price = received / ((amount - left) * (1 - fee))
+            if amount < min_amount or amount * price < min_cost:
+                raise TradeError(f"меньше минимального ордера биржи (мин. ≈{max(min_cost, min_amount * price):.2f} {quote})")
+            self._check_limits(received, False, source)
+            plan = OrderPlan(name, symbol, "sell", "market", amount, coin, received, quote, price, fee, received,
+                             source=source, warnings=warnings)
+        return self._remember(plan)
+
+    async def plan_limit(self, name: str, side: str, coin: str, amount_spec: str, price: float, source: str = "manual") -> OrderPlan:
+        """Лимитный ордер: покупка на amount_spec USDT по цене price или продажа монет по цене price."""
+        ex = self._ex(name)
+        await self.scanner._ensure_markets(name, ex)
+        quote = self.settings.quote
+        coin = coin.upper().strip()
+        symbol = f"{coin}/{quote}"
+        m = self._market(name, symbol)
+        if price <= 0:
+            raise TradeError("цена должна быть больше нуля")
+        fee = float(m.get("maker") or m.get("taker") or 0.001)
+        bal = await self._fetch_balance(name)
+        free = bal.get("free") or {}
+        book = await self.scanner.order_book(name, symbol)
+        best_bid = float((book.get("bids") or [[0]])[0][0])
+        best_ask = float((book.get("asks") or [[0]])[0][0])
+        min_amount, min_cost = self._limits(m)
+        warnings = []
+        if side == "buy":
+            available = float(free.get(quote) or 0)
+            cost = parse_amount(amount_spec, min(available, self.settings.max_trade_usd))
+            self._check_funds(name, cost, available, quote, warnings)
+            self._check_limits(cost, True, source)
+            amount = cost / price
+            if best_ask and price >= best_ask:
+                warnings.append(f"цена выше лучшей продажи {best_ask:.8g}: исполнится сразу как рыночный")
+            elif best_ask and price < best_ask * 0.5:
+                warnings.append("цена вдвое ниже рынка: может не исполниться никогда")
+            got, spent, got_ccy, spent_ccy, usd = amount * (1 - fee), cost, coin, quote, cost
+        else:
+            available = float(free.get(coin) or 0)
+            amount = parse_amount(amount_spec, available)
+            self._check_funds(name, amount, available, coin, warnings)
+            if best_bid and price <= best_bid:
+                warnings.append(f"цена ниже лучшей покупки {best_bid:.8g}: исполнится сразу как рыночный")
+            self._check_limits(amount * price, False, source)
+            got, spent, got_ccy, spent_ccy, usd = amount * price * (1 - fee), amount, quote, coin, amount * price
+        if amount < min_amount or amount * price < min_cost:
+            raise TradeError(f"меньше минимального ордера биржи (мин. ≈{max(min_cost, min_amount * price):.2f} {quote})")
+        plan = OrderPlan(name, symbol, side, "limit", spent, spent_ccy, got, got_ccy, price, fee, usd,
+                         price=price, source=source, warnings=warnings)
+        return self._remember(plan)
+
+    def _check_funds(self, name: str, need: float, available: float, ccy: str, warnings: list[str]) -> None:
+        """В реальном режиме не хватает денег = ошибка. В тесте можно потренироваться и без денег на бирже."""
+        if need <= 0:
+            raise TradeError(f"на {self.scanner.display_name(name)} нет свободных {ccy}")
+        if need <= available * 1.0001:
+            return
+        text = f"на {self.scanner.display_name(name)} свободно {fmt_amount(available)} {ccy}, а нужно {fmt_amount(need)}"
+        if self.state.live:
+            raise TradeError(text)
+        warnings.append(text + " (в тесте можно, в реальном режиме ордер не пройдёт)")
+
+    def _remember(self, plan: OrderPlan) -> OrderPlan:
+        self.pending[plan.id] = plan
+        while len(self.pending) > PENDING_KEEP:
+            self.pending.popitem(last=False)
+        return plan
+
+    def get_plan(self, plan_id: str) -> OrderPlan:
+        plan = self.pending.get(plan_id)
+        if plan is None:
+            raise TradeError("этот предпросмотр уже использован или устарел, создай ордер заново")
+        if time.time() - plan.created_at > PENDING_TTL_SEC:
+            self.pending.pop(plan_id, None)
+            raise TradeError("предпросмотр устарел (больше 5 минут), цены изменились. Создай ордер заново")
+        return plan
+
+    def plan_text(self, plan: OrderPlan) -> str:
+        name = html.escape(self.scanner.display_name(plan.exchange))
+        mode = "🔴 РЕАЛЬНЫЙ ордер" if self.state.live else "🧪 ТЕСТ (ордер не будет отправлен)"
+        action = {"buy": "Покупка", "sell": "Продажа"}[plan.side]
+        kind = "по рынку" if plan.type == "market" else f"лимитная по {plan.price:.8g}"
+        who = {"ai": " · предложил ИИ", "auto": " · автоторговля"}.get(plan.source, "")
+        lines = [
+            f"<b>{action} {html.escape(plan.symbol)} на {name}</b> ({kind}){who}",
+            f"Отдаёшь: <b>{fmt_amount(plan.spent)} {html.escape(plan.spent_ccy)}</b>",
+            f"Получишь ≈ <b>{fmt_amount(plan.est_got)} {html.escape(plan.got_ccy)}</b> (после комиссии {plan.fee_rate * 100:.3g}%)",
+            f"Средняя цена ≈ {plan.est_price:.8g}",
+        ]
+        if plan.type == "market":
+            lines.append(f"Если цена уйдёт хуже чем на {self.settings.max_slippage_percent:g}%, ордер отменится сам.")
+        lines += [f"⚠️ {html.escape(w)}" for w in plan.warnings]
+        lines.append(mode)
+        return "\n".join(lines)
+
+    # --- исполнение ордера --------------------------------------------------
+
+    async def execute_plan(self, plan_id: str) -> TradeRecord:
+        plan = self.get_plan(plan_id)
+        async with self._lock:
+            self.pending.pop(plan_id, None)
+            ex = self._ex(plan.exchange)
+            self._check_limits(plan.usd_value, plan.side == "buy", plan.source)
+            if plan.type == "market":
+                await self._recheck_price(plan)
+            if not self.state.live:
+                rec = TradeRecord(time.time(), plan.exchange, plan.side if plan.type == "market" else "limit",
+                                  plan.symbol, False, plan.spent, plan.spent_ccy, plan.est_got, plan.got_ccy,
+                                  plan.usd_value, source=plan.source, note="тест: ордер не отправлялся")
+                self._record(rec)
+                return rec
+            try:
+                if plan.type == "limit":
+                    amount = plan.spent / plan.price if plan.side == "buy" else plan.spent
+                    order = await ex.create_order(
+                        plan.symbol, "limit", plan.side, self._amount(ex, plan.symbol, amount), self._price(ex, plan.symbol, plan.price)
+                    )
+                    rec = TradeRecord(time.time(), plan.exchange, "limit", plan.symbol, True, plan.spent, plan.spent_ccy,
+                                      0.0, plan.got_ccy, plan.usd_value, source=plan.source,
+                                      note=f"лимитный {plan.side} по {plan.price:.8g} выставлен", order_id=str(order.get("id")))
+                    self._record(rec)
+                    return rec
+                if plan.side == "buy":
+                    order = await ex.create_market_buy_order_with_cost(plan.symbol, self._cost(ex, plan.symbol, plan.spent))
+                else:
+                    order = await ex.create_market_sell_order(plan.symbol, self._amount(ex, plan.symbol, plan.spent))
+            except Exception as e:
+                raise TradeError(human_error(e)) from e
+            spent, got = await self._settle(ex, plan.exchange, order, plan.symbol, plan.side, plan.fee_rate)
+            rec = TradeRecord(time.time(), plan.exchange, plan.side, plan.symbol, True, spent, plan.spent_ccy, got,
+                              plan.got_ccy, plan.usd_value, source=plan.source, order_id=str(order.get("id")))
+            self._record(rec)
+            return rec
+
+    async def _recheck_price(self, plan: OrderPlan) -> None:
+        book = await self.scanner.order_book(plan.exchange, plan.symbol)
+        slip = self.settings.max_slippage_percent / 100
+        if plan.side == "buy":
+            spent, coins = simulate_buy(book.get("asks") or [], plan.spent, plan.fee_rate)
+            if coins <= 0:
+                raise TradeError("стакан пустой, ордер не отправлен")
+            price = spent / (coins / (1 - plan.fee_rate))
+            if price > plan.est_price * (1 + slip):
+                raise TradeError(f"цена выросла на {(price / plan.est_price - 1) * 100:.2f}%, ордер не отправлен")
+        else:
+            received, left = simulate_sell(book.get("bids") or [], plan.spent, plan.fee_rate)
+            if received <= 0:
+                raise TradeError("стакан пустой, ордер не отправлен")
+            price = received / ((plan.spent - left) * (1 - plan.fee_rate))
+            if price < plan.est_price * (1 - slip):
+                raise TradeError(f"цена упала на {(1 - price / plan.est_price) * 100:.2f}%, ордер не отправлен")
+
+    @staticmethod
+    def _amount(ex, symbol: str, amount: float) -> float:
+        try:
+            return float(ex.amount_to_precision(symbol, amount))
+        except Exception:
+            return amount
+
+    @staticmethod
+    def _price(ex, symbol: str, price: float) -> float:
+        try:
+            return float(ex.price_to_precision(symbol, price))
+        except Exception:
+            return price
+
+    @staticmethod
+    def _cost(ex, symbol: str, cost: float) -> float:
+        try:
+            return float(ex.cost_to_precision(symbol, cost))
+        except Exception:
+            return cost
+
+    async def _fetch_order(self, ex, oid: str, symbol: str) -> dict | None:
+        try:
+            return await ex.fetch_order(oid, symbol)
+        except Exception as e:
+            log.info("fetch_order %s: %s", oid, e)
+            for method in ("fetch_closed_order", "fetch_open_order"):
+                fn = getattr(ex, method, None)
+                if fn is None:
+                    continue
+                try:
+                    return await fn(oid, symbol)
+                except Exception:
+                    continue
+        return None
+
+    async def _settle(self, ex, name: str, order: dict, symbol: str, side: str, fee_rate: float) -> tuple[float, float]:
+        """Дожидается исполнения рыночного ордера. Возвращает (сколько отдали, сколько получили после комиссии)."""
+        o = order or {}
+        oid = o.get("id")
+        for attempt in range(5):
+            if o.get("filled") and (o.get("status") in ("closed", "canceled", "expired") or attempt >= 2):
+                break
+            if not oid:
+                break
+            await asyncio.sleep(0.25 * (attempt + 1))
+            o = await self._fetch_order(ex, oid, symbol) or o
+        base, quote = symbol.split("/")
+        filled = float(o.get("filled") or 0)
+        cost = float(o.get("cost") or 0) or filled * float(o.get("average") or o.get("price") or 0)
+        if side == "buy":
+            spent, got, got_ccy = cost, filled, base
+        else:
+            spent, got, got_ccy = filled, cost, quote
+        fees = [f for f in (o.get("fees") or [o.get("fee")]) if f and f.get("cost") is not None]
+        if fees:
+            got -= sum(float(f["cost"]) for f in fees if f.get("currency") == got_ccy)
+        else:
+            got *= 1 - fee_rate
+        if filled <= 0:
+            # биржа не подтвердила исполнение: не гадаем, а просим проверить вручную
+            raise TradeError(f"не удалось подтвердить исполнение ордера {oid}: проверь /orders и баланс /balance")
+        return spent, max(got, 0.0)
+
+    # --- открытые ордера ------------------------------------------------------
+
+    async def open_orders(self, name: str) -> list[dict]:
+        ex = self._ex(name)
+        try:
+            return await ex.fetch_open_orders()
+        except Exception as e:
+            raise TradeError(human_error(e)) from e
+
+    async def cancel(self, name: str, order_id: str, symbol: str) -> None:
+        ex = self._ex(name)
+        try:
+            await ex.cancel_order(order_id, symbol)
+        except Exception as e:
+            raise TradeError(human_error(e)) from e
+
+    async def panic(self) -> str:
+        """Стоп-кран: выключить автоторговлю и реальный режим, отменить все открытые ордера."""
+        self.state.auto = False
+        was_live = self.state.live
+        self.state.live = False
+        self.pending.clear()
+        lines = ["🛑 <b>Стоп</b>: автоторговля выключена, режим переключён на тестовый."]
+        for name in self.working:
+            title = html.escape(self.scanner.display_name(name))
+            try:
+                orders = await self.open_orders(name)
+            except TradeError as e:
+                lines.append(f"{title}: не смог получить ордера ({html.escape(str(e))})")
+                continue
+            cancelled, failed = 0, 0
+            for o in orders:
+                try:
+                    await self.cancel(name, o["id"], o["symbol"])
+                    cancelled += 1
+                except TradeError:
+                    failed += 1
+            if orders:
+                lines.append(f"{title}: отменено ордеров {cancelled}" + (f", не удалось {failed}" if failed else ""))
+        if was_live:
+            lines.append("Монеты на балансе не продавались. Посмотреть: /balance, продать: /sell")
+        return "\n".join(lines)
+
+    # --- треугольник --------------------------------------------------------
+
+    async def execute_triangle(self, opp: TriOpportunity, amount: float | None = None, source: str = "manual",
+                               min_net: float | None = None) -> TriExecution:
+        name = opp.exchange
+        start = opp.legs[0].from_ccy
+        need = self.settings.tri_min_profit_percent if min_net is None else min_net
+        async with self._lock:
+            ex = self._ex(name)
+            free = await self.free(name, start)
+            cap = self.settings.max_trade_usd if amount is None else min(amount, self.settings.max_trade_usd)
+            amount = min(cap, free * 0.998)
+            note = ""
+            if not self.state.live and amount < cap * 0.5:
+                note = f"на бирже {free:.2f} {start}, тест посчитан на ${cap:g}"
+                amount = cap
+            res = TriExecution(False, self.state.live, opp, amount)
+            if amount <= 0:
+                res.reason = f"на {self.scanner.display_name(name)} нет свободных {start}"
+                return res
+            try:
+                self._check_limits(amount, True, source)
+            except TradeError as e:
+                res.reason = str(e)
+                return res
+            markets = {leg.symbol: self.scanner.market(name, leg.symbol) for leg in opp.legs}
+            if not path_min_order_ok(opp.legs, amount, markets):
+                res.reason = f"${amount:.2f} меньше минимального ордера одной из пар"
+                return res
+            try:
+                books = await self.scanner.order_books(name, [leg.symbol for leg in opp.legs])
+            except Exception as e:
+                res.reason = f"не получил стаканы: {human_error(e)}"
+                return res
+            sim = simulate_path(books, opp.legs, amount)
+            if not sim.filled or sim.profit_percent < need:
+                res.reason = f"на свежих стаканах {sim.profit_percent:+.3f}% (нужно ≥{need:g}%), возможность ушла"
+                return res
+
+            if not self.state.live:
+                res.executed, res.final = True, sim.received_usd
+                res.steps = [f"ожидаемо по стакану: {sim.profit_percent:+.3f}%"]
+                res.reason = note
+                self._record(TradeRecord(time.time(), name, "triangle", opp.path_text, False, amount, start,
+                                         sim.received_usd, start, amount, pnl_usd=res.pnl, source=source,
+                                         note="тест: ордера не отправлялись"))
+                return res
+
+            holding_ccy, holding = start, amount
+            try:
+                for i, leg in enumerate(opp.legs):
+                    if leg.side == "buy":
+                        order = await ex.create_market_buy_order_with_cost(leg.symbol, self._cost(ex, leg.symbol, holding))
+                    else:
+                        order = await ex.create_market_sell_order(leg.symbol, self._amount(ex, leg.symbol, holding))
+                    spent, got = await self._settle(ex, name, order, leg.symbol, leg.side, leg.fee)
+                    if i < len(opp.legs) - 1:
+                        # не продаём больше, чем реально лежит (другие монеты пользователя не трогаем)
+                        got = min(got, await self.free(name, leg.to_ccy))
+                    res.steps.append(f"{i + 1}) {fmt_amount(spent)} {leg.from_ccy} → {fmt_amount(got)} {leg.to_ccy}")
+                    holding_ccy, holding = leg.to_ccy, got
+            except Exception as e:
+                res.reason = f"шаг {len(res.steps) + 1} не прошёл: {human_error(e)}"
+                if holding_ccy != start:
+                    holding = await self._unwind(ex, name, holding_ccy, holding, start, res)
+                    if res.stuck is None:
+                        holding_ccy = start
+            res.executed = True
+            if holding_ccy == start:
+                res.final = holding
+            else:  # монета застряла: оцениваем по текущей цене, чтобы дневной убыток считался честно
+                price = (await self.usd_prices(name, [holding_ccy])).get(holding_ccy, 0.0)
+                res.final = holding * price
+                res.reason += f" (остаток оценён ≈${res.final:.4f})"
+            self._record(TradeRecord(time.time(), name, "triangle", opp.path_text, True, amount, start, res.final, start,
+                                     amount, pnl_usd=res.pnl, source=source, ok=not res.reason, note=res.reason))
+            return res
+
+    async def _unwind(self, ex, name: str, ccy: str, amount: float, start: str, res: TriExecution) -> float:
+        """После сбоя продаём застрявшую монету обратно в USDT, чтобы не держать риск."""
+        symbol = f"{ccy}/{start}"
+        try:
+            if not self.scanner.market(name, symbol):
+                raise TradeError(f"нет пары {symbol}")
+            amount = min(amount, await self.free(name, ccy))
+            order = await ex.create_market_sell_order(symbol, self._amount(ex, symbol, amount))
+            _, got = await self._settle(ex, name, order, symbol, "sell", float(self.scanner.market(name, symbol).get("taker") or 0.001))
+            res.steps.append(f"возврат: {fmt_amount(amount)} {ccy} → {fmt_amount(got)} {start}")
+            return got
+        except Exception as e:
+            res.stuck = f"{fmt_amount(amount)} {ccy} ({human_error(e)})"
+            return amount
+
+    # --- автоторговля -------------------------------------------------------
+
+    async def auto_step(self, result) -> list[TriExecution]:
+        """Вызывается после каждого скана. Исполняет не больше одного лучшего цикла."""
+        if not self.state.auto:
+            return []
+        now = time.time()
+        self.recent_tri = {k: t for k, t in self.recent_tri.items() if now - t < TRI_REPEAT_SEC}
+        ok = set(self.working)
+        for opp in result.triangles:
+            key = "|".join(opp.key)
+            if opp.exchange not in ok or key in self.recent_tri:
+                continue
+            if not opp.depth or not opp.depth.filled or opp.depth.profit_percent < self.settings.auto_min_profit_percent:
+                continue
+            self.recent_tri[key] = now
+            res = await self.execute_triangle(opp, source="auto", min_net=self.settings.auto_min_profit_percent)
+            return [res]
+        return []
+
+    # --- тексты -------------------------------------------------------------
+
+    def panel_text(self) -> str:
+        s, st = self.settings, self.state
+        self._roll_day()
+        mode = "🔴 <b>РЕАЛЬНЫЙ</b> (ордера уходят на биржу)" if st.live else "🧪 <b>ТЕСТ</b> (всё считается, ордера не отправляются)"
+        lines = ["💼 <b>Торговля</b>", f"Режим: {mode}"]
+        if not self.creds:
+            lines.append("\nКлючи бирж не подключены. Инструкция: /keys")
+        else:
+            for n in self.creds:
+                status = self.key_status.get(n)
+                icon = "✅" if status == "ok" else ("❔ не проверен" if status is None else f"❌ {status}")
+                lines.append(f"  {html.escape(self.scanner.display_name(n))}: {html.escape(icon)}")
+        lines.append(
+            f"Автоторговля треугольниками: {'🟢 включена' if st.auto else '⏸ выключена'} "
+            f"(циклы от {s.auto_min_profit_percent:g}% по стакану)"
+        )
+        if st.paused_reason and not st.auto:
+            lines.append(f"⚠️ Остановлена: {html.escape(st.paused_reason)}")
+        lines.append(
+            f"Сегодня: сделок {st.day_trades} из {s.daily_trades:g}, результат циклов {st.day_pnl_usd:+.4f}$ "
+            f"(лимит убытка ${s.daily_loss_usd:g})"
+        )
+        lines.append(f"Лимит на сделку: ${s.max_trade_usd:g} · допустимое ухудшение цены {s.max_slippage_percent:g}%")
+        lines.append(
+            "\n<code>/buy bybit BTC 5</code> — купить BTC на 5 USDT\n"
+            "<code>/sell bybit BTC all</code> — продать (число, all или 50%)\n"
+            "<code>/limit bybit buy BTC 5 60000</code> — лимитный ордер\n"
+            "Или просто напиши ИИ: «купи эфира на 5 долларов на байбите»"
+        )
+        return "\n".join(lines)
+
+    def log_text(self, limit: int = 15) -> str:
+        if not self.state.log:
+            return "Сделок через бота пока не было."
+        lines = ["<b>Сделки через бота</b>"]
+        for r in reversed(self.state.log[-limit:]):
+            when = time.strftime("%d.%m %H:%M", time.gmtime(r["at"] + self.settings.report_utc_offset * 3600))
+            mode = "" if r["live"] else "🧪"
+            src = {"ai": "🤖", "auto": "⚙️"}.get(r.get("source"), "")
+            icon = "✅" if r.get("ok", True) else "⚠️"
+            body = (
+                f"{fmt_amount(r['spent'])} {r['spent_ccy']} → {fmt_amount(r['got'])} {r['got_ccy']}"
+                if r["kind"] != "limit" else html.escape(r.get("note") or "")
+            )
+            pnl = f" = {r['pnl_usd']:+.4f}$" if r.get("pnl_usd") is not None else ""
+            lines.append(
+                f"{when} {icon}{mode}{src} {html.escape(self.scanner.display_name(r['exchange']))} "
+                f"{html.escape(r['what'])}: {html.escape(body)}{pnl}"
+            )
+        lines.append("\n🧪 тест · 🤖 по предложению ИИ · ⚙️ автоторговля")
+        return "\n".join(lines)
+
+    def record_text(self, rec: TradeRecord) -> str:
+        name = html.escape(self.scanner.display_name(rec.exchange))
+        if not rec.live:
+            head = "🧪 <b>Тест выполнен</b> (ордер не отправлялся)"
+        elif rec.kind == "limit":
+            head = "📌 <b>Лимитный ордер выставлен</b>"
+        else:
+            head = "✅ <b>Ордер исполнен</b>"
+        lines = [f"{head}: {html.escape(rec.what)} на {name}"]
+        if rec.kind == "limit" and rec.live:
+            lines.append(html.escape(rec.note))
+            lines.append("Открытые ордера и отмена: /orders")
+        else:
+            lines.append(f"Отдал {fmt_amount(rec.spent)} {html.escape(rec.spent_ccy)} → получил {fmt_amount(rec.got)} {html.escape(rec.got_ccy)}")
+        if rec.order_id:
+            lines.append(f"ID ордера: <code>{html.escape(rec.order_id)}</code>")
+        return "\n".join(lines)

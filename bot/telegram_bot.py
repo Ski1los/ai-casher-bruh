@@ -19,14 +19,16 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from . import trading_ui
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .analytics import analysis_text, analyze, fees_text
 from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start_health_server
-from .config import BOUNDS, EDITABLE, Settings
+from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
 from .report import ScanStats, seconds_until, split_message
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
+from .trading import Trader
 from .triangular import TriOpportunity
 
 log = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ log = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"  # изменения из /set, /fee и кнопок (переживают перезапуск)
+TRADING_FILE = DATA_DIR / "trading.json"  # режим торговли, автоторговля, журнал сделок (без ключей!)
 EXPLAIN_KEEP = 30  # для скольких последних сообщений с сигналами помнить данные для кнопки «Разбор»
 MAX_IN_MESSAGE = 10  # сколько связок показывать в одном сообщении
 MAX_TRI_IN_MESSAGE = 5  # сколько треугольников показывать
@@ -46,7 +49,7 @@ HELP_TEXT = """\
 • <b>межбиржевой арбитраж</b>: где купить дешевле на одной бирже и продать дороже на другой;
 • <b>треугольный арбитраж</b>: цикл из трёх обменов внутри одной биржи \
 (USDT → A → B → USDT), без переводов между биржами.
-Сам я реальными деньгами не торгую, только сигналы и демо-счета.
+Могу и торговать: кнопками, командами, через ИИ или автоматически (нужен API-ключ биржи, /keys).
 
 <b>Сигналы</b>
 /scan — просканировать прямо сейчас
@@ -61,10 +64,24 @@ HELP_TEXT = """\
 /demo_history — последние сделки
 /demo_stop — остановить демо
 
-<b>ИИ-помощник</b> 🧠
+<b>Торговля</b> 💼 (сначала в тестовом режиме: ордера не отправляются)
+/trade — панель: балансы, ордера, режим, автоторговля
+/keys — как подключить биржу (ключ без права вывода)
+/balance — балансы на биржах
+<code>/buy bybit BTC 5</code> — купить BTC на 5 USDT
+<code>/sell bybit BTC all</code> — продать (число, all или 50%)
+<code>/limit bybit buy BTC 5 60000</code> — лимитный ордер
+/orders — открытые ордера и отмена
+/live — включить реальные ордера, /test — вернуть тест
+/autotrade on|off — автоторговля треугольниками
+/trades — журнал сделок
+/stop — 🛑 стоп-кран: всё выключить и отменить ордера
+Под треугольниками есть кнопка «⚡ Исполнить». Каждый ордер исполняется только после твоего подтверждения.
+
+<b>ИИ-помощник и трейдер</b> 🧠
 /ai — полный разбор: комиссии, демо, что поменять
 /ai вопрос — спросить, например <code>/ai почему на $5 нет сделок?</code>
-Можно просто писать вопрос обычным сообщением.
+Можно просто писать вопрос обычным сообщением, а также просить: «купи эфира на 5$ на байбите».
 Под сигналами есть кнопка «🤖 Разбор». Советы по настройкам применяются только твоей кнопкой.
 
 <b>Анализ без ИИ</b>
@@ -77,8 +94,8 @@ HELP_TEXT = """\
 /settings — настройки, /set — изменить, например <code>/set tri_min 0.1</code>
 /myid — твой Telegram ID
 
-⚠️ Перед реальной сделкой проверь вручную, что ввод/вывод монеты открыт, \
-и помни: пока ты вручную делаешь три обмена, треугольник обычно уже исчез."""
+⚠️ Прибыль не гарантирована: треугольники живут доли секунды, их забирают профессиональные боты. \
+Торгуй только деньгами, которые не жалко потерять."""
 
 
 class SubscriberStore:
@@ -236,6 +253,7 @@ def format_settings(settings: Settings, scanner: Scanner) -> str:
         fees = ", ".join(f"{html.escape(scanner.display_name(k))} {v * 100:g}%" for k, v in settings.fee_overrides.items())
         lines.append(f"Свои комиссии: {fees}")
     lines.append("\nИзменить: <code>/set min_profit 1</code>")
+    lines.append("Лимиты торговли (max_trade, daily_loss, daily_trades, auto_min, slippage) меняешь только ты, ИИ их не трогает.")
     lines.append("<i>Изменения сохраняются и переживают перезапуск. Биржи и валюта меняются "
                  "в настройках Render (EXCHANGES, QUOTE).</i>")
     return "\n".join(lines)
@@ -328,6 +346,17 @@ class ArbitrageBot:
             except (ValueError, TypeError) as e:
                 log.warning("Не удалось прочитать %s: %s", self.settings_file, e)
 
+        # Торговля: ключи только из переменных окружения
+        self.trader = Trader(self.scanner, settings)
+        self.trading_file = TRADING_FILE
+        self.tri_refs: dict[str, TriOpportunity] = {}  # кнопки «⚡ Исполнить» под сигналами
+        self.order_refs: dict[str, tuple[str, str, str]] = {}  # кнопки отмены ордеров
+        if self.trading_file.exists():
+            try:
+                self.trader.restore(json.loads(self.trading_file.read_text("utf-8")))
+            except (ValueError, TypeError) as e:
+                log.warning("Не удалось прочитать %s: %s", self.trading_file, e)
+
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.dp = Dispatcher()
         self._register_handlers()
@@ -340,11 +369,19 @@ class ArbitrageBot:
 
     def _state(self) -> dict:
         return {
-            "version": 3,
+            "version": 4,
             "subscribers": sorted(self.subscribers.chats),
             "demo": self.demo.export(),
             "settings": self._settings_state(),
+            "trading": self.trader.export(),
         }
+
+    def save_trading(self) -> None:
+        try:
+            self.trading_file.parent.mkdir(parents=True, exist_ok=True)
+            self.trading_file.write_text(json.dumps(self.trader.export(), ensure_ascii=False), "utf-8")
+        except OSError as e:
+            log.warning("Не смог сохранить состояние торговли: %s", e)
 
     # --- сохранение настроек ------------------------------------------------
 
@@ -410,6 +447,9 @@ class ArbitrageBot:
         if state.get("settings") and not self.settings_file.exists():
             self._apply_saved_settings(state["settings"])
             self._save_settings()
+        if state.get("trading") and not self.trading_file.exists():
+            self.trader.restore(state["trading"])
+            self.save_trading()
         if DEMO_FILE.exists():
             log.info("Бэкап найден, но есть локальные данные. Использую локальные")
             return
@@ -486,23 +526,57 @@ class ArbitrageBot:
             "analysis": a.to_dict(),
             "period": period,
             "last_scan": last,
+            "trading": self._trading_context(),
         }
 
-    def _remember_explain(self, items: dict) -> InlineKeyboardMarkup | None:
+    def _trading_context(self) -> dict:
+        t, s = self.trader, self.settings
+        return {
+            "mode": "live" if t.state.live else "test",
+            "autotrade_on": t.state.auto,
+            "autotrade_paused_reason": t.state.paused_reason,
+            "exchanges_with_keys": t.working,
+            "key_errors": {k: v for k, v in t.key_status.items() if v != "ok"},
+            "max_trade_usd": s.max_trade_usd,
+            "daily_trades_limit": s.daily_trades,
+            "daily_loss_limit_usd": s.daily_loss_usd,
+            "autotrade_min_profit_pct": s.auto_min_profit_percent,
+            "today": {"trades": t.state.day_trades, "pnl_usd": round(t.state.day_pnl_usd, 4)},
+            "balances": t.balances_for_ai(),
+            "recent_trades": [
+                {k: r.get(k) for k in ("exchange", "kind", "what", "live", "spent", "spent_ccy", "got", "got_ccy", "pnl_usd", "source", "note")}
+                for r in t.state.log[-5:]
+            ],
+        }
+
+    async def _refresh_balances(self) -> None:
+        """Перед вопросом ИИ обновляем балансы (если давно не обновляли), чтобы он видел реальные цифры."""
+        stale = [n for n in self.trader.working if time.time() - self.trader.balance_cache.get(n, (0, []))[0] > 60]
+        if not stale:
+            return
+        try:
+            await asyncio.wait_for(asyncio.gather(*(self.trader.balances(n) for n in stale), return_exceptions=True), 8)
+        except asyncio.TimeoutError:
+            pass
+
+    def _remember_explain(self, items: dict) -> list[list[InlineKeyboardButton]]:
         if not self.ai.configured or not items.get("signals"):
-            return None
+            return []
         self._explain_seq += 1
         key = str(self._explain_seq)
         self._explain_items[key] = items
         while len(self._explain_items) > EXPLAIN_KEEP:
             self._explain_items.popitem(last=False)
-        return InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🤖 Разбор ИИ: стоит ли пробовать?", callback_data=f"ai_x:{key}")]]
-        )
+        return [[InlineKeyboardButton(text="🤖 Разбор ИИ: стоит ли пробовать?", callback_data=f"ai_x:{key}")]]
 
-    def _explain_markup(self, cross: list[Opportunity], tri: list[TriOpportunity]) -> InlineKeyboardMarkup | None:
+    def _signal_markup(self, cross: list[Opportunity], tri: list[TriOpportunity],
+                       trade_buttons: bool = True) -> InlineKeyboardMarkup | None:
+        """Кнопки под сигналами: разбор ИИ и «⚡ Исполнить» для треугольников на биржах с ключами."""
         signals = [opportunity_dict(o, self.scanner) for o in cross[:3]] + [triangle_dict(t) for t in tri[:3]]
-        return self._remember_explain({"signals": signals})
+        rows = self._remember_explain({"signals": signals})
+        if trade_buttons:
+            rows += trading_ui.tri_rows(self, tri)
+        return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
     async def _ai_respond(self, chat_id: int, make_answer, wait: Message | None = None) -> None:
         """Запускает запрос к ИИ и показывает ответ с кнопками-предложениями."""
@@ -515,6 +589,7 @@ class ArbitrageBot:
             await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
         except Exception:
             pass
+        await self._refresh_balances()
         try:
             answer: Answer = await make_answer()
         except AIError as e:
@@ -528,6 +603,14 @@ class ArbitrageBot:
         if answer.proposals:
             text += "\n\n" + proposals_text(answer.proposals, self.settings)
         kb = proposals_keyboard(answer.proposals)
+        if answer.orders:
+            if self.owner_id is not None and chat_id == self.owner_id:
+                orders_text, rows = await trading_ui.plans_from_intents(self, answer.orders)
+                text += "\n\n" + orders_text
+                if rows:
+                    kb = InlineKeyboardMarkup(inline_keyboard=rows + (kb.inline_keyboard if kb else []))
+            else:
+                text += "\n\n⛔ Ордера через ИИ может подтверждать только владелец бота."
         parts = split_message(text)
         try:
             await wait.edit_text(parts[0], reply_markup=kb if len(parts) == 1 else None)
@@ -554,6 +637,14 @@ class ArbitrageBot:
             parts.append(self.demo.summary_text())
         else:
             parts.append("Демо-счета не запущены: /demo_start")
+        if self.trader.creds:
+            st = self.trader.state
+            self.trader._roll_day()
+            parts.append(
+                f"💼 Торговля: режим {'🔴 реальный' if st.live else '🧪 тест'}, автоторговля "
+                f"{'🟢 вкл' if st.auto else '⏸ выкл'}, сегодня сделок {st.day_trades}, "
+                f"результат циклов {st.day_pnl_usd:+.4f}$. Подробно: /trades"
+            )
         parts.append("Комиссии, узкие места и рекомендации: /analysis" + (" · мнение ИИ: /ai" if self.ai.configured else ""))
         return "\n\n".join(parts)
 
@@ -633,7 +724,8 @@ class ArbitrageBot:
                 await wait.edit_text(f"Ошибка сканирования: {html.escape(str(e))[:300]}")
                 return
             parts = split_message(format_scan(result, self.scanner, self.settings))
-            kb = self._explain_markup(result.opportunities, result.triangles)
+            is_owner = message.from_user is not None and message.from_user.id == self.owner_id
+            kb = self._signal_markup(result.opportunities, result.triangles, trade_buttons=is_owner)
             await wait.edit_text(parts[0], reply_markup=kb if len(parts) == 1 else None)
             for i, part in enumerate(parts[1:], 2):
                 await message.answer(part, reply_markup=kb if i == len(parts) else None)
@@ -762,6 +854,9 @@ class ArbitrageBot:
                 await message.answer("Значение должно быть числом, например <code>0.5</code>")
                 return
             attr, desc = EDITABLE[args[0]]
+            if args[0] in RISK_KEYS and (message.from_user is None or message.from_user.id != self.owner_id):
+                await message.answer("⛔ Лимиты торговли меняет только владелец бота.")
+                return
             err = self.apply_setting(args[0], value)
             if err:
                 await message.answer(f"Нельзя: {desc}, {err}.")
@@ -863,6 +958,9 @@ class ArbitrageBot:
             except ValueError:
                 await cb.answer("Неверная кнопка", show_alert=True)
                 return
+            if key in RISK_KEYS:  # лимиты риска меняются только командой /set, не кнопкой от ИИ
+                await cb.answer("Лимиты риска меняй сам командой /set", show_alert=True)
+                return
             old = float(getattr(self.settings, EDITABLE[key][0])) if key in EDITABLE else None
             err = self.apply_setting(key, value)
             if err:
@@ -907,6 +1005,9 @@ class ArbitrageBot:
             await cb.answer("Анализирую…")
             chat_id = cb.message.chat.id if cb.message else cb.from_user.id
             await self._ai_respond(chat_id, lambda: self.ai.explain(items, self.ai_context()))
+
+        # --- торговля (до обработчика обычного текста) ---------------------------
+        trading_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -966,6 +1067,24 @@ class ArbitrageBot:
             else:
                 await self._send(chat_id, text)
 
+    async def _run_autotrade(self, result: ScanResult) -> None:
+        if not self.trader.state.auto or self.owner_id is None:
+            return
+        try:
+            executions = await self.trader.auto_step(result)
+        except Exception:
+            log.exception("Ошибка автоторговли")
+            return
+        for res in executions:
+            if res.executed or res.live:  # пропуски в тесте не шлём, чтобы не спамить
+                await self._send(self.owner_id, "⚙️ " + res.text(self.scanner.display_name))
+        if executions:
+            if not self.trader.state.auto and self.trader.state.paused_reason:
+                await self._send(self.owner_id, f"⏸ <b>Автоторговля остановлена</b>: {html.escape(self.trader.state.paused_reason)}.\n"
+                                                "Включить снова: /autotrade on")
+            self.save_trading()
+            await self._backup_now()
+
     async def _send_alerts(self, result: ScanResult) -> None:
         fresh_cross = [o for o in result.opportunities if self._should_alert(o)][:MAX_IN_MESSAGE]
         fresh_tri = [o for o in result.triangles if self._should_alert(o)][:MAX_TRI_IN_MESSAGE]
@@ -977,16 +1096,17 @@ class ArbitrageBot:
         for o in [*fresh_cross, *fresh_tri]:
             self.sent_alerts[o.key] = (time.time(), o.net_percent)
         text = "\n\n".join(blocks)
-        kb = self._explain_markup(fresh_cross, fresh_tri)
         for chat_id in list(self.subscribers.chats):
+            kb = self._signal_markup(fresh_cross, fresh_tri, trade_buttons=chat_id == self.owner_id)
             await self._send(chat_id, text, kb)
 
     async def _auto_loop(self) -> None:
         await asyncio.sleep(3)
         while True:
-            if self.subscribers.chats or self.demo.active:
+            if self.subscribers.chats or self.demo.active or self.trader.state.auto:
                 try:
                     result = await self._scan()
+                    await self._run_autotrade(result)  # первым: каждая секунда задержки съедает прибыль
                     await self._run_demo(result)
                     await self._send_alerts(result)
                 except Exception:
@@ -994,6 +1114,17 @@ class ArbitrageBot:
             await asyncio.sleep(self.settings.scan_interval_sec)
 
     # --- запуск -------------------------------------------------------------
+
+    async def _check_keys_on_start(self) -> None:
+        status = await self.trader.check_keys()
+        bad = {k: v for k, v in status.items() if v != "ok"}
+        log.info("Ключи бирж: %s", {k: ("ok" if v == "ok" else "ошибка") for k, v in status.items()})
+        if bad and self.owner_id:
+            lines = ["⚠️ <b>Проблема с ключами бирж</b>"]
+            lines += [f"{html.escape(self.scanner.display_name(k))}: {html.escape(v)}" for k, v in bad.items()]
+            if self.trader.state.auto:
+                lines.append("Автоторговля на этих биржах не работает, пока ключ не исправлен.")
+            await self._send(self.owner_id, "\n".join(lines))
 
     async def run(self) -> None:
         tasks: list[asyncio.Task] = []
@@ -1015,6 +1146,10 @@ class ArbitrageBot:
                     BotCommand(command="demo", description="Демо: сводка по счетам"),
                     BotCommand(command="demo_history", description="Демо: последние сделки"),
                     BotCommand(command="demo_stop", description="Остановить демо"),
+                    BotCommand(command="trade", description="💼 Торговля: панель"),
+                    BotCommand(command="balance", description="Балансы на биржах"),
+                    BotCommand(command="orders", description="Открытые ордера"),
+                    BotCommand(command="stop", description="🛑 Остановить торговлю"),
                     BotCommand(command="ai", description="🧠 ИИ: разбор и вопросы"),
                     BotCommand(command="analysis", description="Анализ: комиссии и узкие места"),
                     BotCommand(command="fees", description="Комиссии бирж"),
@@ -1029,6 +1164,8 @@ class ArbitrageBot:
                 log.warning("ALLOWED_USER_IDS пустой: ботом может пользоваться кто угодно")
 
             await self._restore_backup()
+            if self.trader.creds:
+                tasks.append(asyncio.create_task(self._check_keys_on_start()))
             tasks.append(asyncio.create_task(self._auto_loop()))
             tasks.append(asyncio.create_task(self._daily_report_loop()))
             await self.dp.start_polling(self.bot)

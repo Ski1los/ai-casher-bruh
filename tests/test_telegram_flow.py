@@ -99,6 +99,7 @@ def bot_env(tmp_path, monkeypatch):
     monkeypatch.setattr(tb, "DEMO_FILE", tmp_path / "demo.json")
     monkeypatch.setattr(tb, "SUBSCRIBERS_FILE", tmp_path / "subs.json")
     monkeypatch.setattr(tb, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(tb, "TRADING_FILE", tmp_path / "trading.json")
     for var in ("AI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 

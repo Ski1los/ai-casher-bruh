@@ -25,3 +25,15 @@ services:
       # можно оставить пустым и добавить позже в Environment. В репозиторий ключ НЕ пишем.
       - key: AI_API_KEY
         sync: false
+      # Торговля (необязательно): ключ биржи ТОЛЬКО со спотовой торговлей, БЕЗ права вывода.
+      # Можно оставить пустым и добавить позже в Environment. Другие биржи: OKX_API_KEY,
+      # OKX_API_SECRET, OKX_API_PASSWORD и т.д. (см. /keys в боте). В репозиторий ключи НЕ пишем.
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      # Лимиты торговли (можно менять в боте: /set max_trade 20)
+      - key: MAX_TRADE_USD
+        value: "10"
+      - key: DAILY_LOSS_USD
+        value: "2"

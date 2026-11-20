@@ -40,6 +40,12 @@ class Settings:
     report_utc_offset: float = 3.0
     # Свои комиссии бирж (доля: 0.001 = 0.1%), если у тебя скидка/VIP. Остальные берутся из ccxt.
     fee_overrides: dict[str, float] = field(default_factory=dict)
+    # --- Реальная торговля (нужны API-ключи бирж) ---
+    max_trade_usd: float = 10.0  # максимум на одну покупку / один цикл
+    daily_loss_usd: float = 2.0  # если автоторговля за сутки потеряла столько, она встаёт на паузу
+    daily_trades: float = 30  # максимум сделок бота за сутки
+    auto_min_profit_percent: float = 0.3  # автоторговля берёт только циклы с такой прибылью по стакану
+    max_slippage_percent: float = 1.0  # если цена ушла хуже предпросмотра больше чем на столько, ордер отменяется
 
 
 # Что можно менять командой /set: имя -> (поле, описание)
@@ -54,7 +60,15 @@ EDITABLE = {
     "tri_max": ("tri_max_profit_percent", "треугольник: макс. прибыль (фильтр ошибок), %"),
     "transfer": ("demo_transfer_min", "демо: время перевода между биржами, мин"),
     "wd_fee": ("demo_withdraw_fee_usd", "демо: комиссия вывода, если биржа её не сообщает, $"),
+    "max_trade": ("max_trade_usd", "торговля: максимум на одну покупку/цикл, $"),
+    "daily_loss": ("daily_loss_usd", "торговля: лимит убытка автоторговли за сутки, $"),
+    "daily_trades": ("daily_trades", "торговля: максимум сделок бота за сутки"),
+    "auto_min": ("auto_min_profit_percent", "автоторговля: мин. прибыль цикла по стакану, %"),
+    "slippage": ("max_slippage_percent", "торговля: допустимое ухудшение цены, %"),
 }
+
+# Эти лимиты риска ИИ предлагать не может: их меняет только человек командой /set
+RISK_KEYS = {"max_trade", "daily_loss", "daily_trades", "auto_min", "slippage"}
 
 # Допустимые значения (для /set, предложений ИИ и кнопок): имя -> (мин, макс)
 BOUNDS = {
@@ -68,6 +82,11 @@ BOUNDS = {
     "tri_max": (0.1, 50.0),
     "transfer": (0.0, 240.0),
     "wd_fee": (0.0, 100.0),
+    "max_trade": (1.0, 100_000.0),
+    "daily_loss": (0.1, 100_000.0),
+    "daily_trades": (1.0, 1000.0),
+    "auto_min": (0.05, 10.0),
+    "slippage": (0.1, 10.0),
 }
 
 
@@ -106,6 +125,11 @@ def load_settings() -> Settings:
         report_hour=int(_float("REPORT_HOUR", 9)),
         report_utc_offset=_float("REPORT_UTC_OFFSET", 3),
         fee_overrides=parse_fee_overrides(os.getenv("FEE_OVERRIDES", "")),
+        max_trade_usd=_float("MAX_TRADE_USD", 10),
+        daily_loss_usd=_float("DAILY_LOSS_USD", 2),
+        daily_trades=_float("DAILY_TRADES", 30),
+        auto_min_profit_percent=_float("AUTO_MIN_PROFIT_PERCENT", 0.3),
+        max_slippage_percent=_float("MAX_SLIPPAGE_PERCENT", 1),
     )
 
 
