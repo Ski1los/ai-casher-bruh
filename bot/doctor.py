@@ -18,7 +18,7 @@ import ccxt.async_support as ccxt
 
 from .cloud import version_text
 from .memory import RENDER_RAM_MB, memory_line, rss_mb
-from .trading import STABLES, days_left, human_error, is_geo_block
+from .trading import days_left, human_error, is_geo_block
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -66,26 +66,15 @@ async def _check_exchange(b: ArbitrageBot, name: str) -> Check:
 
 
 async def _funding_hint(b: ArbitrageBot, name: str) -> Check | None:
-    """Многие биржи держат «кошелёк финансирования» отдельно: деньги там бот не видит и не торгует ими."""
-    ex = b.scanner.exchanges[name]
-    accounts = (getattr(ex, "options", None) or {}).get("accountsByType") or {}
-    if "funding" not in accounts or str(accounts["funding"]).lower() == str(accounts.get("spot", "spot")).lower():
-        return None  # у биржи нет отдельного счёта финансирования
+    """Деньги на других счетах биржи (Funding/Фонд, фьючерсы, боты): бот их не видит и не торгует ими."""
     try:
-        bal = await asyncio.wait_for(ex.fetch_balance({"type": "funding"}), EXCHANGE_TIMEOUT)
+        accounts = await asyncio.wait_for(b.trader.other_accounts(name), EXCHANGE_TIMEOUT)
     except Exception:
         return None
-    total = bal.get("total") or {}
-    stable = sum(float(total.get(c) or 0) for c in STABLES)
-    others = [c for c, v in total.items() if v and float(v) > 0 and c not in STABLES]
-    if stable < 0.5 and not others:
+    hint = b.trader.where_money_text(name, accounts)
+    if not hint:
         return None
-    what = f"${stable:.2f} в стейблкоинах" + (f" и {', '.join(others[:5])}" if others else "")
-    where = {"bybit": "Bybit → Активы → Перевод → со счёта Funding на Unified Trading",
-             "bingx": "BingX → Активы → Перевод → со счёта Fund на Spot"}.get(
-        name, "в приложении биржи: Активы → Перевод → с Funding на спотовый (торговый) счёт")
-    return Check("Ключи", f"{b.scanner.display_name(name)}: счёт Funding", "warn",
-                 f"там лежит {what}. Бот видит и торгует только торговым счётом. Переведи: {where}")
+    return Check("Ключи", f"{b.scanner.display_name(name)}: деньги на другом счёте", "warn", hint)
 
 
 def _key_info_checks(b: ArbitrageBot, name: str, info: dict, now: float) -> list[Check]:

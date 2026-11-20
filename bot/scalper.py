@@ -216,6 +216,7 @@ class Scalper:
         self.ranked_at: dict[str, float] = {}
         self.reasons: dict[str, str] = {}  # биржа -> что режим делал на последнем шаге и почему
         self._cur: str | None = None  # биржа, с которой сейчас работает шаг
+        self._paper_virtual: set[str] = set()  # биржи, где тест идёт на виртуальных $5 (реальных было меньше)
         self.last_step = 0.0
 
     @property
@@ -433,12 +434,19 @@ class Scalper:
         paper = self.st["paper"]
         if self.trader.state.live:
             return await self.trader.free(name, self.trader.settings.quote)
-        if paper.get(name) is None:  # тест: начинаем с реального свободного баланса (или $5, если пусто)
+        # тест: начинаем с реального свободного баланса (или виртуальных $5, если пусто). Пока тестовых
+        # сделок не было, сверяемся с биржей снова: деньги могли прийти позже или баланс не прочитался
+        if paper.get(name) is None or (name in self._paper_virtual and not self.positions.get(name)):
             try:
                 real = await self.trader.free(name, self.trader.settings.quote)
             except Exception:
-                real = 0.0
-            paper[name] = round(real if real >= 5 else 5.0, 4)
+                return float(paper.get(name) or 5.0)  # не прочитали — не запоминаем виртуальные $5 навсегда
+            if real >= 5:
+                paper[name] = round(real, 4)
+                self._paper_virtual.discard(name)
+            elif paper.get(name) is None:
+                paper[name] = 5.0
+                self._paper_virtual.add(name)
         return float(paper[name])
 
     async def _look_for_entry(self, name: str, now: float) -> list[str]:
@@ -699,8 +707,12 @@ class Scalper:
         names = self.exchanges() + [n for n in self.positions if n not in self.exchanges()]
         for n in names:
             lines.append(f"\n<b>{html.escape(self._name(n))}</b>")
+            real = self._real_line(n)
+            if real:
+                lines.append(f"  на бирже: {real}")
             if not live and st["paper"].get(n) is not None:
-                lines.append(f"  тестовый баланс: ${float(st['paper'][n]):.2f}")
+                lines.append(f"  тестовый баланс: ${float(st['paper'][n]):.2f}"
+                             + (" (виртуальные: на бирже меньше $5)" if n in self._paper_virtual else ""))
             if self.positions.get(n):
                 lines.append("  позиция: " + self._pos_line(self.positions[n]))
             if self.reasons.get(n):
@@ -719,6 +731,17 @@ class Scalper:
                      "пока цена не вернётся. Ставь только то, что не жалко.")
         return "\n".join(lines)
 
+    def _real_line(self, name: str) -> str:
+        """Реальный баланс торгового счёта из последнего чтения (без запроса к бирже)."""
+        at_rows = self.trader.balance_cache.get(name)
+        if not at_rows:
+            return ""
+        rows = at_rows[1]
+        quote = self.trader.settings.quote
+        free = next((f for c, f, _, _ in rows if c == quote), 0.0)
+        total = sum(u or 0 for _, _, _, u in rows)
+        return f"свободно {free:.2f} {quote}, всего ≈ ${total:.2f}"
+
     def status_dict(self) -> dict:
         st = self.st
         keys = ("exchange", "symbol", "amount", "cost", "entry", "tp", "opened_at", "breakeven")
@@ -726,6 +749,7 @@ class Scalper:
         paper = {n: v for n, v in st["paper"].items() if v is not None}
         return {"on": st["on"], "live": self.trader.state.live, "reason": self.last_reason,
                 "reasons": {n: r for n, r in self.reasons.items() if r},
+                "real": {n: self._real_line(n) for n in self.exchanges() if self._real_line(n)},
                 "paper": paper, "paper_usd": round(sum(paper.values()), 4) if paper else None,
                 "stats": dict(st["stats"]), "positions": positions, "pos": positions[0] if positions else None,
                 "top": [{k: r[k] for k in ("symbol", "trades", "wins", "net_pct", "worst_pct", "tp")}

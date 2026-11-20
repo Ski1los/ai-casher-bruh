@@ -147,9 +147,9 @@ async def scalp_preflight(b: ArbitrageBot) -> list[str]:
             out.append(f"{title}: не смог прочитать баланс ({human_error(e)})")
             continue
         if free < 5:
-            funding = await t.funding_usd(name)
-            if funding and funding >= 1:
-                out.append(t._funding_text({name: funding}))
+            elsewhere = await t.other_accounts(name)
+            if sum(elsewhere.values()) >= 1:
+                out.append(t.where_money_text(name, elsewhere, free))
             else:
                 out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}, а биржа принимает ордер от $5. "
                            "Пополни хотя бы до $5,5 (с запасом на округление), пока эта биржа будет ждать"
@@ -290,6 +290,16 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
             pass
         return None
 
+    async def _locked_quote(ex_name: str, quote: str) -> float:
+        """Сколько USDT заморожено в открытых ордерах (не режима $5)."""
+        try:
+            for c, f, total, _ in await t.balances(ex_name):
+                if c == quote:
+                    return max(total - f, 0.0)
+        except Exception:
+            pass
+        return 0.0
+
     # 2. деньги: режим $5 торгует на каждой бирже с ключом своими деньгами
     ready, low, tips = 0, [], []
     for ex_name in sc.exchanges():
@@ -309,12 +319,17 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
             ready += 1
             lines.append(f"2️⃣ ✅ На торговом счёте {title}: <b>{free:.2f} {quote}</b> — режиму $5 хватает")
             continue
-        funding = await t.funding_usd(ex_name)
-        if funding and funding >= 1:
-            lines.append(f"2️⃣ ❌ {title}: на торговом счёте {free:.2f} {quote}, а на <b>Funding ${funding:.2f}</b>. "
-                         "Бот видит только торговый счёт")
-            todo.append(f"перевести деньги: приложение {title} → Активы → Перевод → Funding → "
-                        + ("Unified Trading" if ex_name == "bybit" else "Spot"))
+        elsewhere = await t.other_accounts(ex_name)
+        hint = t.where_money_text(ex_name, elsewhere) if sum(elsewhere.values()) >= 1 else ""
+        locked_q = await _locked_quote(ex_name, quote)
+        if hint:
+            where = ", ".join(f"«{html.escape(k)}» ${v:.2f}" for k, v in elsewhere.items() if v >= 0.5)
+            lines.append(f"2️⃣ ❌ {title}: на торговом (спот) счёте {free:.2f} {quote}, а деньги лежат тут: <b>{where}</b>. "
+                         "Бот торгует только со спот-счёта")
+            todo.append(html.escape(hint))
+        elif locked_q >= 5:
+            lines.append(f"2️⃣ ❌ {title}: {locked_q:.2f} {quote} заняты открытым ордером, свободно {free:.2f}")
+            todo.append(f"на {title} отменить старый ордер: /orders → ❌ (деньги вернутся на счёт)")
         else:
             coin = await _stuck_coin(ex_name, quote)
             if coin:
@@ -690,6 +705,7 @@ def register(b: ArbitrageBot) -> None:
         elif arg in ("test", "bt", "история", "проверка"):
             await scalp_backtest(message.chat.id)
         else:
+            await b._refresh_balances()
             await b._answer(message, b.scalper.status_text(), scalp_keyboard(b))
 
     @dp.callback_query(F.data.startswith("sc:"))
@@ -716,6 +732,7 @@ def register(b: ArbitrageBot) -> None:
             await after_change()
             await b._send(chat_id, text)
         else:
+            await b._refresh_balances()
             await b._send(chat_id, b.scalper.status_text(), scalp_keyboard(b))
 
     @dp.message(Command("why", "autostatus"))

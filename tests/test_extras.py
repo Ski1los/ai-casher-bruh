@@ -385,7 +385,7 @@ def test_doctor_reports_everything(ex_env):
     b, session = ex_env
     asyncio.run(send(b, "/doctor"))
     text = session.sent[-1][1]
-    for part in ("Проверка всего", "Биржи", "ExA", "ключ работает", "счёт Funding", "7.00", "Phantom", "Итог"):
+    for part in ("Проверка всего", "Биржи", "ExA", "ключ работает", "деньги на другом счёте", "«Funding» ≈ $7.00", "Phantom", "Итог"):
         assert part in text, part
     assert len(text) < 4096
 

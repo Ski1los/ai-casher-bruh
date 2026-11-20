@@ -226,3 +226,19 @@ def test_old_single_position_state_is_migrated():
     trader.state.scalp = {"on": True, "pos": {"exchange": "a", "symbol": "SOL/USDT"}, "paper_usd": 4.0}
     assert sc.positions == {"a": {"exchange": "a", "symbol": "SOL/USDT"}}
     assert "pos" not in trader.state.scalp and "paper_usd" not in trader.state.scalp
+
+
+def test_paper_balance_follows_real_money_until_first_trade():
+    sc, trader, ex = make(balance=1.0)
+    trader.state.live = False
+
+    async def boom(name, ccy):
+        raise RuntimeError("timeout")
+
+    real_free = trader.free
+    trader.free = boom
+    assert run(sc._free_usd("a")) == 5.0 and sc.st["paper"].get("a") is None  # ошибку не запоминаем
+    trader.free = real_free
+    assert run(sc._free_usd("a")) == 5.0 and "a" in sc._paper_virtual
+    ex.balance["USDT"] = 5.54  # деньги пришли позже
+    assert run(sc._free_usd("a")) == 5.54 and "a" not in sc._paper_virtual

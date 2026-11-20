@@ -59,7 +59,7 @@ def test_setup_points_to_funding(bot_env):
     attach(b, balance=0.0, funding=5.0)
     asyncio.run(send(b, "/setup"))
     text = session.sent[-1][1]
-    assert "на <b>Funding $5.00</b>" in text and "Перевод" in text
+    assert "«Funding» $5.00" in text and "Перевести" in text
 
 
 def test_hello_after_fresh_install(bot_env):
@@ -106,3 +106,56 @@ def test_setup_finds_money_stuck_in_a_coin(bot_env):
     asyncio.run(send(b, "/setup"))
     text = session.sent[-1][1]
     assert "лежит в SOL" in text and "/sell a SOL all" in text
+
+
+class BingXAccounts(FakeTradingExchange):
+    """Как настоящий BingX с 2025 года: спот-API видит только счёт «Спот», остальное — в обзоре счетов."""
+
+    def __init__(self, *a, overview=None, **kw):
+        super().__init__(*a, **kw)
+        self.overview = overview or []
+
+    async def accountV1PrivateGetAllAccountBalance(self, params=None):
+        return {"code": 0, "data": self.overview}
+
+
+def attach_bingx(b, spot_usdt, overview, fund=None):
+    ex = BingXAccounts("BingX", {"SOL/USDT": mk_market("SOL", "USDT", min_cost=5.0)},
+                       {"SOL/USDT": {"bid": 98.40, "ask": 98.42, "quoteVolume": 1e8}}, {"USDT": spot_usdt},
+                       overview=overview)
+    ex.ohlcv = {"SOL/USDT": dip_candles(end_in_dip=False)}
+    if fund is not None:
+        ex.options = {"accountsByType": {"funding": "fund", "spot": "spot"}}
+        ex.funding = {"USDT": fund}
+    b.scanner.exchanges = {"bingx": ex}
+    b.trader = Trader(b.scanner, b.settings, env={"BINGX_API_KEY": "k", "BINGX_API_SECRET": "s"})
+    b.scalper = Scalper(b.trader, b.duplicate_running)
+    return ex
+
+
+def test_bingx_money_on_fund_account_is_found(bot_env):
+    b, session = bot_env
+    attach_bingx(b, 0.0, [{"accountType": "sopt", "usdtBalance": "5.00"}], fund=5.0)
+    asyncio.run(send(b, "/setup"))
+    text = session.sent[-1][1]
+    assert "«Фонд (Fund)» $5.00" in text and "с «Фонд (Fund)» на «Спот»" in text
+    asyncio.run(send(b, "/balance"))
+    assert "Фонд (Fund)" in session.sent[-1][1] and "свободно для сделок: 0.00 USDT" in session.sent[-1][1]
+
+
+def test_bingx_money_on_futures_is_found(bot_env):
+    b, session = bot_env
+    attach_bingx(b, 0.0, [{"accountType": "USDTMPerp", "usdtBalance": "5.20"}])
+    asyncio.run(send(b, "/setup"))
+    text = session.sent[-1][1]
+    assert "Бессрочные фьючерсы USDT-M" in text and "на «Спот»" in text
+
+
+def test_bingx_spot_money_is_shown(bot_env):
+    b, session = bot_env
+    attach_bingx(b, 5.0, [{"accountType": "sopt", "usdtBalance": "5.00"}])
+    asyncio.run(send(b, "/setup"))
+    text = session.sent[-1][1]
+    assert "На торговом счёте BingX: <b>5.00 USDT</b>" in text and "другом счёте" not in text
+    asyncio.run(send(b, "/scalp"))
+    assert "на бирже: свободно 5.00 USDT" in session.sent[-1][1]
