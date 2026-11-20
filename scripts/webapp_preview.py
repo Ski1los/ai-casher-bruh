@@ -200,6 +200,16 @@ def build():
                                   _r("TON/USDT", "bounce", 3, 2, 0.6, 0.2, 0.009, ok=False)]
     b.scalper.ranked_at["bybit"] = time.time() + 10 ** 9  # не пересчитывать в предпросмотре
     b.scalper.st["use_coins"] = True
+    # лаборатория и щит: пример
+    sc = b.scalper
+    sc.lab["stats"].update({
+        sc.lab_key("bybit", "SOL/USDT", "bounce"): {"rets": [0.7, 0.7, -0.2, 0.7], "sum": 1.9, "n": 4, "wins": 3, "since": 0},
+        sc.lab_key("bybit", "SUI/USDT", "dip"): {"rets": [0.4, -6.2, 0.4], "sum": -5.4, "n": 3, "wins": 2, "since": 0},
+        sc.lab_key("bybit", "ETH/USDT", "trend"): {"rets": [0.4], "sum": 0.4, "n": 1, "wins": 1, "since": 0}})
+    sc.lab["open"][sc.lab_key("bybit", "ETH/USDT", "trend")] = {"entry": 3000, "tp": 3020, "be": 3005, "stop": 2820,
+                                                               "fee": 0.001, "entry_ts": 0, "checked": 0, "opened": 0}
+    sc.set_risk({"LOOM": (time.time() + 30 * 86400, "Bybit объявил делистинг: Delisting of LOOM/USDT")})
+    sc.st["blocked"]["DOGE"] = [time.time() + 20 * 3600, "был стоп-лосс"]
 
     b.opps._get_json = opps_json
     b.opps.news = opps_news

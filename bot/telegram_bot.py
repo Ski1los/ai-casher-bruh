@@ -148,7 +148,7 @@ HELP_TEXT = """\
 <b>💡 Заработок с маленькой суммы</b>
 /autopilot — 🤖 <b>бот торгует сам</b>: одна кнопка, дальше без тебя
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
-/scalp — состояние автопилота (режим $5)
+/scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
 /news — новости крипты
 
 <b>Сигналы</b>
@@ -786,7 +786,8 @@ class ArbitrageBot:
         sc = self.scalper.status_dict()
         return {
             "mode": "live" if t.state.live else "test",
-            "scalp_mode_5usd": {k: sc[k] for k in ("on", "use_coins", "reasons", "paper", "stats", "positions", "top")},
+            "scalp_mode_5usd": {k: sc[k] for k in ("on", "use_coins", "reasons", "paper", "stats", "positions", "top",
+                                                          "lab", "shield")},
             "second_bot_copy_running": self.duplicate_running(),
             "autotrade_on": t.state.auto,
             "autotrade_paused_reason": t.state.paused_reason,
@@ -903,6 +904,9 @@ class ArbitrageBot:
                 f"{'🟢 вкл' if st.auto else '⏸ выкл'}, сегодня сделок {st.day_trades}, "
                 f"результат циклов {st.day_pnl_usd:+.4f}$. Подробно: /trades"
             )
+        pilot = self.scalper.report_text()
+        if pilot:
+            parts.append(pilot)
         parts.append("Комиссии, узкие места и рекомендации: /analysis" + (" · мнение ИИ: /ai" if self.ai.configured else ""))
         return "\n\n".join(parts)
 
@@ -1708,6 +1712,7 @@ class ArbitrageBot:
                     BotCommand(command="setup", description="🚀 Готовность к торговле: что осталось"),
                     BotCommand(command="autopilot", description="🤖 Автопилот: бот торгует сам"),
                     BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
+                    BotCommand(command="lab", description="🧪 Лаборатория: стратегии вживую"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости крипты"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),

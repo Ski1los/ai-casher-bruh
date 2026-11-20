@@ -1185,6 +1185,7 @@ async function toggleScalp(input) {
   } catch (e) { input.checked = !on; fail(e); }
 }
 
+const STRAT_NAME = { dip: "Откат", bounce: "Отскок", trend: "Тренд" };
 const STRAT_HINT = { dip: "резкий откат ниже средней", bounce: "разворот от нижней полосы Боллинджера", trend: "откат в растущем рынке" };
 
 function pilotTop(s, n) {
@@ -1244,6 +1245,9 @@ function pilotSheet() {
   const top = (s.top || []).map((x) => `<div class="item"><div class="grow"><div class="t">${x.ok ?? x.net_pct > 0 ? "🟢" : "🔴"} ${esc(x.symbol.split("/")[0])} <span class="muted small">${esc(x.strategy_name || "")}</span></div><div class="s" style="white-space:normal">${esc(STRAT_HINT[x.strategy] || "")} · сделок ${x.trades} (${x.wins} в плюс) · цель +${(x.tp * 100).toFixed(1)}%</div></div><div class="r"><div class="b num ${cls(x.net_pct)}">${pct(x.net_pct, 1)}</div><div class="s num">новые ${x.test_pct == null ? "—" : pct(x.test_pct, 1)}</div></div></div>`).join("");
   const positions = (s.positions || []).map((pos) => `<div class="item"><div class="grow"><div class="t">${esc(pos.symbol.split("/")[0])} <span class="muted small">${esc(exName(pos.exchange))}</span></div><div class="s">за ${money(pos.cost)} · продажа по ${price(pos.tp)}${pos.breakeven ? " (безубыток)" : ""}</div></div></div>`).join("");
   const st = s.stats || {};
+  const LAB_ICON = { ok: "🟢", bad: "🔴", new: "⚪️" };
+  const lab = (s.lab || []).map((x) => `<div class="item"><div class="grow"><div class="t">${LAB_ICON[x.verdict] || "⚪️"} ${esc(x.symbol.split("/")[0])} <span class="muted small">${esc((STRAT_NAME[x.strategy] || x.strategy))}</span></div><div class="s">${x.trades ? `${x.trades} сделок без денег, ${x.wins} в плюс` : "сделок ещё не было"}${x.open ? " · в сделке" : ""}</div></div><div class="r"><div class="b num ${x.trades ? cls(x.sum_pct) : "muted"}">${x.trades ? pct(x.sum_pct, 2) : "—"}</div></div></div>`).join("");
+  const shield = (s.shield || []).map((x) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">🛡 ${esc(x.coin === "*" ? exName(x.exchange) : x.coin)}</div><div class="s" style="white-space:normal">${esc(x.reason)} · до ${new Date(x.until * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</div></div></div>`).join("");
   Sheet.open("Автопилот", `
     <div class="row between"><span class="pill ${t.live ? "live" : "test"}">${t.live ? "🔴 Реальные деньги" : "🧪 Тест"}</span><span class="pill ${s.on ? "ok" : "gray"}">${s.on ? "🟢 работает" : "⏸ выключен"}</span></div>
     ${owner() ? `<div class="list" style="margin-top:10px">
@@ -1256,7 +1260,9 @@ function pilotSheet() {
     ${reasons ? `<div class="section-title">Что делает сейчас</div><div class="list">${reasons}</div>` : ""}
     <div class="section-title">Монеты и стратегии</div>
     ${top ? `<div class="list">${top}</div>` : `<div class="card empty">Проверка на истории ещё не готова — появится через минуту после включения</div>`}
-    <div class="tiny muted" style="margin-top:10px;white-space:normal">Для каждой монеты бот перебирает 3 стратегии на первых 2/3 истории (свечи по 5 мин за ~3,5 дня) и проверяет лучшую на последней трети, которую она «не видела» («новые»). Торгует только 🟢. Если BTC падает больше 2% за час — новых покупок нет. Прибыль не гарантирована.</div>
+    ${lab ? `<div class="section-title">🧪 Лаборатория — вживую без денег</div><div class="list">${lab}</div><div class="tiny muted" style="margin-top:6px;white-space:normal">Каждая стратегия «торгует» на бумаге по живым свечам. 🔴 вживую в минусе (от 3 сделок) — реальные деньги на неё не идут.</div>` : ""}
+    ${shield ? `<div class="section-title">🛡 Щит — сейчас не покупаю</div><div class="list">${shield}</div>` : ""}
+    <div class="tiny muted" style="margin-top:10px;white-space:normal">Для каждой монеты бот перебирает 3 стратегии на первых 2/3 истории (свечи по 5 мин за ~3,5 дня) и проверяет лучшую на последней трети, которую она «не видела» («новые»). Торгует только 🟢. Если BTC падает больше 2% за час — новых покупок нет. Щит: не покупает монеты с делистингом или новостями о взломе/иске, сутки после стоп-лосса, 12 ч после 2 убытков подряд. Прибыль не гарантирована.</div>
     <button class="btn block ghost" style="margin-top:14px" data-act="why">Треугольники: почему нет сделок</button>`, { full: true });
 }
 

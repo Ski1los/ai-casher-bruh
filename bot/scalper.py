@@ -77,6 +77,14 @@ TREND_RSI_MIN, TREND_RSI_MAX = 40.0, 62.0
 MARKET_DROP_1H = -0.02  # BTC упал больше чем на 2% за час — новых покупок нет: весь рынок падает
 MARKET_CACHE_SEC = 60
 IDLE_RETRY_SEC = 3600  # «Монеты в дело»: если продажа монеты не прошла, следующая попытка через час
+# Лаборатория: каждая монета со своей стратегией «торгует» на бумаге по живым свечам по тем же правилам,
+# что и проверка на истории. Стратегия, которая вживую в минусе, к реальной торговле не допускается.
+LAB_MIN_TRADES = 3  # с какого числа бумажных сделок верить результату лаборатории
+LAB_WINDOW = 20  # судим по последним 20 сделкам: стратегия может «исправиться»
+# Щит
+COIN_COOLDOWN_SEC = 24 * 3600  # после стоп-лосса по монете — сутки её не покупать
+LOSS_STREAK = 2  # столько убыточных сделок подряд на бирже…
+STREAK_PAUSE_SEC = 12 * 3600  # …и новые покупки на этой бирже на паузе на 12 часов
 EVENTS_KEEP = 8
 
 
@@ -305,7 +313,10 @@ def new_scalp_state() -> dict:
     # paper: биржа -> тестовый баланс
     # use_coins: «Монеты в дело» — продавать лежащие без дела монеты в USDT, чтобы ими торговал режим $5
     return {"on": False, "positions": {}, "paper": {}, "stats": {"cycles": 0, "wins": 0, "pnl": 0.0, "since": 0.0},
-            "events": [], "last_buy_candle": {}, "use_coins": False, "convert_tried": {}}
+            "events": [], "last_buy_candle": {}, "use_coins": False, "convert_tried": {},
+            # lab: бумажные сделки по живым свечам; blocked: монеты на паузе после стоп-лосса;
+            # risk: монеты с делистингом или плохими новостями; streak/pause: серия убытков по биржам
+            "lab": {"open": {}, "stats": {}}, "blocked": {}, "risk": {}, "streak": {}, "pause": {}}
 
 
 class Scalper:
@@ -318,6 +329,8 @@ class Scalper:
         self._cur: str | None = None  # биржа, с которой сейчас работает шаг
         self._paper_virtual: set[str] = set()  # биржи, где тест идёт на виртуальных $5 (реальных было меньше)
         self._market: dict[str, tuple[float, float | None]] = {}  # биржа -> (когда, изменение BTC за час)
+        self._sig: dict[tuple[str, str], tuple[int, list]] = {}  # (биржа, пара) -> (номер 5-минутки, свечи)
+        self._lab_period: dict[str, int] = {}  # биржа -> номер 5-минутки, на которой лаборатория уже отработала
         self.last_step = 0.0
 
     @property
@@ -518,6 +531,10 @@ class Scalper:
                 await self.rank(name)
             except Exception as e:
                 log.info("Проверка на истории: %s", e)
+        try:
+            await self.lab_step(name)
+        except Exception as e:
+            log.info("Лаборатория %s: %s", name, e)
         async with self.trader._lock:
             self._cur = name
             try:
@@ -563,11 +580,31 @@ class Scalper:
             if converted:  # деньги пришли: покупать будем на следующем шаге, по свежему балансу
                 return converted
         cost = math.floor(min(free, t.settings.max_trade_usd) * 100 + 1e-6) / 100
+        pause = float(self.st["pause"].get(name) or 0)
+        if pause > now:
+            self.last_reason = (f"щит: {LOSS_STREAK} убытка подряд — новые покупки на паузе до "
+                                f"{self._clock(pause)}. Рынок сейчас против стратегии, лучше переждать")
+            return []
         ranking = await self.rank(name)
-        good = [r for r in ranking if is_good(r)][:TOP_COINS]
+        passed = [r for r in ranking if is_good(r)]
+        good, held_back = [], []
+        for r in passed:
+            coin = r["symbol"].split("/")[0]
+            why = self.shield_reason(coin, now)
+            verdict, s = self.lab_verdict(name, r["symbol"], r.get("strategy", "dip"))
+            if why:
+                held_back.append(f"{coin} — {why}")
+            elif verdict == "bad":
+                held_back.append(f"{coin} — в лаборатории вживую {s['sum']:+.2f}% за {len(s['rets'])} сделок")
+            else:
+                good.append((verdict != "ok", -(s or {}).get("sum", 0), r))
+        good = [r for *_, r in sorted(good, key=lambda x: x[:2])][:TOP_COINS]
         if not good:
-            self.last_reason = ("жду: ни одна монета сейчас не прошла проверку на истории (3 стратегии)" if ranking
-                                else "биржа не отдала свечи, попробую позже")
+            if held_back:
+                self.last_reason = "жду: монеты, прошедшие проверку, сейчас под защитой (" + "; ".join(held_back[:3]) + ")"
+            else:
+                self.last_reason = ("жду: ни одна монета сейчас не прошла проверку на истории (3 стратегии)" if ranking
+                                    else "биржа не отдала свечи, попробую позже")
             return []
         min_need = min(self._min_cost(name, r["symbol"]) for r in good)
         if free < min_need:
@@ -594,7 +631,7 @@ class Scalper:
         skipped: list[str] = []
         for r in good:
             symbol = r["symbol"]
-            candles = await self._candles(name, symbol, SIGNAL_CANDLES)
+            candles = await self.signal_candles(name, symbol)
             if len(candles) < EMA_LEN + 15:
                 continue
             closes = [float(c[4]) for c in candles[:-1]]  # последняя свеча ещё не закрылась
@@ -622,6 +659,8 @@ class Scalper:
         names = ", ".join(f"{r['symbol'].split('/')[0]} ({STRATEGIES.get(r.get('strategy', 'dip'), ('?',))[0]})"
                           for r in good)
         self.last_reason = f"жду сигнала: слежу за {names}, ${cost:.2f} готовы к покупке"
+        if held_back:
+            self.last_reason += ". Под защитой: " + "; ".join(held_back[:3])
         if skipped:
             self.last_reason += (f". Был откат на {', '.join(skipped)}, но с ${cost:.2f} продажу потом не пропустит "
                                  "минимум биржи (крупный шаг количества): нужно чуть больше денег")
@@ -664,6 +703,195 @@ class Scalper:
         self._event(f"купил {coin} на ${spent:.2f}")
         self.last_reason = f"держу {coin}, жду цели {pos['tp']:.6g}"
         return [text]
+
+    # --- свечи для сигналов --------------------------------------------------
+
+    async def signal_candles(self, name: str, symbol: str) -> list[list[float]]:
+        """Свечи для сигнала. Сигнал меняется только когда закрывается 5-минутная свеча, поэтому качаем
+        один раз на свечу (а не каждые 30 с). Кэш верим, только если биржа уже отдала текущую свечу."""
+        period = int(time.time() // CANDLE_SEC)
+        cached = self._sig.get((name, symbol))
+        if cached and cached[0] == period:
+            return cached[1]
+        candles = await self._candles(name, symbol, SIGNAL_CANDLES)
+        if candles and float(candles[-1][0]) >= period * CANDLE_SEC * 1000:
+            self._sig[(name, symbol)] = (period, candles)
+        return candles
+
+    # --- лаборатория: проверка стратегий вживую без денег -----------------------
+
+    @property
+    def lab(self) -> dict:
+        lab = self.st["lab"]
+        lab.setdefault("open", {})
+        lab.setdefault("stats", {})
+        return lab
+
+    @staticmethod
+    def lab_key(name: str, symbol: str, strategy: str) -> str:
+        return f"{name}|{symbol}|{strategy}"
+
+    def lab_verdict(self, name: str, symbol: str, strategy: str) -> tuple[str, dict | None]:
+        """«new» — мало бумажных сделок, «ok» — вживую не в минусе, «bad» — вживую в минусе."""
+        s = self.lab["stats"].get(self.lab_key(name, symbol, strategy))
+        if not s or len(s["rets"]) < LAB_MIN_TRADES:
+            return "new", s
+        return ("bad" if s["sum"] < 0 else "ok"), s
+
+    def _lab_record(self, key: str, ret_pct: float, now: float) -> None:
+        s = self.lab["stats"].setdefault(key, {"rets": [], "sum": 0.0, "n": 0, "wins": 0, "since": now})
+        s["rets"].append(round(ret_pct, 4))
+        del s["rets"][:-LAB_WINDOW]
+        s["sum"] = round(sum(s["rets"]), 4)
+        s["n"] += 1
+        s["wins"] += ret_pct > 0
+        s["last"] = now
+
+    async def lab_step(self, name: str, now: float | None = None) -> None:
+        """Раз в 5-минутку: ведём бумажные позиции и открываем новые по сигналам всех проверенных монет.
+        Правила те же, что в проверке на истории: вход по открытию следующей свечи, цель по high, стоп по low,
+        через сутки цель опускается до безубытка. Так видно, работает ли выбор стратегии на живом рынке."""
+        now = time.time() if now is None else now
+        period = int(now // CANDLE_SEC)
+        if self._lab_period.get(name) == period:
+            return
+        ranking = self.ranking.get(name) or []
+        if not ranking:
+            return
+        self._lab_period[name] = period
+        lab = self.lab
+        fees = {r["symbol"]: self._fee(name, r["symbol"]) for r in ranking}
+        # 1) открытые бумажные позиции (в т.ч. по стратегиям, которые после пересчёта уже не выбраны)
+        for key, pos in list(lab["open"].items()):
+            ex_name, symbol, _ = key.split("|")
+            if ex_name != name:
+                continue
+            candles = await self.signal_candles(name, symbol)
+            for c in candles[:-1]:
+                ts = float(c[0])
+                if ts <= pos["checked"]:
+                    continue
+                pos["checked"] = ts
+                target = pos["tp"] if (ts - pos["entry_ts"]) / 1000 < MAX_HOLD_SEC else min(pos["tp"], pos["be"])
+                exit_ = None
+                if float(c[3]) <= pos["stop"]:
+                    exit_ = pos["stop"] * (1 - SLIPPAGE)
+                elif float(c[2]) > target:
+                    exit_ = target
+                if exit_ is not None:
+                    self._lab_record(key, trade_return(pos["entry"], exit_, pos["fee"]) * 100, now)
+                    del lab["open"][key]
+                    break
+        # 2) новые сигналы
+        for r in ranking:
+            symbol, strategy = r["symbol"], r.get("strategy", "dip")
+            key = self.lab_key(name, symbol, strategy)
+            if key in lab["open"]:
+                continue
+            candles = await self.signal_candles(name, symbol)
+            if len(candles) < EMA_LEN + 15:
+                continue
+            closes = [float(c[4]) for c in candles[:-1]]
+            candle_ts = float(candles[-2][0])
+            p = Params(r["tp"], r["rsi_buy"], strategy)
+            if lab["stats"].get(key, {}).get("signal_ts") == candle_ts:
+                continue
+            if not signal_at(closes, indicators(closes), len(closes) - 1, p):
+                continue
+            fee = fees.get(symbol, 0.001)
+            entry = float(candles[-1][1]) * (1 + SLIPPAGE)
+            lab["open"][key] = {"entry": entry, "tp": target_price(entry, p.tp, fee),
+                                "be": target_price(entry, BREAKEVEN_EXTRA, fee), "stop": entry * (1 - STOP_PCT),
+                                "fee": fee, "entry_ts": float(candles[-1][0]), "checked": candle_ts, "opened": now}
+            lab["stats"].setdefault(key, {"rets": [], "sum": 0.0, "n": 0, "wins": 0, "since": now})["signal_ts"] = candle_ts
+
+    def lab_rows(self, name: str | None = None) -> list[dict]:
+        name = name or self.exchange() or ""
+        out = []
+        for r in self.ranking.get(name) or []:
+            strategy = r.get("strategy", "dip")
+            key = self.lab_key(name, r["symbol"], strategy)
+            verdict, s = self.lab_verdict(name, r["symbol"], strategy)
+            out.append({"symbol": r["symbol"], "strategy": strategy, "verdict": verdict,
+                        "trades": len(s["rets"]) if s else 0, "wins": sum(x > 0 for x in s["rets"]) if s else 0,
+                        "sum_pct": s["sum"] if s else 0.0, "open": key in self.lab["open"], "passed": is_good(r)})
+        return out
+
+    def lab_text(self, name: str | None = None) -> str:
+        name = name or self.exchange()
+        if not name:
+            return "🧪 Лаборатория: нужен рабочий ключ биржи (/keys)."
+        rows = self.lab_rows(name)
+        lines = [f"🧪 <b>Лаборатория</b>: {html.escape(self._name(name))}",
+                 "Каждая монета со своей стратегией «торгует» без денег по живым свечам — по тем же правилам, что "
+                 "и проверка на истории. Если стратегия вживую в минусе (от "
+                 f"{LAB_MIN_TRADES} сделок), реальные деньги на неё не идут. Судим по последним {LAB_WINDOW} сделкам.",
+                 ""]
+        if not rows:
+            lines.append("Пока пусто: проверка на истории ещё не готова (включи автопилот: /autopilot).")
+        icon = {"ok": "🟢", "bad": "🔴", "new": "⚪️"}
+        for x in rows:
+            strat = STRATEGIES.get(x["strategy"], ("?",))[0]
+            res = (f"{x['trades']} сделок ({x['wins']} в плюс), <b>{x['sum_pct']:+.2f}%</b>" if x["trades"]
+                   else "сделок ещё не было")
+            lines.append(f"{icon[x['verdict']]} {html.escape(x['symbol'].split('/')[0])} [{strat}]: {res}"
+                         + (" · сейчас в бумажной сделке" if x["open"] else "")
+                         + ("" if x["passed"] else " · <i>проверку на истории не прошла</i>"))
+        lines.append("\n🟢 вживую не в минусе · ⚪️ мало данных (торговать можно, если прошла проверку на истории) · "
+                     "🔴 вживую в минусе — не торгую")
+        return "\n".join(lines)
+
+    # --- щит ---------------------------------------------------------------------
+
+    def _clock(self, ts: float) -> str:
+        return time.strftime("%d.%m %H:%M", time.gmtime(ts + self.trader.settings.report_utc_offset * 3600))
+
+    def set_risk(self, risk: dict[str, tuple[float, str]]) -> None:
+        """Монеты с делистингом или плохими новостями (из bot/opportunities.risk_coins)."""
+        self.st["risk"] = {c: [float(until), str(why)] for c, (until, why) in risk.items()}
+
+    def shield_reason(self, coin: str, now: float | None = None) -> str | None:
+        now = time.time() if now is None else now
+        for src in ("risk", "blocked"):
+            item = self.st[src].get(coin)
+            if item and float(item[0]) > now:
+                return f"{item[1]} (до {self._clock(float(item[0]))})"
+        return None
+
+    def shield_rows(self, now: float | None = None) -> list[dict]:
+        now = time.time() if now is None else now
+        out = []
+        for src in ("risk", "blocked"):
+            for coin, (until, why) in sorted(self.st[src].items()):
+                if float(until) > now:
+                    out.append({"coin": coin, "until": float(until), "reason": why, "kind": src})
+        for name, until in self.st["pause"].items():
+            if float(until) > now:
+                out.append({"coin": "*", "exchange": name, "until": float(until), "kind": "pause",
+                            "reason": f"{LOSS_STREAK} убытка подряд на {self._name(name)}: пауза новых покупок"})
+        return out
+
+    def _after_close(self, name: str, coin: str, pnl: float, why: str, now: float) -> str:
+        """Щит после сделки: монета на паузу после стоп-лосса, биржа на паузу после серии убытков."""
+        st = self.st
+        for src in ("blocked", "risk"):  # заодно чистим истёкшее, чтобы состояние не разрасталось
+            st[src] = {c: v for c, v in st[src].items() if float(v[0]) > now}
+        if pnl >= 0:
+            st["streak"][name] = 0
+            return ""
+        if why == "продажа вручную":  # твоё решение, а не ошибка стратегии: щит не включаем
+            return ""
+        note = ""
+        if why == "стоп-лосс":
+            st["blocked"][coin] = [now + COIN_COOLDOWN_SEC, "был стоп-лосс"]
+            note = f"\n🛡 {html.escape(coin)} не покупаю сутки: после стоп-лосса монете нужно успокоиться."
+        st["streak"][name] = int(st["streak"].get(name) or 0) + 1
+        if st["streak"][name] >= LOSS_STREAK:
+            st["streak"][name] = 0
+            st["pause"][name] = now + STREAK_PAUSE_SEC
+            note += (f"\n🛡 {LOSS_STREAK} убытка подряд: новые покупки на {html.escape(self._name(name))} "
+                     f"на паузе до {self._clock(now + STREAK_PAUSE_SEC)}. Открытые продажи остаются.")
+        return note
 
     # --- тормоз рынка и «Монеты в дело» ---------------------------------------
 
@@ -834,7 +1062,7 @@ class Scalper:
         self.last_reason = f"держу {coin}: сейчас {change:+.2f}%, продажа стоит по {pos['tp']:.6g}"
         return []
 
-    async def _stop(self, bid: float, now: float) -> list[str]:
+    async def _stop(self, bid: float, now: float, why: str = "стоп-лосс") -> list[str]:
         pos = self.pos
         t = self.trader
         if pos["live"]:
@@ -847,7 +1075,7 @@ class Scalper:
             _, got = await t._settle(ex, pos["exchange"], order, pos["symbol"], "sell", pos["fee"])
         else:
             got = pos["amount"] * bid * (1 - pos["fee"])
-        return self._closed(got, "стоп-лосс", now)
+        return self._closed(got, why, now)
 
     def _closed(self, got: float, why: str, now: float) -> list[str]:
         pos = self.pos
@@ -865,6 +1093,7 @@ class Scalper:
                               t.settings.quote, got, pnl_usd=pnl, source="scalp",
                               note=f"режим $5: {why}" + ("" if pos["live"] else " (тест)")))
         self.positions.pop(pos["exchange"], None)
+        shield_note = self._after_close(pos["exchange"], coin, pnl, why, now)
         hours = (now - pos["opened_at"]) / 3600
         icon = "✅" if pnl >= 0 else "🔻"
         mode = "" if pos["live"] else "🧪 ТЕСТ: "
@@ -873,7 +1102,7 @@ class Scalper:
         return [f"{icon} {mode}<b>Режим $5: продал {html.escape(coin)}</b> на {html.escape(self._name(pos['exchange']))} "
                 f"({why}) через {hours:.1f} ч\n"
                 f"${pos['cost']:.4f} → ${got:.4f} = <b>{pnl:+.4f}$</b> ({pnl / pos['cost'] * 100:+.2f}%)\n"
-                f"Всего в режиме $5: {stats['cycles']} сделок, {stats['pnl']:+.4f}$"]
+                f"Всего в режиме $5: {stats['cycles']} сделок, {stats['pnl']:+.4f}$" + shield_note]
 
     async def sell_now(self, name: str | None = None) -> str:
         """Кнопка «Продать сейчас»: снять цель и продать по рынку (если позиция больше минимума биржи)."""
@@ -896,7 +1125,7 @@ class Scalper:
                         out.append(f"{html.escape(title)}: позиция стоит ${pos['amount'] * bid:.2f}, это меньше "
                                    "минимального ордера биржи. Продать по рынку нельзя: продажа по цели остаётся стоять.")
                         continue
-                    res = await self._stop(bid, time.time())
+                    res = await self._stop(bid, time.time(), "продажа вручную")
                     out.append(res[0].replace("стоп-лосс", "продажа вручную"))
                 except TradeError as e:
                     out.append(f"{html.escape(title)}: ❌ {html.escape(str(e))}")
@@ -938,6 +1167,17 @@ class Scalper:
                 lines.append(f"  сейчас: {html.escape(self.reasons[n])}")
         if self.reasons.get("_"):
             lines.append(f"Сейчас: {html.escape(self.reasons['_'])}")
+        lab = self.lab_rows()
+        tested = [x for x in lab if x["verdict"] != "new"]
+        if lab:
+            good = sum(x["verdict"] == "ok" for x in tested)
+            lines.append(f"\n🧪 Лаборатория (проверка вживую без денег): проверено {len(tested)} из {len(lab)} монет, "
+                         f"не в минусе {good}, в минусе {len(tested) - good} — подробно /lab")
+        shield = self.shield_rows()
+        if shield:
+            lines.append("🛡 Щит: " + "; ".join(
+                html.escape(f"{x['coin'] if x['coin'] != '*' else self._name(x['exchange'])} — {x['reason'][:70]}")
+                for x in shield[:4]))
         s = st["stats"]
         if s["cycles"]:
             lines.append(f"\nИтог с включения: {s['cycles']} сделок, в плюс {s['wins']}, <b>{s['pnl']:+.4f}$</b>")
@@ -948,6 +1188,32 @@ class Scalper:
                              f"{html.escape(text)}")
         lines.append("\nЧестно: прибыль не гарантирована. На падении деньги могут зависнуть в монете, "
                      "пока цена не вернётся. Ставь только то, что не жалко.")
+        return "\n".join(lines)
+
+    def report_text(self) -> str:
+        """Коротко для ежедневного отчёта (пусто, если автопилот никогда не включали)."""
+        st = self.st
+        s = st["stats"]
+        if not st["on"] and not s["cycles"] and not self.positions:
+            return ""
+        lines = [f"🤖 <b>Автопилот</b>: {'🟢 работает' if st['on'] else '⏸ выключен'}, "
+                 f"{'🔴 реальные деньги' if self.trader.state.live else '🧪 тест'}"]
+        if s["cycles"]:
+            lines.append(f"Сделок {s['cycles']}, в плюс {s['wins']}, итог <b>{s['pnl']:+.4f}$</b>")
+        for pos in self.positions.values():
+            lines.append("В сделке: " + self._pos_line(pos))
+        lab = [x for x in self.lab_rows() if x["verdict"] != "new"]
+        if lab:
+            best = max(lab, key=lambda x: x["sum_pct"])
+            lines.append(f"🧪 Лаборатория: проверено вживую {len(lab)} монет, не в минусе "
+                         f"{sum(x['verdict'] == 'ok' for x in lab)}; лучшая — {html.escape(best['symbol'].split('/')[0])} "
+                         f"{best['sum_pct']:+.2f}% (/lab)")
+        shield = self.shield_rows()
+        if shield:
+            lines.append(f"🛡 Щит: под защитой {len(shield)} (" + ", ".join(
+                html.escape(x["coin"] if x["coin"] != "*" else "пауза биржи") for x in shield[:5]) + ")")
+        if st["on"] and self.last_reason:
+            lines.append("Сейчас: " + html.escape(self.last_reason[:200]))
         return "\n".join(lines)
 
     def _real_line(self, name: str) -> str:
@@ -968,6 +1234,7 @@ class Scalper:
         paper = {n: v for n, v in st["paper"].items() if v is not None}
         return {"on": st["on"], "live": self.trader.state.live, "reason": self.last_reason,
                 "use_coins": bool(st["use_coins"]),
+                "lab": self.lab_rows(), "shield": self.shield_rows(),
                 "reasons": {n: r for n, r in self.reasons.items() if r},
                 "real": {n: self._real_line(n) for n in self.exchanges() if self._real_line(n)},
                 "paper": paper, "paper_usd": round(sum(paper.values()), 4) if paper else None,

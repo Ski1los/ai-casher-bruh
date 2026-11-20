@@ -12,7 +12,7 @@ from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from .opportunities import ALERT_KINDS, KINDS, PLAN_QUESTION, Promo
+from .opportunities import ALERT_KINDS, KINDS, PLAN_QUESTION, Promo, risk_coins
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -155,6 +155,12 @@ def alert_text(items: list[Promo]) -> str:
 async def opps_once(b: ArbitrageBot) -> None:
     """Новые объявления Bybit: акции (если уведомления включены) и делистинг монеты, которая есть у тебя (всегда)."""
     items = await b.opps.announcements(force=True)
+    try:  # щит автопилота: делистинги и плохие новости — эти монеты бот не покупает
+        news = await b.opps.news(known_coins(b))
+    except Exception as e:
+        log.info("Новости для щита: %s", e)
+        news = []
+    b.scalper.set_risk(risk_coins(items, news))
     new = b.opps.fresh(items)
     if not new or b.owner_id is None:
         return

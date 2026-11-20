@@ -74,7 +74,7 @@ KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 TICKER_RE = re.compile(r"\(([A-Z0-9]{2,12})\)")
 NEWS_NAMES = {
-    "bitcoin": "BTC", "биткоин": "BTC", "биткойн": "BTC", "ethereum": "ETH", "эфир": "ETH", "эфириум": "ETH",
+    "bitcoin": "BTC", "биткоин": "BTC", "биткойн": "BTC", "ethereum": "ETH", "эфириум": "ETH",
     "solana": "SOL", "солана": "SOL", "toncoin": "TON", "тонкоин": "TON", "ripple": "XRP", "dogecoin": "DOGE",
     "binance coin": "BNB", "cardano": "ADA", "tron": "TRX", "chainlink": "LINK", "avalanche": "AVAX",
     "polkadot": "DOT", "litecoin": "LTC", "shiba": "SHIB", "pepe": "PEPE", "sui": "SUI", "hyperliquid": "HYPE",
@@ -212,13 +212,53 @@ def parse_rss(xml_text: str, source: str, known: set[str] | None = None, limit: 
     return out
 
 
+def _name_re(name: str) -> re.Pattern:
+    # целым словом: «sui» не должно находиться в «lawsuit», «tron» — в «electronic». Русским — с окончанием
+    tail = r"\w{0,3}" if re.search("[а-я]", name) else r"(?:s|'s)?"
+    return re.compile(rf"(?<!\w){re.escape(name)}{tail}(?!\w)")
+
+
+NAME_RES = {name: _name_re(name) for name in NEWS_NAMES}
+
+# Слова, после которых монету лучше не покупать: взлом, иск, делистинг, отвязка стейблкоина…
+RISK_RE = re.compile(
+    r"(?<!\w)(hack\w*|exploit\w*|drain\w*|stolen|breach\w*|rug ?pull\w*|lawsuit\w*|sue[sd]?|depeg\w*|"
+    r"insolven\w*|bankrupt\w*|delist\w*|halt\w*|взлом\w*|эксплойт\w*|украл\w*|похищ\w*|иск|иска|иске|"
+    r"судебн\w*|банкрот\w*|делистинг\w*|уязвимост\w*)(?!\w)", re.IGNORECASE)
+NEWS_RISK_SEC = 12 * 3600
+DELIST_RISK_SEC = 45 * 86400
+NEWS_RISK_SKIP = {"BTC", "ETH"}  # заголовок «биржу взломали, биткоин упал» — не про риск самого BTC
+
+
 def coins_in(text: str, known: set[str] | None = None) -> list[str]:
     low = text.lower()
-    found = [t for name, t in NEWS_NAMES.items() if name in low]
+    found = [t for name, t in NEWS_NAMES.items() if NAME_RES[name].search(low)]
     for word in re.findall(r"\b[A-Z][A-Z0-9]{1,9}\b", text):
         if known and word in known and word not in ("USD", "SEC", "ETF", "CEO", "AI", "NFT", "DEX", "CEX", "API"):
             found.append(word)
     return list(dict.fromkeys(found))[:4]
+
+
+def risk_coins(anns: list[Promo], news: list[dict], now: float | None = None) -> dict[str, tuple[float, str]]:
+    """Монеты, которые автопилоту сейчас покупать нельзя: {монета: (до какого времени, почему)}.
+
+    • Bybit объявил делистинг (за последние 45 дней) — до конца этого срока;
+    • свежая (до 12 ч) новость со словами «взлом», «иск», «делистинг», «эксплойт»… — на 12 ч с момента новости.
+    """
+    now = time.time() if now is None else now
+    out: dict[str, tuple[float, str]] = {}
+    for p in anns:
+        if p.kind == "delisting" and now - (p.published or now) < DELIST_RISK_SEC:
+            for c in p.coins:
+                out[c] = ((p.published or now) + DELIST_RISK_SEC, f"Bybit объявил делистинг: {p.title[:90]}")
+    for n in news:
+        ts = float(n.get("published") or 0)
+        if not ts or now - ts > NEWS_RISK_SEC or not RISK_RE.search(n.get("title") or ""):
+            continue
+        for c in n.get("coins") or []:
+            if c not in NEWS_RISK_SKIP and c not in out:
+                out[c] = (ts + NEWS_RISK_SEC, f"новость ({n.get('source', '')}): {n['title'][:90]}")
+    return out
 
 
 class OpportunityHub:
