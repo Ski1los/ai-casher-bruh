@@ -31,6 +31,7 @@ from .ai import AIError
 from .alerts import AlertError, build_alert, parse_alert
 from .config import BOUNDS, EDITABLE, RISK_KEYS
 from .demo_manager import REASONS, account_label
+from .opportunities import PLAN_QUESTION
 from .dex import SOL_ADDRESS_RE, DexError, best_pairs, is_address
 from .doctor import doctor_dict, run_doctor
 from .solana import WalletError
@@ -251,6 +252,8 @@ class WebApp:
             ("GET", "/api/dex/rug"): self.dex_rug,
             ("POST", "/api/radar"): self.radar,
             ("GET", "/api/tinvest"): self.tinvest,
+            ("GET", "/api/opps"): self.opps,
+            ("POST", "/api/opps/notify"): self.opps_notify,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -857,6 +860,19 @@ class WebApp:
             self.b.radar_chats.discard(uid)
         await self.b.save_extras()
         return {"radar": uid in self.b.radar_chats}
+
+    async def opps(self, request: web.Request) -> dict:
+        from .opps_ui import snapshot
+
+        snap = await snapshot(self.b, force=request.query.get("force") == "1")
+        return {**snap, "notify": self.b.opps_notify, "ai": self.b.ai.configured, "plan_q": PLAN_QUESTION}
+
+    async def opps_notify(self, request: web.Request) -> dict:
+        self._owner(request)
+        body = await self._body(request)
+        self.b.opps_notify = bool(body.get("on"))
+        await self.b.save_extras()
+        return {"notify": self.b.opps_notify}
 
     async def tinvest(self, request: web.Request) -> dict:
         self._owner(request)

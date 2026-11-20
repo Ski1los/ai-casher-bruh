@@ -29,7 +29,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import extras_ui, market_ui, trading_ui, updater
+from . import extras_ui, market_ui, opps_ui, trading_ui, updater
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
@@ -39,6 +39,7 @@ from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
 from .memory import free_memory, memory_line
+from .opportunities import OpportunityHub, for_ai
 from .dex import DexClient
 from .report import ScanStats, seconds_until, split_message
 from .scalper import STEP_SEC as SCALP_STEP_SEC
@@ -143,6 +144,11 @@ HELP_TEXT = """\
 • <b>треугольный арбитраж</b>: цикл из трёх обменов внутри одной биржи \
 (USDT → A → B → USDT), без переводов между биржами.
 Могу и торговать: кнопками, командами, через ИИ или автоматически (нужен API-ключ биржи, /keys).
+
+<b>💡 Заработок с маленькой суммы</b>
+/earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
+/scalp — режим $5: ловец откатов
+/news — новости крипты
 
 <b>Сигналы</b>
 /scan — просканировать прямо сейчас
@@ -455,6 +461,9 @@ class ArbitrageBot:
         self.tinvest = TInvestClient.from_env()  # Т-Инвестиции: портфель (только чтение, TINVEST_TOKEN)
         self.radar_chats: set[int] = set()  # кому слать радар мемкоинов (/radar on)
         self.radar_seen: dict[str, float] = {}  # о каких токенах радар уже писал
+        self.opps = OpportunityHub()  # «Как заработать сейчас»: акции Bybit, Earn, новости (/earn)
+        self.opps_notify = True  # писать владельцу о новых акциях Bybit
+        self.opps_last: dict | None = None
         self._key_warned: dict[str, float] = {}  # о чём уже предупреждали (чтобы не спамить)
         self._auto_warned: dict[str, float] = {}  # проблемы автоторговли, о которых уже написали
         self._auto_reports = 0  # сколько сводок автоторговли отправлено с момента включения
@@ -513,7 +522,7 @@ class ArbitrageBot:
     def _settings_state(self) -> dict:
         return {"values": dict(self._changed), "fees": dict(self._fee_changes),
                 "alerts": self.alerts.export(), "phantom": self.phantom.address,
-                "radar": sorted(self.radar_chats)}
+                "radar": sorted(self.radar_chats), "opps_notify": self.opps_notify}
 
     def _apply_saved_settings(self, raw: dict) -> None:
         for key, value in (raw.get("values") or {}).items():
@@ -541,6 +550,8 @@ class ArbitrageBot:
                 self.phantom.set_address(raw.get("phantom") or "")
             except Exception:
                 pass
+        if isinstance(raw.get("opps_notify"), bool):
+            self.opps_notify = raw["opps_notify"]
         if isinstance(raw.get("radar"), list):
             self.radar_chats = {int(c) for c in raw["radar"] if str(c).lstrip("-").isdigit()}
 
@@ -705,6 +716,7 @@ class ArbitrageBot:
             "last_scan": last,
             "trading": self._trading_context(),
             "extras": self._extras_context(),
+            "earning_opportunities_now": for_ai(self.opps_last),
         }
 
     def _extras_context(self) -> dict:
@@ -979,6 +991,8 @@ class ArbitrageBot:
                 await message.answer("⛔ Доступ закрыт. Твой ID: /myid")
                 return
             rows = list((self.app_markup() or InlineKeyboardMarkup(inline_keyboard=[])).inline_keyboard)
+            rows.insert(0, [InlineKeyboardButton(text="💡 Как заработать сейчас (акции, проценты, новости)",
+                                                 callback_data="op:show")])
             if message.from_user and message.from_user.id == self.owner_id:
                 rows.insert(0, [InlineKeyboardButton(text="🚀 С чего начать: готовность к торговле", callback_data="su:again")])
             await message.answer(HELP_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
@@ -1316,6 +1330,7 @@ class ArbitrageBot:
         trading_ui.register(self)
         extras_ui.register(self)
         market_ui.register(self)
+        opps_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1690,6 +1705,8 @@ class ArbitrageBot:
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
                     BotCommand(command="setup", description="🚀 Готовность к торговле: что осталось"),
                     BotCommand(command="scalp", description="🎯 Режим $5: ловец откатов"),
+                    BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
+                    BotCommand(command="news", description="📰 Новости крипты"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
                     BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
                     BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
@@ -1716,6 +1733,7 @@ class ArbitrageBot:
                 tasks.append(asyncio.create_task(self._keys_watch_loop()))
             tasks.append(asyncio.create_task(extras_ui.alerts_loop(self)))
             tasks.append(asyncio.create_task(market_ui.radar_loop(self)))
+            tasks.append(asyncio.create_task(opps_ui.opps_loop(self)))
             tasks.append(asyncio.create_task(self._auto_loop()))
             tasks.append(asyncio.create_task(self._scalp_loop()))
             tasks.append(asyncio.create_task(self._equity_loop()))
@@ -1738,6 +1756,7 @@ class ArbitrageBot:
             if runner:
                 await runner.cleanup()
             await self.scanner.close()
+            await self.opps.close()
             await self.ai.client.close()
             await self.phantom.close()
             await self.dex.close()

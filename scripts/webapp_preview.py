@@ -149,6 +149,47 @@ def build():
 
     b.phantom.get = fake_phantom
 
+    # «Как заработать сейчас»: примеры объявлений Bybit, процентов и новостей без сети
+    def _ann(title, key="latest_activities", days=5, tags=()):
+        return {"title": title, "description": "", "type": {"key": key}, "tags": list(tags),
+                "url": "https://announcements.bybit.com/en/article/" + str(abs(hash(title))),
+                "publishTime": int((time.time() - 7200) * 1000), "startDateTimestamp": int((time.time() - 7200) * 1000),
+                "endDateTimestamp": int((time.time() + days * 86400) * 1000)}
+
+    sample_anns = {"retCode": 0, "result": {"list": [
+        _ann("Bybit Launchpool: Stake USDT, MNT to Share 3,000,000 PLUME (PLUME)!"),
+        _ann("Token Splash: Trade WAL to Share 1,500,000 WAL (WAL)", days=9),
+        _ann("Puzzle Hunt: Complete Tasks to Share 200,000 USDT Airdrop", days=12),
+        _ann("Easy Earn: Up to 12% APR on USDT Flexible Savings for New Users", days=20),
+        _ann("WSOT 2026: Trade to Win From a 10,000,000 USDT Prize Pool", days=30),
+        _ann("New Listing: Walrus (WAL) — Spot Trading", key="new_crypto", days=0, tags=["Spot"]),
+        _ann("Delisting of LOOM (LOOM) Spot Trading Pairs", key="delistings", days=0, tags=["Spot"]),
+    ]}}
+    sample_earn = {"retCode": 0, "result": {"list": [
+        {"category": "FlexibleSaving", "estimateApr": "8.5%", "coin": "USDT", "status": "Available"},
+        {"category": "FlexibleSaving", "estimateApr": "5.2%", "coin": "USDC", "status": "Available"},
+        {"category": "FlexibleSaving", "estimateApr": "1.1%", "coin": "BTC", "status": "Available"},
+        {"category": "FlexibleSaving", "estimateApr": "6.3%", "coin": "SOL", "status": "Available"},
+        {"category": "FlexibleSaving", "estimateApr": "4%", "coin": "MNT", "status": "Available"}]}}
+
+    async def opps_json(url, params):
+        if "announcements" in url:
+            return sample_anns
+        return sample_earn if params.get("category") == "FlexibleSaving" else {"result": {"list": [
+            {"category": "OnChain", "estimateApr": "7.1%", "coin": "SOL", "status": "Available"}]}}
+
+    async def opps_news(known=None, force=False):
+        now = time.time()
+        return [{"title": t, "url": "https://forklog.com/news", "source": s, "published": now - h * 3600,
+                 "coins": c} for t, s, h, c in [
+            ("Биткоин обновил максимум на фоне притока в ETF", "ForkLog", 1, ["BTC"]),
+            ("Bybit запустила новый Launchpool с пулом USDT", "ForkLog", 3, []),
+            ("Solana network activity hits record as memecoins return", "Cointelegraph", 5, ["SOL"]),
+        ]]
+
+    b.opps._get_json = opps_json
+    b.opps.news = opps_news
+
     # история: портфель за 3 дня, демо-счета со сделками, журнал реальных сделок
     rnd = random.Random(7)
     now = time.time()
