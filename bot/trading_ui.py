@@ -108,7 +108,8 @@ def scalp_keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=("✅" if coins else "⬜️") + " Монеты в дело: продавать лежащие монеты в USDT",
                                   callback_data="sc:coins")],
             [InlineKeyboardButton(text="📊 Проверка на истории", callback_data="sc:bt"),
-             InlineKeyboardButton(text="🔄 Обновить", callback_data="sc:show")]]
+             InlineKeyboardButton(text="🧪 Лаборатория", callback_data="sc:lab")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="sc:show")]]
     if sc.positions:
         rows.append([InlineKeyboardButton(text="💸 Продать позиции сейчас", callback_data="sc:sell")])
     if not b.trader.state.live:
@@ -759,6 +760,11 @@ def register(b: ArbitrageBot) -> None:
         await cb.answer()
         await autopilot(chat_of(cb), cb.data == "ap:on")
 
+    @dp.message(Command("lab", "laboratory"))
+    async def cmd_lab(message: Message) -> None:
+        if await owner_only(message):
+            await b._answer(message, b.scalper.lab_text(), scalp_keyboard(b))
+
     @dp.message(Command("scalp", "five", "dip"))
     async def cmd_scalp(message: Message, command: CommandObject) -> None:
         if not await owner_only(message):
@@ -787,6 +793,8 @@ def register(b: ArbitrageBot) -> None:
             await toggle_scalp(chat_id, False)
         elif action == "bt":
             await scalp_backtest(chat_id)
+        elif action == "lab":
+            await b._send(chat_id, b.scalper.lab_text(), scalp_keyboard(b))
         elif action == "coins":
             st = b.scalper.st
             st["use_coins"] = not st["use_coins"]
