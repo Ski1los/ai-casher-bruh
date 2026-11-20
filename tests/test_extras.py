@@ -466,3 +466,30 @@ def test_webapp_extras_api(ex_env, monkeypatch):
             await client.close()
 
     asyncio.run(main())
+
+
+def test_phantom_falls_back_to_second_solana_node(monkeypatch):
+    import bot.solana as sol
+
+    calls = []
+
+    async def fake_fetch(address, url, session):
+        calls.append(url)
+        if url == "slow":
+            raise asyncio.TimeoutError()
+        return {"SOL": 2.0}
+
+    async def prices(coins):
+        return {"SOL": 100.0}
+
+    async def flow():
+        monkeypatch.setattr(sol, "fetch_wallet", fake_fetch)
+        w = PhantomWatcher(ADDRESS)
+        w.rpc_urls = ["slow", "fast"]
+        snap = await w.get(prices)
+        await w.close()
+        return w, snap
+
+    w, snap = asyncio.run(flow())
+    assert snap["total_usd"] == 200.0 and "error" not in snap
+    assert calls == ["slow", "fast"] and w.rpc_urls[0] == "fast"

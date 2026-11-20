@@ -401,6 +401,30 @@ def extract_orders(text: str) -> tuple[str, list[OrderIntent]]:
     return ORDER_LINE.sub("", text).strip(), orders[:3]
 
 
+_ENABLE = r"(включ|разреш|активир|постав\w* галоч|отмет)"
+_WITHDRAW = r"(вывод|withdraw)"
+_BAD_ADVICE = re.compile(rf"{_ENABLE}\w*[^.!?\n]{{0,40}}{_WITHDRAW}|{_WITHDRAW}[^.!?\n]{{0,30}}{_ENABLE}", re.I)
+_NEGATION = re.compile(r"\bне\s+(нужн|надо|включ|разреш|требу|добавл|став|отмеч)|без\s+(права\s+)?вывод|никогда", re.I)
+WITHDRAW_NOTE = "🔒 Право «Вывод» у ключа боту не нужно — ни для теста, ни для реальной торговли: хватает «Чтение + Спот торговля»."
+
+
+def guard_withdraw(text: str) -> str:
+    """Страховка от ошибки модели: выкидывает строки с советом включить вывод у API-ключа.
+
+    Модели иногда понимают «вывод выключен» как проблему и советуют его включить. Это опасно
+    (украденный ключ с выводом = украденные деньги), поэтому такие строки не доходят до пользователя.
+    """
+    out, dropped = [], False
+    for line in text.split("\n"):
+        if _BAD_ADVICE.search(line) and not _NEGATION.search(line):
+            dropped = True
+            continue
+        out.append(line)
+    if dropped:
+        out += ["", WITHDRAW_NOTE]
+    return "\n".join(out)
+
+
 def validate_setting(key: str, value: float) -> str | None:
     """None, если значение допустимо, иначе текст ошибки."""
     if key not in EDITABLE:
@@ -457,7 +481,8 @@ trading.max_trade_usd. Бот сам покажет предпросмотр с 
 принимай сид-фразу или приватный ключ; если пользователь их прислал, скажи срочно создать новый кошелёк и \
 перевести туда средства. Чтобы торговать монетами из Phantom, их нужно перевести на биржу (сеть Solana). \
 Ценовые алерты: /alert МОНЕТА < цена или /alert МОНЕТА +5%. Полная проверка бирж и ключей: /doctor. \
-Если в extras.api_keys ключ скоро истекает или у него включён вывод, обязательно скажи об этом.
+Если в extras.api_keys ключ скоро истекает или у него ВКЛЮЧЁН вывод (это опасно), скажи об этом. \
+Выключенный вывод — правильное состояние, его не упоминай как проблему.
 
 Автоторговля (trading.autotrade_status). Если спрашивают «почему автоторговля не работает / нет сделок», \
 отвечай по этим данным: reason и tried (почему пропущены циклы), blocked_now (ключ «только чтение», нет права \
@@ -560,7 +585,7 @@ class AIAssistant:
         }
 
     async def _run(self, messages: list[dict], max_tokens: int = 1200, allow_orders: bool = False) -> Answer:
-        raw = await self.client.chat(messages, max_tokens=max_tokens)
+        raw = guard_withdraw(await self.client.chat(messages, max_tokens=max_tokens))
         text, proposals = extract_proposals(raw)
         text, orders = extract_orders(text)  # из разборов ордера выкидываются: только по прямой просьбе
         return Answer(to_telegram_html(text) or "🤷 Пустой ответ", proposals, self.client.last_model,

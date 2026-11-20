@@ -97,3 +97,12 @@ def test_keys_help_never_asks_for_withdraw(bot_env):
     asyncio.run(send(b, "/keys"))
     text = session.sent[-1][1]
     assert "Вывод (Withdraw) НЕ включай" in text and "⬜️ Вывод" in text
+
+
+def test_setup_finds_money_stuck_in_a_coin(bot_env):
+    b, session = bot_env
+    ex = attach(b, balance=0.01)
+    ex.balance["SOL"] = 0.059  # ≈ $5.8, куплено вручную
+    asyncio.run(send(b, "/setup"))
+    text = session.sent[-1][1]
+    assert "лежит в SOL" in text and "/sell a SOL all" in text

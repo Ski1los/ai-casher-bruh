@@ -21,6 +21,8 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 DEFAULT_RPC = "https://api.mainnet-beta.solana.com"
+# Запасные бесплатные узлы без ключа: публичный узел Solana часто отвечает медленно (TimeoutError)
+FALLBACK_RPCS = ("https://solana-rpc.publicnode.com", "https://solana.drpc.org")
 CACHE_SEC = 60
 ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # base58, публичный ключ Solana
 TOKEN_PROGRAMS = (
@@ -116,7 +118,10 @@ class PhantomWatcher:
 
     def __init__(self, address: str = "", rpc_url: str | None = None) -> None:
         self.address = address.strip()
-        self.rpc_url = rpc_url or os.getenv("SOLANA_RPC_URL", "").strip() or DEFAULT_RPC
+        own = rpc_url or os.getenv("SOLANA_RPC_URL", "").strip()
+        self.rpc_url = own or DEFAULT_RPC
+        # свой узел пробуем первым, потом бесплатные запасные
+        self.rpc_urls = [self.rpc_url] + [u for u in (DEFAULT_RPC, *FALLBACK_RPCS) if u != self.rpc_url and not rpc_url]
         self.snapshot: dict | None = None
         self._lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
@@ -133,6 +138,22 @@ class PhantomWatcher:
             await self._session.close()
             self._session = None
 
+    async def _fetch_any(self) -> dict[str, float]:
+        """Первый узел, который ответил. Запомнить его, чтобы в следующий раз начать с него."""
+        last: BaseException | None = None
+        for url in list(self.rpc_urls):
+            try:
+                amounts = await fetch_wallet(self.address, url, self._session)
+            except (WalletError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                log.info("Узел Solana %s: %s", url, type(e).__name__)
+                last = e
+                continue
+            if url != self.rpc_urls[0]:
+                self.rpc_urls.remove(url)
+                self.rpc_urls.insert(0, url)
+            return amounts
+        raise last or WalletError("нет узлов Solana")
+
     async def get(self, price_fn, force: bool = False, mint_price_fn=None) -> dict | None:
         """Снимок: {address, total_usd, assets: [{coin, amount, usd}], updated_at, error?}.
 
@@ -147,7 +168,7 @@ class PhantomWatcher:
             try:
                 if self._session is None or self._session.closed:
                     self._session = aiohttp.ClientSession()
-                amounts = await fetch_wallet(self.address, self.rpc_url, self._session)
+                amounts = await self._fetch_any()
                 known = [c for c in amounts if len(c) <= 15]
                 prices = await price_fn(known) if known else {}
                 mints = [c for c in amounts if len(c) > 15]

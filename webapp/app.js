@@ -1184,14 +1184,14 @@ async function toggleScalp(input) {
 function scalpCard() {
   const t = tr(), s = t.scalp;
   if (!s) return "";
-  const st = s.stats || {}, pos = s.pos;
+  const st = s.stats || {}, positions = s.positions || (s.pos ? [s.pos] : []);
   const top = (s.top || []).filter((x) => x.net_pct > 0).slice(0, 3)
     .map((x) => `${esc(x.symbol.split("/")[0])} ${pct(x.net_pct, 1)}`).join(" · ");
   return `<div class="card" style="margin-top:10px">
     <div class="row between"><div class="b">🎯 Режим $5</div>
       <label class="switch"><input type="checkbox" data-act="scalp" ${s.on ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
     <div class="small muted" style="margin-top:6px;white-space:normal">${s.on ? esc(s.reason || "запускаюсь…") : "Покупает на откате и сразу ставит продажу на +0,6…1,3% после комиссий. Хватает $5."}</div>
-    ${pos ? `<div class="small" style="margin-top:6px">Держу <b>${esc(pos.symbol.split("/")[0])}</b> за ${money(pos.cost)} · продажа по ${price(pos.tp)}${pos.breakeven ? " (безубыток)" : ""}</div>` : ""}
+    ${positions.map((pos) => `<div class="small" style="margin-top:6px">${pos.exchange ? esc(exName(pos.exchange)) + ": " : ""}держу <b>${esc(pos.symbol.split("/")[0])}</b> за ${money(pos.cost)} · продажа по ${price(pos.tp)}${pos.breakeven ? " (безубыток)" : ""}</div>`).join("")}
     ${st.cycles ? `<div class="small" style="margin-top:6px">Сделок ${st.cycles} · в плюс ${st.wins} · <b class="${cls(st.pnl)}">${money(st.pnl, { sign: true })}</b></div>` : ""}
     ${!t.live && s.paper_usd != null ? `<div class="tiny muted" style="margin-top:4px">🧪 тестовый баланс ${money(s.paper_usd)}</div>` : ""}
     ${top ? `<div class="tiny muted" style="margin-top:4px">На истории в плюсе: ${top}</div>` : ""}

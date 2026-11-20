@@ -82,7 +82,7 @@ def test_live_cycle_with_five_dollars():
     sc, trader, ex = make(balance=5.1)
     events = run(sc.step())
     assert events and "купил SOL" in events[0]
-    pos = sc.st["pos"]
+    pos = sc.positions.get("a")
     assert ex.created[0][:2] == ("buy_cost", "SOL/USDT") and abs(ex.created[0][2] - 5.1) < 1e-6
     limit = ex.created[1]
     assert limit[0] == "limit" and limit[2] == "sell" and limit[4] > 98.42  # продажа выше покупки
@@ -93,7 +93,7 @@ def test_live_cycle_with_five_dollars():
              fee={"currency": "USDT", "cost": o["amount"] * o["price"] * 0.001})
     events = run(sc.step())
     assert events and "продал SOL" in events[0]
-    assert sc.st["pos"] is None
+    assert sc.positions.get("a") is None
     stats = sc.st["stats"]
     assert stats["cycles"] == 1 and stats["wins"] == 1 and stats["pnl"] > 0
     assert trader.state.log[-1]["pnl_usd"] > 0 and trader.state.log[-1]["source"] == "scalp"
@@ -112,11 +112,11 @@ def test_paper_mode_uses_virtual_five_dollars():
     events = run(sc.step())
     assert events and "ТЕСТ" in events[0]
     assert not ex.created  # в тесте ордера не уходят
-    assert sc.st["paper_usd"] < 0.01
+    assert sc.st["paper"]["a"] < 0.01
     ex.tickers["SOL/USDT"] = {"bid": 120.0, "ask": 120.1, "quoteVolume": 1e8}
     events = run(sc.step())
     assert "продал SOL" in events[0]
-    assert sc.st["paper_usd"] > 5.0
+    assert sc.st["paper"]["a"] > 5.0
 
 
 def test_waits_when_no_dip_and_breakeven_after_a_day():
@@ -127,11 +127,11 @@ def test_waits_when_no_dip_and_breakeven_after_a_day():
     # открытая позиция сутки без цели → продажа в безубыток
     sc2, trader2, ex2 = make(balance=5.1)
     run(sc2.step())
-    pos = sc2.st["pos"]
+    pos = sc2.positions.get("a")
     old_tp = pos["tp"]
     events = run(sc2.step(now=pos["opened_at"] + MAX_HOLD_SEC + 60))
     assert events and "безубыток" in events[0]
-    assert sc2.st["pos"]["tp"] < old_tp and sc2.st["pos"]["breakeven"]
+    assert sc2.positions.get("a")["tp"] < old_tp and sc2.positions.get("a")["breakeven"]
     assert ex2.orders["2"]["status"] == "canceled"  # старая продажа снята, новая выставлена
     assert ex2.created[-1][0] == "limit"
 
@@ -142,7 +142,7 @@ def test_no_stop_below_exchange_minimum():
     ex.tickers["SOL/USDT"] = {"bid": 90.0, "ask": 90.05, "quoteVolume": 1e8}  # -8,5%
     assert run(sc.step()) == []
     assert "продать нельзя" in sc.last_reason
-    assert sc.st["pos"] is not None
+    assert sc.positions.get("a") is not None
 
 
 def test_duplicate_copy_pauses_new_buys():
@@ -199,3 +199,30 @@ def test_coarse_amount_step_is_skipped():
     sc2, trader2, ex2 = make(balance=5.0)
     ex2.markets["SOL/USDT"]["precision"] = {"amount": 0.00001}
     assert run(sc2.step())  # мелкий шаг: $5 хватает
+
+
+def test_two_exchanges_trade_their_own_money_at_once():
+    def ex_with(balance):
+        ex = FakeTradingExchange("Ex", {"SOL/USDT": mk_market("SOL", "USDT", min_cost=5.0)},
+                                 {"SOL/USDT": {"bid": 98.40, "ask": 98.42, "quoteVolume": 1e8}}, {"USDT": balance})
+        ex.ohlcv = {"SOL/USDT": dip_candles()}
+        return ex
+
+    bybit, bingx = ex_with(5.8), ex_with(5.54)
+    env = {"BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s", "BINGX_API_KEY": "k", "BINGX_API_SECRET": "s"}
+    trader = Trader(FakeScanner({"bybit": bybit, "bingx": bingx}), Settings(exchanges=[]), env=env)
+    trader.state.live = True
+    sc = Scalper(trader)
+    sc.turn_on()
+    events = run(sc.step())
+    assert len(events) == 2 and set(sc.positions) == {"bybit", "bingx"}
+    assert bybit.created[0][0] == "buy_cost" and bingx.created[0][0] == "buy_cost"
+    assert sc.status_dict()["positions"][0]["exchange"] == "bybit"
+    assert sc.status_text().count("позиция:") == 2
+
+
+def test_old_single_position_state_is_migrated():
+    sc, trader, ex = make(balance=5.1)
+    trader.state.scalp = {"on": True, "pos": {"exchange": "a", "symbol": "SOL/USDT"}, "paper_usd": 4.0}
+    assert sc.positions == {"a": {"exchange": "a", "symbol": "SOL/USDT"}}
+    assert "pos" not in trader.state.scalp and "paper_usd" not in trader.state.scalp

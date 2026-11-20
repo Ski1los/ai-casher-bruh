@@ -710,8 +710,20 @@ class ArbitrageBot:
         keys = {}
         for name, info in self.trader.key_info.items():
             days = days_left(info)
-            keys[name] = {"days_until_expiry": round(days, 1) if days is not None else None,
-                          "withdraw_enabled": bool(info.get("withdraw")), "ip_bound": bool(info.get("ip_bound"))}
+            if days is not None:
+                expiry = f"истекает через {days:.0f} дн." + (" — скоро, нужен новый ключ" if days <= 14 else " — всё нормально")
+            elif name == "bingx":
+                expiry = "не истекает, пока бот им пользуется (BingX удаляет ключ только после 14 дней без запросов)"
+            else:
+                expiry = "биржа срок не сообщила"
+            keys[name] = {
+                "expiry": expiry,
+                # формулировки однозначные: модели неправильно понимали withdraw_enabled=false как «надо включить»
+                "withdraw_permission": ("ВКЛЮЧЁН — опасно, скажи создать ключ без вывода" if info.get("withdraw")
+                                        else "выключен — ПРАВИЛЬНО, боту вывод не нужен, ничего не советуй"),
+                "spot_trade_permission": ("есть" if info.get("spot_trade") else "НЕТ — нужно включить «Спот торговля»")
+                if "spot_trade" in info else "неизвестно",
+            }
         return {
             "phantom_wallet": phantom or {"connected": False, "how": "/phantom АДРЕС (только публичный адрес)"},
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
@@ -750,7 +762,7 @@ class ArbitrageBot:
         sc = self.scalper.status_dict()
         return {
             "mode": "live" if t.state.live else "test",
-            "scalp_mode_5usd": {k: sc[k] for k in ("on", "reason", "paper_usd", "stats", "pos", "top")},
+            "scalp_mode_5usd": {k: sc[k] for k in ("on", "reasons", "paper", "stats", "positions", "top")},
             "second_bot_copy_running": self.duplicate_running(),
             "autotrade_on": t.state.auto,
             "autotrade_paused_reason": t.state.paused_reason,
