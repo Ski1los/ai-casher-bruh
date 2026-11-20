@@ -27,13 +27,22 @@ log = logging.getLogger(__name__)
 BACKUP_FILENAME = "bot_state.json"
 BACKUP_CAPTION = "💾 Резервная копия бота (демо-счёт и настройки). Не открепляй это сообщение."
 SELF_PING_SEC = 10 * 60
-BOT_VERSION = "16"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
+BOT_VERSION = "17"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
 
 
 def version_text() -> str:
     """«v9 (adc7bd5)»: номер версии и коммит, который Render развернул (RENDER_GIT_COMMIT)."""
     commit = os.getenv("RENDER_GIT_COMMIT", "").strip()[:7]
     return f"v{BOT_VERSION}" + (f" ({commit})" if commit else "")
+
+
+def instance_text() -> str:
+    """Где работает эта копия бота: имя сервиса Render и адрес (чтобы найти лишнюю копию)."""
+    name = os.getenv("RENDER_SERVICE_NAME", "").strip()
+    host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    if name or host:
+        return "Render: " + " · ".join(x for x in (name, host) if x)
+    return "не Render (другой хостинг или компьютер)"
 
 
 # ---------------------------------------------------------------------------
