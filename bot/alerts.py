@@ -16,7 +16,6 @@ from dataclasses import asdict, dataclass
 log = logging.getLogger(__name__)
 
 MAX_ALERTS = 30  # на одного пользователя
-CHECK_EVERY_SEC = 30
 
 BELOW = {"<", "<=", "ниже", "меньше", "below", "under", "до"}
 ABOVE = {">", ">=", "выше", "больше", "above", "over"}
@@ -156,6 +155,17 @@ class AlertBook:
                 self.items.append(PriceAlert(**{k: d[k] for k in PriceAlert.__dataclass_fields__ if k in d}))
             except (TypeError, KeyError):
                 continue
+
+    def move_from_removed(self, exchanges: list[str]) -> int:
+        """Алерты на биржах, которых больше нет в боте, переносит на первую оставшуюся."""
+        if not exchanges:
+            return 0
+        moved = 0
+        for a in self.items:
+            if a.exchange not in exchanges:
+                a.exchange = exchanges[0]
+                moved += 1
+        return moved
 
     async def check(self, price_of) -> list[tuple[PriceAlert, float]]:
         """price_of(exchange, coin) → цена. Возвращает сработавшие алерты (и удаляет их)."""

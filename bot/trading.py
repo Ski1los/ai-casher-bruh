@@ -32,15 +32,8 @@ from .triangular import TriOpportunity, path_min_amount, path_min_order_ok, simu
 
 log = logging.getLogger(__name__)
 
-NEEDS_PASSWORD = {"okx", "kucoin", "bitget"}  # этим биржам кроме ключа нужен passphrase
 KEY_PAGES = {
     "bybit": "https://www.bybit.com/app/user/api-management",
-    "okx": "https://www.okx.com/account/my-api",
-    "gate": "https://www.gate.io/myaccount/apikeys",
-    "mexc": "https://www.mexc.com/user/openapi",
-    "kucoin": "https://www.kucoin.com/account/api",
-    "htx": "https://www.htx.com/apikey/",
-    "bitget": "https://www.bitget.com/account/newapi",
     "bingx": "https://bingx.com/en/account/api",
 }
 STABLES = {"USDT", "USDC", "FDUSD", "DAI", "TUSD", "USDD", "PYUSD"}
@@ -181,7 +174,7 @@ def days_left(info: dict, now: float | None = None) -> float | None:
 
 
 def credentials_from_env(names, env=None) -> dict[str, dict]:
-    """Ключи вида BYBIT_API_KEY / BYBIT_API_SECRET / OKX_API_PASSWORD."""
+    """Ключи вида BYBIT_API_KEY / BYBIT_API_SECRET."""
     env = os.environ if env is None else env
     out: dict[str, dict] = {}
     for name in names:
@@ -190,11 +183,7 @@ def credentials_from_env(names, env=None) -> dict[str, dict]:
         secret = (env.get(f"{up}_API_SECRET") or "").strip()
         if not key or not secret:
             continue
-        cred = {"apiKey": key, "secret": secret}
-        password = (env.get(f"{up}_API_PASSWORD") or env.get(f"{up}_API_PASSPHRASE") or "").strip()
-        if password:
-            cred["password"] = password
-        out[name] = cred
+        out[name] = {"apiKey": key, "secret": secret}
     return out
 
 
@@ -363,11 +352,6 @@ class Trader:
             options.setdefault("fetchOrder", {})["acknowledged"] = True
 
     @property
-    def connected(self) -> list[str]:
-        """Биржи, для которых заданы ключи."""
-        return list(self.creds)
-
-    @property
     def working(self) -> list[str]:
         """Биржи с проверенными рабочими ключами (или ещё не проверенными)."""
         return [n for n in self.creds if self.key_status.get(n, "ok") == "ok"]
@@ -383,8 +367,6 @@ class Trader:
 
     async def check_keys(self) -> dict[str, str]:
         async def one(name: str) -> tuple[str, str]:
-            if name in NEEDS_PASSWORD and "password" not in self.creds[name]:
-                return name, f"нужен ещё {name.upper()}_API_PASSWORD (passphrase, который ты придумал при создании ключа)"
             ex = self.scanner.exchanges[name]
             try:
                 await self.scanner._ensure_markets(name, ex)
@@ -445,9 +427,9 @@ class Trader:
     def resolve_exchange(self, raw: str) -> str:
         raw = raw.strip().lower()
         aliases = {self.scanner.display_name(n).lower(): n for n in self.scanner.exchanges}
-        aliases.update({"байбит": "bybit", "окх": "okx", "гейт": "gate", "мекс": "mexc", "мексик": "mexc",
-                        "кукоин": "kucoin", "хтх": "htx", "битгет": "bitget", "gateio": "gate", "huobi": "htx",
-                        "бингх": "bingx", "бингикс": "bingx", "бинг": "bingx", "bing x": "bingx", "бинкс": "bingx"})
+        aliases.update({"байбит": "bybit", "буббит": "bybit", "bybit.com": "bybit",
+                        "бингх": "bingx", "бингикс": "bingx", "бинг": "bingx", "bing x": "bingx", "бинкс": "bingx",
+                        "бингекс": "bingx", "bingx.com": "bingx"})
         name = aliases.get(raw, raw)
         if name not in self.scanner.exchanges:
             raise TradeError(f"не знаю биржу «{raw}». Есть: {', '.join(self.scanner.exchanges)}")

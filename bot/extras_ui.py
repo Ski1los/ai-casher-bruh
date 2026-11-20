@@ -60,8 +60,7 @@ async def prices_everywhere(b: ArbitrageBot, coin: str) -> list[tuple[str, dict]
 async def public_prices(b: ArbitrageBot, coins: list[str]) -> dict[str, float]:
     """Цены в $ для списка монет: с первой биржи, где монета торгуется (для кошелька Phantom)."""
     out = {c: 1.0 for c in coins if c in ("USDT", "USDC")}
-    order = [n for n in ("bybit", "bingx", "okx") if n in b.scanner.exchanges] + \
-            [n for n in b.scanner.exchanges if n not in ("bybit", "bingx", "okx")]
+    order = list(b.scanner.exchanges)
     alias = {"MSOL": None, "JITOSOL": None}  # ликвид-стейкинг: на спотовых биржах обычно нет
 
     async def one(coin: str) -> None:

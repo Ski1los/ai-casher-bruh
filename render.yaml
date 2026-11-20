@@ -26,8 +26,8 @@ services:
       - key: AI_API_KEY
         sync: false
       # Торговля (необязательно): ключ биржи ТОЛЬКО со спотовой торговлей, БЕЗ права вывода.
-      # Можно оставить пустым и добавить позже в Environment. Другие биржи: OKX_API_KEY,
-      # OKX_API_SECRET, OKX_API_PASSWORD и т.д. (см. /keys в боте). В репозиторий ключи НЕ пишем.
+      # Можно оставить пустым и добавить позже в Environment. Бот работает только с Bybit и BingX
+      # (см. /keys в боте). В репозиторий ключи НЕ пишем.
       - key: BYBIT_API_KEY
         sync: false
       - key: BYBIT_API_SECRET

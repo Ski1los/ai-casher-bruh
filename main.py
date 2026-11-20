@@ -7,6 +7,10 @@ import asyncio
 import logging
 import sys
 
+from bot.memory import tune_malloc
+
+tune_malloc()  # до запуска потоков: меньше «арен» malloc, меньше памяти на Render
+
 from aiogram.exceptions import TelegramUnauthorizedError
 
 from bot.config import allowed_user_ids, load_settings, telegram_token
@@ -22,8 +26,7 @@ def main() -> None:
     if not token:
         print(
             "Не найден TELEGRAM_BOT_TOKEN.\n"
-            "1) Создай бота у @BotFather в Telegram и скопируй токен\n"
-            "2) Скопируй .env.example в .env и вставь токен в строку TELEGRAM_BOT_TOKEN=\n"
+            "Render → сервис → Environment → TELEGRAM_BOT_TOKEN = токен от @BotFather.\n"
             "Подробнее в README.md"
         )
         sys.exit(1)

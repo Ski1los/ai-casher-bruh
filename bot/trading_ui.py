@@ -16,7 +16,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .ai import OrderIntent
-from .trading import (AUTO_MIN_FREE_USD, KEY_PAGES, NEEDS_PASSWORD, OrderPlan, TradeError, fmt_amount, human_error,
+from .trading import (AUTO_MIN_FREE_USD, KEY_PAGES, OrderPlan, TradeError, fmt_amount, human_error,
                       key_trade_problem)
 from .triangular import TriOpportunity
 
@@ -39,11 +39,10 @@ KEYS_HELP = """\
    • <b>Bybit</b>: ключ без IP живёт ~3 месяца. Бот покажет дату и напомнит за 2 недели (/doctor).
    • <b>BingX</b>: ключ без IP удаляется, если им 14 дней не пользовались. Бот обращается к бирже \
 каждые 15 минут, так что, пока бот работает, ключ живой.
-5. Скопируй ключ и секрет. У Bybit и BingX их два, у OKX, KuCoin и Bitget есть ещё <b>passphrase</b>.
+5. Скопируй ключ и секрет.
 6. Render → сервис <b>ai-casher-bot</b> → <b>Environment</b> → <b>Add Environment Variable</b>:
    <code>BYBIT_API_KEY</code> = ключ, <code>BYBIT_API_SECRET</code> = секрет
    <code>BINGX_API_KEY</code> = ключ, <code>BINGX_API_SECRET</code> = секрет
-   (для OKX ещё <code>OKX_API_PASSWORD</code> = passphrase)
    → <b>Save Changes</b>. Бот перезапустится примерно за минуту.
 7. Здесь отправь /keys (или /doctor для полной проверки): бот проверит ключ, права и покажет баланс.
 8. Деньги для торговли должны лежать на <b>торговом</b> счёте: у Bybit это Unified Trading, у BingX Spot. \
@@ -162,12 +161,12 @@ async def keys_text(b: ArbitrageBot) -> str:
         if problem:
             icon = f"⚠️ подключается, но торговать не сможет: {problem}"
         lines.append(f"{html.escape(b.scanner.display_name(name))}: {html.escape(icon)}")
-    missing = [n for n in NEEDS_PASSWORD if n in b.trader.creds and "password" not in b.trader.creds[n]]
-    if missing:
-        lines.append("Не хватает passphrase: " + ", ".join(f"<code>{n.upper()}_API_PASSWORD</code>" for n in missing))
     if any(st == "ok" for st in status.values()):
         lines.append("\nБалансы: /balance · панель торговли: /trade")
-    lines.append("\nПодключить ещё биржу: ключи вида <code>MEXC_API_KEY</code> и <code>MEXC_API_SECRET</code> в Render → Environment.")
+    for n in b.scanner.exchanges:
+        if n not in b.trader.creds:
+            lines.append(f"\n{html.escape(b.scanner.display_name(n))} не подключена: добавь <code>{n.upper()}_API_KEY</code> "
+                         f"и <code>{n.upper()}_API_SECRET</code> в Render → Environment.")
     return "\n".join(lines)
 
 

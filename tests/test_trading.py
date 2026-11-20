@@ -90,10 +90,9 @@ def test_parse_amount_and_credentials():
     with pytest.raises(TradeError):
         parse_amount("all", None)
 
-    env = {"BYBIT_API_KEY": " k ", "BYBIT_API_SECRET": "s", "OKX_API_KEY": "k2", "OKX_API_SECRET": "s2",
-           "OKX_API_PASSPHRASE": "p", "GATE_API_KEY": "only-key"}
-    creds = credentials_from_env(["bybit", "okx", "gate"], env)
-    assert creds == {"bybit": {"apiKey": "k", "secret": "s"}, "okx": {"apiKey": "k2", "secret": "s2", "password": "p"}}
+    env = {"BYBIT_API_KEY": " k ", "BYBIT_API_SECRET": "s", "BINGX_API_KEY": "only-key"}
+    creds = credentials_from_env(["bybit", "bingx"], env)
+    assert creds == {"bybit": {"apiKey": "k", "secret": "s"}}  # без секрета ключ не считается
 
 
 def test_human_errors_are_specific():
@@ -145,10 +144,6 @@ def test_keys_check_and_bad_key():
     no_keys, _ = make_trader(env={})
     with pytest.raises(TradeError, match="/keys"):
         run(no_keys.plan_market("a", "buy", "BTC", "5"))
-    # OKX без passphrase: понятная подсказка без запроса к бирже
-    okx = Trader(FakeScanner({"okx": tri_exchange()}), Settings(exchanges=[]),
-                 env={"OKX_API_KEY": "k", "OKX_API_SECRET": "s"})
-    assert "OKX_API_PASSWORD" in run(okx.check_keys())["okx"]
 
 
 def test_test_mode_sends_nothing():

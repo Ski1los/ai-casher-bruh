@@ -36,6 +36,7 @@ from .cloud import TelegramBackup, cloud_port, public_url, self_ping_loop, start
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
+from .memory import free_memory, memory_line
 from .dex import DexClient
 from .report import ScanStats, seconds_until, split_message
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
@@ -55,6 +56,7 @@ EXPLAIN_KEEP = 30  # для скольких последних сообщени
 MAX_IN_MESSAGE = 10  # сколько связок показывать в одном сообщении
 MAX_TRI_IN_MESSAGE = 5  # сколько треугольников показывать
 BACKUP_EVERY_SEC = 30 * 60  # как часто сохранять статистику демо в Telegram
+CLEANUP_EVERY_SEC = 10 * 60  # как часто убирать устаревшие записи и возвращать память системе
 KEYS_WATCH_SEC = 12 * 3600  # как часто перепроверять ключи бирж (права, срок действия)
 AUTO_WARN_SEC = 6 * 3600  # об одной и той же проблеме автоторговли напоминаем не чаще раза в 6 часов
 AUTO_FIRST_REPORT_SEC = 3600  # первая сводка автоторговли через час после включения
@@ -108,10 +110,11 @@ HELP_TEXT = """\
 
 <b>Полезное</b> ✨
 /doctor — 🩺 проверить всё: биржи, ключи, сроки ключей, приложение, ИИ
-<code>/price TON</code> — цена монеты на всех биржах сразу и разница между ними
+<code>/price TON</code> — цена монеты на Bybit и BingX и разница между ними
 <code>/alert TON &lt; 5</code> — сообщить, когда цена дойдёт до уровня (или <code>/alert SOL +5%</code>)
 /alerts — мои алерты (удаление кнопками)
 <code>/phantom АДРЕС</code> — 👻 баланс кошелька Phantom (только просмотр, сид-фразу не нужно!)
+/clean — 🧹 освободить память бота (кэши), показать, сколько занято
 
 <b>Мемкоины и брокер</b> 🦎
 <code>/dex BONK</code> или <code>/dex АДРЕС</code> — токен с DexScreener: цена, ликвидность, риски, ссылки GMGN/Axiom
@@ -379,6 +382,7 @@ class ArbitrageBot:
         self._key_warned: dict[str, float] = {}  # о чём уже предупреждали (чтобы не спамить)
         self._auto_warned: dict[str, float] = {}  # проблемы автоторговли, о которых уже написали
         self._auto_reports = 0  # сколько сводок автоторговли отправлено с момента включения
+        self._last_cleanup = time.time()
         self.settings_file = SETTINGS_FILE
         if self.settings_file.exists():
             try:
@@ -441,6 +445,8 @@ class ArbitrageBot:
                 setattr(self.settings, EDITABLE[key][0], value)
                 self._changed[key] = value
         for ex, fee in (raw.get("fees") or {}).items():
+            if self.scanner.exchanges and ex not in self.scanner.exchanges:
+                continue  # биржу убрали из бота: её комиссия больше не нужна
             self._fee_changes[ex] = fee
             if fee is None:
                 self.settings.fee_overrides.pop(ex, None)
@@ -449,6 +455,7 @@ class ArbitrageBot:
         self.scanner.apply_fee_overrides()
         if "alerts" in raw:
             self.alerts.restore(raw.get("alerts"))
+            self.alerts.move_from_removed(list(self.scanner.exchanges))
         if raw.get("phantom") is not None:
             try:
                 self.phantom.set_address(raw.get("phantom") or "")
@@ -857,6 +864,22 @@ class ArbitrageBot:
             for i, part in enumerate(parts[1:], 2):
                 await message.answer(part, reply_markup=kb if i == len(parts) else None)
 
+        @dp.message(Command("clean", "memory", "gc"))
+        async def cmd_clean(message: Message) -> None:
+            if not self._allowed(message):
+                return
+            r = self.cleanup(everything=True)
+            freed = r["before"] - r["after"]
+            await message.answer(
+                "🧹 <b>Память почищена</b>\n"
+                f"Было {r['before']:.0f} МБ, стало {r['after']:.0f} МБ"
+                + (f" (освобождено {freed:.0f} МБ)" if freed >= 1 else "") + "\n"
+                f"Сброшено кэшей и устаревших записей: {r['removed']}\n"
+                f"Сейчас: {memory_line()} бесплатного Render.\n\n"
+                "Настройки, алерты, демо и журнал сделок не тронуты. Бот и сам убирается каждые 10 минут.\n"
+                "Почти всю память (~230 МБ) занимают сами библиотеки (Telegram, биржи), это нормально."
+            )
+
         @dp.message(Command("status"))
         async def cmd_status(message: Message) -> None:
             if not self._allowed(message):
@@ -1014,7 +1037,7 @@ class ArbitrageBot:
                 return
             args = (command.args or "").lower().split()
             names = ", ".join(f"<code>{n}</code>" for n in self.scanner.exchanges)
-            # можно писать и id ccxt (gate), и название биржи (Gate.io)
+            # можно писать и id ccxt (bingx), и название биржи (BingX)
             aliases = {self.scanner.display_name(n).lower(): n for n in self.scanner.exchanges}
             if args:
                 args[0] = aliases.get(args[0], args[0])
@@ -1255,9 +1278,41 @@ class ArbitrageBot:
             kb = self._signal_markup(fresh_cross, fresh_tri, trade_buttons=chat_id == self.owner_id)
             await self._send(chat_id, text, kb)
 
+    def cleanup(self, everything: bool = False) -> dict:
+        """Уборка памяти: устаревшие записи и кэши, затем сборка мусора.
+
+        Периодически (everything=False) убирает только то, что точно больше не нужно.
+        /clean (everything=True) сбрасывает и все кэши: они сами наполнятся при следующем запросе.
+        Данные (настройки, алерты, демо, журнал сделок) не трогает.
+        """
+        now = time.time()
+        keep = max(self.settings.alert_cooldown_min * 60, 3600)
+        removed = 0
+        for k in [k for k, (at, _) in self.sent_alerts.items() if now - at > keep]:
+            del self.sent_alerts[k]
+            removed += 1
+        for d in (self._key_warned, self._auto_warned):
+            for k in [k for k, at in d.items() if isinstance(at, (int, float)) and now - at > 7 * 86400]:
+                del d[k]
+                removed += 1
+        removed += self.webapp.trim_caches(everything)
+        if everything:
+            removed += self.dex.clear_cache()
+            removed += len(self._explain_items)
+            self._explain_items.clear()
+        before, after = free_memory()
+        self._last_cleanup = now
+        return {"removed": removed, "before": before, "after": after}
+
     async def _auto_loop(self) -> None:
         await asyncio.sleep(3)
         while True:
+            if time.time() - self._last_cleanup > CLEANUP_EVERY_SEC:
+                try:
+                    r = self.cleanup()
+                    log.info("Уборка памяти: %.0f → %.0f МБ, убрано записей: %d", r["before"], r["after"], r["removed"])
+                except Exception:
+                    log.exception("Ошибка уборки памяти")
             if self.subscribers.chats or self.demo.active or self.trader.state.auto:
                 try:
                     result = await self._scan()
@@ -1367,7 +1422,8 @@ class ArbitrageBot:
                     BotCommand(command="stop", description="🛑 Остановить торговлю"),
                     BotCommand(command="ai", description="🧠 ИИ: разбор и вопросы"),
                     BotCommand(command="doctor", description="🩺 Проверить всё"),
-                    BotCommand(command="price", description="💲 Цена монеты на всех биржах"),
+                    BotCommand(command="clean", description="🧹 Освободить память"),
+                    BotCommand(command="price", description="💲 Цена на Bybit и BingX"),
                     BotCommand(command="alert", description="🔔 Ценовой алерт"),
                     BotCommand(command="alerts", description="Мои алерты"),
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
@@ -1415,6 +1471,8 @@ class ArbitrageBot:
             await self.scanner.close()
             await self.ai.client.close()
             await self.phantom.close()
+            await self.dex.close()
+            await self.tinvest.close()
             await self.dex.close()
             await self.tinvest.close()
             await self.bot.session.close()

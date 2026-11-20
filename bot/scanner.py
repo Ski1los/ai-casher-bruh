@@ -33,11 +33,6 @@ MARKETS_RELOAD_SEC = 3600  # раз в час обновляем список п
 # по умолчанию он отдаёт тикеры фьючерсов, и спотовые цены просто не попадали бы в поиск.
 SPOT_ONLY_OPTIONS: dict[str, dict] = {
     "bybit": {"fetchMarkets": {"types": ["spot"]}},
-    "okx": {"fetchMarkets": {"types": ["spot"]}},
-    "gate": {"fetchMarkets": {"types": ["spot"]}},
-    "kucoin": {"fetchMarkets": {"types": ["spot"]}},
-    "bitget": {"fetchMarkets": {"types": ["spot"]}},
-    "htx": {"fetchMarkets": {"types": {"spot": True, "linear": False, "inverse": False}}},
 }
 
 
@@ -48,8 +43,8 @@ def make_exchange(name: str):
         return None
     options = {"defaultType": "spot", **SPOT_ONLY_OPTIONS.get(name, {})}
     ex = cls({"enableRateLimit": True, "timeout": 20_000, "options": options})
-    # MEXC и BingX игнорируют опцию типов и всегда грузят ещё и фьючерсы: отключаем напрямую
-    if name in ("mexc", "bingx") and hasattr(ex, "fetch_spot_markets"):
+    # BingX игнорирует опцию типов и всегда грузит ещё и фьючерсы: отключаем напрямую
+    if name == "bingx" and hasattr(ex, "fetch_spot_markets"):
         spot = ex.fetch_spot_markets
         ex.fetch_markets = lambda params=None: spot(params or {})
     # Запасной домен API, если основной не пускает сервер (например BYBIT_HOSTNAME=bytick.com)
@@ -114,7 +109,7 @@ class ScanResult:
 class NearMiss:
     net_percent: float  # после торговых комиссий
     gross_percent: float  # до комиссий
-    text: str  # «PEPE/USDT bybit→okx» или «USDT → A → B → USDT на okx»
+    text: str  # «PEPE/USDT bybit→bingx» или «USDT → A → B → USDT на bybit»
 
 
 # ---------------------------------------------------------------------------

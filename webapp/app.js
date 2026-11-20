@@ -1068,7 +1068,7 @@ async function delAlert(id) {
 }
 
 function pricesSheet() {
-  Sheet.open("Цена на всех биржах", `
+  Sheet.open("Цена на Bybit и BingX", `
     <div class="card">
       <div class="row" style="gap:8px"><input id="priceCoin" class="input grow" placeholder="TON" autocomplete="off" autocapitalize="characters" value="${esc(store.get("priceCoin", "TON"))}"><button class="btn primary" data-act="price-go">Найти</button></div>
       <div class="chips" style="margin-top:10px">${["BTC", "ETH", "SOL", "TON", "XRP", "DOGE"].map((x) => `<button class="chip" data-act="price-coin" data-v="${x}">${x}</button>`).join("")}</div>
@@ -1104,7 +1104,7 @@ function keysHelp() {
       <li>На <b>сайте</b> биржи (в браузере, «версия для ПК»): <b>Профиль → API → Создать ключ</b> (системный).</li>
       <li>Права: <b>чтение + спотовая торговля</b>. <b>Вывод (Withdraw) не включай</b>: тогда деньги нельзя вывести даже при утечке ключа.</li>
       <li>IP-ограничение не ставь. Ключ Bybit без IP живёт ~3 месяца (бот напомнит), ключ BingX живёт, пока бот им пользуется.</li>
-      <li>Render → сервис <b>ai-casher-bot</b> → <b>Environment</b>: <b>BYBIT_API_KEY</b> и <b>BYBIT_API_SECRET</b>, <b>BINGX_API_KEY</b> и <b>BINGX_API_SECRET</b> (для OKX ещё <b>OKX_API_PASSWORD</b>) → <b>Save</b>.</li>
+      <li>Render → сервис <b>ai-casher-bot</b> → <b>Environment</b>: <b>BYBIT_API_KEY</b> и <b>BYBIT_API_SECRET</b>, <b>BINGX_API_KEY</b> и <b>BINGX_API_SECRET</b> → <b>Save</b>.</li>
       <li>Через минуту бот перезапустится, и здесь появится твой баланс.</li>
     </ol>
     <div class="banner" style="margin-top:12px">Ключи никогда не присылай в чат. Только в настройки Render.</div>

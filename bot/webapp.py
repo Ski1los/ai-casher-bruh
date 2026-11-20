@@ -503,6 +503,19 @@ class WebApp:
             self._market_cache.pop(next(iter(self._market_cache)))
         return data
 
+    def trim_caches(self, everything: bool = False) -> int:
+        """Убирает устаревшие (или все) кэши графиков и списков пар. Возвращает, сколько записей убрано."""
+        now = time.time()
+        n = 0
+        for cache, ttl in ((self._market_cache, MARKET_CACHE_SEC), (self._tickers_cache, TICKERS_CACHE_SEC)):
+            for k in [k for k, (at, _) in cache.items() if everything or now - at > ttl]:
+                del cache[k]
+                n += 1
+        if everything and self._doctor_cache is not None:
+            self._doctor_cache = None
+            n += 1
+        return n
+
     async def symbols(self, request: web.Request) -> dict:
         name = self._exchange(request.query.get("ex"))
         cached = self._tickers_cache.get(name)
