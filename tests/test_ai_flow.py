@@ -163,7 +163,7 @@ def test_fee_override_and_settings_survive_restart(bot_env, tmp_path):
         assert "Свои комиссии" in session.sent[-1][1]
 
         saved = json.loads((tmp_path / "settings.json").read_text())
-        assert saved == {"values": {"amount": 250.0}, "fees": {"a": 0.0002}, "alerts": [], "phantom": ""}
+        assert saved == {"values": {"amount": 250.0}, "fees": {"a": 0.0002}, "alerts": [], "phantom": "", "radar": []}
         assert b._state()["settings"] == saved  # и в бэкапе Telegram
 
         # «перезапуск»: новый бот с настройками по умолчанию подхватывает сохранённое

@@ -133,10 +133,11 @@ class PhantomWatcher:
             await self._session.close()
             self._session = None
 
-    async def get(self, price_fn, force: bool = False) -> dict | None:
+    async def get(self, price_fn, force: bool = False, mint_price_fn=None) -> dict | None:
         """Снимок: {address, total_usd, assets: [{coin, amount, usd}], updated_at, error?}.
 
-        price_fn(coins) → {тикер: цена $} (берём с биржи)."""
+        price_fn(coins) → {тикер: цена $} (берём с биржи).
+        mint_price_fn(mints) → {mint: (тикер, цена $)} для мемкоинов, которых нет на биржах (DexScreener)."""
         if not self.address:
             return None
         async with self._lock:
@@ -149,10 +150,20 @@ class PhantomWatcher:
                 amounts = await fetch_wallet(self.address, self.rpc_url, self._session)
                 known = [c for c in amounts if len(c) <= 15]
                 prices = await price_fn(known) if known else {}
+                mints = [c for c in amounts if len(c) > 15]
+                dex_prices: dict = {}
+                if mints and mint_price_fn is not None:
+                    try:
+                        dex_prices = await mint_price_fn(mints[:60])
+                    except Exception as e:  # без цен мемкоинов кошелёк всё равно показываем
+                        log.info("Цены токенов Phantom: %s", e)
                 assets = []
                 for coin, amount in amounts.items():
                     price = prices.get(coin)
-                    assets.append({"coin": coin if len(coin) <= 15 else short(coin), "mint": coin if len(coin) > 15 else None,
+                    name = coin if len(coin) <= 15 else short(coin)
+                    if coin in dex_prices:
+                        name, price = dex_prices[coin][0][:15], dex_prices[coin][1]
+                    assets.append({"coin": name, "mint": coin if len(coin) > 15 else None,
                                    "amount": amount, "usd": amount * price if price else None})
                 assets.sort(key=lambda a: -(a["usd"] or 0))
                 self.snapshot = {"address": self.address, "assets": assets, "updated_at": time.time(),

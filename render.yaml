@@ -40,6 +40,12 @@ services:
       # Можно не заполнять, а прислать боту командой /phantom АДРЕС.
       - key: PHANTOM_ADDRESS
         sync: false
+      # Т-Инвестиции: токен T-Invest API с доступом «Только чтение» (бот только показывает портфель)
+      - key: TINVEST_TOKEN
+        sync: false
+      # Сводка автоторговли в чат раз в N часов (0 = не присылать)
+      - key: AUTO_REPORT_HOURS
+        value: "6"
       # Лимиты торговли (можно менять в боте: /set max_trade 20)
       - key: MAX_TRADE_USD
         value: "10"

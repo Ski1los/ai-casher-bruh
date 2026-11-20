@@ -16,7 +16,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .ai import OrderIntent
-from .trading import KEY_PAGES, NEEDS_PASSWORD, OrderPlan, TradeError, fmt_amount, human_error
+from .trading import (AUTO_MIN_FREE_USD, KEY_PAGES, NEEDS_PASSWORD, OrderPlan, TradeError, fmt_amount, human_error,
+                      key_trade_problem)
 from .triangular import TriOpportunity
 
 if TYPE_CHECKING:
@@ -70,6 +71,7 @@ def panel_keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
                               callback_data="tr:auto")],
         [InlineKeyboardButton(text="🧪 Вернуть тестовый режим" if st.live else "🔴 Включить реальный режим",
                               callback_data="tr:live")],
+        [InlineKeyboardButton(text="🔍 Почему нет сделок", callback_data="tr:why")],
         [InlineKeyboardButton(text="📜 Сделки", callback_data="tr:log"),
          InlineKeyboardButton(text="🔑 Проверить ключи", callback_data="tr:keys")],
         [InlineKeyboardButton(text="🛑 СТОП: всё остановить", callback_data="tr:stop")],
@@ -150,8 +152,15 @@ async def keys_text(b: ArbitrageBot) -> str:
         return KEYS_HELP.format(links=links)
     status = await b.trader.check_keys()
     lines = ["🔑 <b>Проверка ключей</b>"]
+    try:
+        await b.trader.inspect_keys()
+    except Exception:
+        pass
     for name, st in status.items():
         icon = "✅ работает" if st == "ok" else f"❌ {st}"
+        problem = key_trade_problem(name, b.trader.key_info.get(name)) if st == "ok" else None
+        if problem:
+            icon = f"⚠️ подключается, но торговать не сможет: {problem}"
         lines.append(f"{html.escape(b.scanner.display_name(name))}: {html.escape(icon)}")
     missing = [n for n in NEEDS_PASSWORD if n in b.trader.creds and "password" not in b.trader.creds[n]]
     if missing:
@@ -160,6 +169,30 @@ async def keys_text(b: ArbitrageBot) -> str:
         lines.append("\nБалансы: /balance · панель торговли: /trade")
     lines.append("\nПодключить ещё биржу: ключи вида <code>MEXC_API_KEY</code> и <code>MEXC_API_SECRET</code> в Render → Environment.")
     return "\n".join(lines)
+
+
+async def preflight(b: ArbitrageBot) -> list[str]:
+    """Что помешает автоторговле, ещё до первой сделки: права ключей и деньги на торговом счёте."""
+    t = b.trader
+    out: list[str] = []
+    try:
+        await t.inspect_keys()
+    except Exception:
+        pass
+    for name in t.working:
+        title = b.scanner.display_name(name)
+        problem = key_trade_problem(name, t.key_info.get(name))
+        if problem:
+            out.append(f"{title}: {problem}" + ("" if t.state.live else " (в тесте не мешает, в реальном режиме ордера не пройдут)"))
+        if t.state.live:
+            try:
+                free = await t.free(name, b.settings.quote)
+            except Exception:
+                continue
+            if free < AUTO_MIN_FREE_USD:
+                out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}. Биржи не принимают ордера меньше "
+                           f"~$1–5 на шаг, циклы будут пропускаться. Пополни до $10–20 или включи /test")
+    return out
 
 
 def register(b: ArbitrageBot) -> None:
@@ -322,23 +355,37 @@ def register(b: ArbitrageBot) -> None:
         if on and not b.settings.triangular_enabled:
             await b._send(chat_id, "Треугольный арбитраж выключен (TRIANGULAR=0), автоторговать нечем.")
             return
+        was_on = st.auto
         st.auto = on
         if on:
             st.paused_reason = None
+            if not was_on:
+                b.trader.reset_auto_stats()
+                b._auto_reports = 0
+                b._auto_warned.clear()
         await after_change()
         if on:
             mode = ("🔴 РЕАЛЬНО, с настоящими деньгами" if st.live
                     else "🧪 в ТЕСТЕ: буду присылать, что исполнил бы, ордера не отправляются")
+            warnings = await preflight(b)
             await b._send(
                 chat_id,
                 f"⚙️ Автоторговля включена, {mode}.\n"
-                f"Беру треугольники на биржах с ключами ({', '.join(b.trader.working)}), если прибыль по стакану "
+                f"Беру треугольники на биржах с ключами ({', '.join(b.trader.working)}), если прибыль после комиссий "
                 f"≥ {b.settings.auto_min_profit_percent:g}% (<code>/set auto_min</code>), до ${b.settings.max_trade_usd:g} за цикл. "
                 f"Перед сделкой стаканы запрашиваются заново. Скан каждые {b.settings.scan_interval_sec:g} с.\n"
-                "Выключить: /autotrade off · остановить всё: /stop",
+                "Пропуски не сыплются в чат: что происходит и почему, смотри в /why, "
+                f"а сводка придёт через час.\n"
+                + ("".join(f"\n⚠️ {html.escape(w)}" for w in warnings) + ("\n" if warnings else ""))
+                + "Выключить: /autotrade off · остановить всё: /stop",
             )
         else:
             await b._send(chat_id, "⏸ Автоторговля выключена.")
+
+    @dp.message(Command("why", "autostatus"))
+    async def cmd_why(message: Message) -> None:
+        if await owner_only(message):
+            await b._answer(message, b.trader.auto_status_text())
 
     @dp.message(Command("autotrade"))
     async def cmd_autotrade(message: Message, command: CommandObject) -> None:
@@ -438,8 +485,10 @@ def register(b: ArbitrageBot) -> None:
         await after_change()
         await cb.answer("Реальный режим включён")
         await drop_buttons(cb)
+        warnings = await preflight(b)
         await b._send(chat_of(cb), "🔴 <b>Реальный режим включён.</b> Ордера после подтверждения уходят на биржу.\n"
-                                   "Вернуть тест: /test · остановить всё: /stop")
+                                   + "".join(f"⚠️ {html.escape(w)}\n" for w in warnings)
+                                   + "Вернуть тест: /test · остановить всё: /stop")
 
     @dp.callback_query(F.data.startswith("tr:"))
     async def cb_panel(cb: CallbackQuery) -> None:
@@ -467,6 +516,8 @@ def register(b: ArbitrageBot) -> None:
                                                            loss=s.daily_loss_usd), live_keyboard())
         elif action == "log":
             await b._send(chat_id, b.trader.log_text())
+        elif action == "why":
+            await b._send(chat_id, b.trader.auto_status_text())
         elif action == "keys":
             await b._send(chat_id, await keys_text(b))
         elif action == "stop":

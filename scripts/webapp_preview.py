@@ -116,9 +116,15 @@ def build():
     b.scanner.exchanges["bingx"].funding = {"USDT": 12.5}  # деньги «не на том счёте» — /doctor подскажет
     b.scanner.exchanges["bingx"].options = {"accountsByType": {"funding": "fund", "spot": "spot"}}
 
+    blocked = os.getenv("PREVIEW_BLOCKED") == "1"  # сценарий «ключ только чтение и $1 на счёте»
+    if blocked:
+        b.scanner.exchanges["bybit"].balance = {"USDT": 1.14}
+        b.scanner.exchanges["bingx"].balance = {"USDT": 0.07}
+        b.trader.state.live = True
+
     async def bybit_key_info(params=None):  # как отвечает Bybit: ключ без IP, истекает через 76 дней
-        return {"result": {"readOnly": 0, "ips": ["*"], "deadlineDay": 76,
-                           "permissions": {"Spot": ["SpotTrade"], "Wallet": ["AccountTransfer"]}}}
+        return {"result": {"readOnly": 1 if blocked else 0, "ips": ["*"], "deadlineDay": 76,
+                           "permissions": {"Spot": [] if blocked else ["SpotTrade"], "Wallet": ["AccountTransfer"]}}}
 
     async def bingx_key_info(params=None):
         return {"code": 0, "data": {"apiKey": "k", "permissions": [1, 2], "ipAddresses": [], "note": ""}}
@@ -130,7 +136,7 @@ def build():
     from bot.solana import PhantomWatcher
     b.phantom = PhantomWatcher("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU")
 
-    async def fake_phantom(price_fn, force=False):
+    async def fake_phantom(price_fn, force=False, mint_price_fn=None):
         prices = await price_fn(["SOL", "BONK"])
         assets = [{"coin": "SOL", "amount": 0.84, "usd": 0.84 * prices.get("SOL", 0)},
                   {"coin": "USDC", "amount": 12.0, "usd": 12.0},
@@ -179,8 +185,15 @@ def build():
 
 
 async def main():
+    from tests import fake_market_api as fm
+
     b = build()
+    port = int(os.getenv("PORT", "8080"))
+    fm.wire(b, f"http://127.0.0.1:{port}/fake")  # мемкоины и Т-Инвестиции на ненастоящих данных
+    await b.trader.inspect_keys()
+    b.trader.state.auto = True
     await b._scan()
+    await b.trader.auto_step(b.scanner.last_result)
     p = await b.trader.portfolio()            # настоящий итог фейковых балансов
     rnd, now, v, hist = random.Random(3), time.time(), p["total_usd"], []
     for i in range(1, 3 * 96):               # случайное блуждание назад от текущего итога
@@ -189,10 +202,10 @@ async def main():
     b.trader.state.history = hist[::-1] + [[now, p["total_usd"]]]
     app = web.Application()
     b.webapp.setup(app)
+    app.add_subapp("/fake", fm.make_app())
     app.router.add_get("/", lambda r: web.HTTPFound("/app"))
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv("PORT", "8080"))
     await web.TCPSite(runner, "0.0.0.0", port).start()
     print(f"Предпросмотр: http://localhost:{port}/app", flush=True)
     while True:

@@ -333,7 +333,7 @@ def test_alert_command_and_firing(ex_env):
 def test_phantom_command_rejects_seed_and_saves_address(ex_env, monkeypatch):
     b, session = ex_env
 
-    async def fake_get(price_fn, force=False):
+    async def fake_get(price_fn, force=False, mint_price_fn=None):
         return {"address": b.phantom.address, "assets": [{"coin": "SOL", "amount": 1, "usd": 200}],
                 "updated_at": time.time(), "total_usd": 200}
 
@@ -416,7 +416,7 @@ def test_webapp_extras_api(ex_env, monkeypatch):
     b.allowed_ids.add(friend)
     b.webapp = WebApp(b, TOKEN)
 
-    async def fake_get(price_fn, force=False):
+    async def fake_get(price_fn, force=False, mint_price_fn=None):
         return {"address": b.phantom.address, "assets": [], "updated_at": time.time(), "total_usd": 0}
 
     monkeypatch.setattr(b.phantom, "get", fake_get)

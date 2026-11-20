@@ -192,3 +192,24 @@ def path_min_order_ok(legs: list[TriLeg], amount: float, markets: dict[str, dict
             return False
         current *= leg.rate()
     return True
+
+
+def path_min_amount(legs: list[TriLeg], markets: dict[str, dict]) -> float:
+    """Минимальная стартовая сумма (в валюте первой ноги), с которой проходят ВСЕ ноги цикла.
+
+    Биржа не примет ордер меньше min cost (обычно $1–5) или min amount. Считаем, сколько нужно
+    на входе, чтобы каждая нога была не меньше своего минимума, и берём самое строгое.
+    """
+    need, factor = 0.0, 1.0  # factor: сколько from_ccy текущей ноги приходится на 1 единицу старта
+    for leg in legs:
+        limits = (markets.get(leg.symbol) or {}).get("limits") or {}
+        min_cost = float((limits.get("cost") or {}).get("min") or 0)
+        min_amount = float((limits.get("amount") or {}).get("min") or 0)
+        if leg.side == "buy":  # отдаём quote
+            min_in = max(min_cost, min_amount * leg.price)
+        else:  # отдаём base
+            min_in = max(min_amount, min_cost / leg.price if leg.price else 0)
+        if factor > 0:
+            need = max(need, min_in / factor)
+        factor *= leg.rate()
+    return need

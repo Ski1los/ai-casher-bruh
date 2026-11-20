@@ -18,6 +18,7 @@ import datetime as dt
 import html
 import logging
 import os
+import re
 import secrets
 import time
 from collections import OrderedDict
@@ -27,7 +28,7 @@ import ccxt.async_support as ccxt
 
 from .config import Settings
 from .sim import simulate_buy, simulate_sell
-from .triangular import TriOpportunity, path_min_order_ok, simulate_path
+from .triangular import TriOpportunity, path_min_amount, path_min_order_ok, simulate_path
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,11 @@ TRADE_LOG_KEEP = 200
 PENDING_KEEP = 30
 PENDING_TTL_SEC = 300  # предпросмотр ордера действует 5 минут
 TRI_REPEAT_SEC = 600  # один и тот же цикл автоторговля повторяет не чаще раза в 10 минут
+AUTO_TRY_MAX = 3  # сколько лучших циклов за один скан проверять свежими стаканами
+AUTO_SKIP_REPEAT_SEC = 90  # пропущенный цикл (ушла цена, мало денег) снова пробуем через 1,5 минуты
+AUTO_REASONS_KEEP = 6
+AUTO_MIN_FREE_USD = 5.0  # меньше этого на торговом счёте циклы почти всегда упираются в минимальный ордер
+FREE_CACHE_SEC = 300  # как часто автоторговля перечитывает свободный баланс (в реальном режиме)
 HISTORY_EVERY_SEC = 15 * 60  # как часто записывать стоимость портфеля для графика
 HISTORY_KEEP = 1000  # ≈ 10 дней по 15 минут
 
@@ -145,6 +151,26 @@ def parse_bingx_key(data) -> dict:
     out["ip_bound"] = bool(ips)
     out["inactive_rule"] = not ips  # ключ без IP BingX удаляет после 14 дней без запросов
     return out
+
+
+def new_auto_stats() -> dict:
+    return {"since": time.time(), "checks": 0, "candidates": 0, "attempts": 0, "executed": 0, "pnl": 0.0,
+            "best": None, "reasons": {}}
+
+
+def key_trade_problem(name: str, info: dict | None) -> str | None:
+    """Почему ключ не может торговать (по правам, которые сообщила биржа). None — всё в порядке или неизвестно."""
+    if not info or info.get("error"):
+        return None
+    if name == "bybit":
+        if info.get("read_only"):
+            return ("ключ «только чтение» (Read-Only): баланс виден, ордера биржа отклонит. "
+                    "bybit.com → API → Edit → Read-Write + Spot Trade (без Withdraw)")
+        if "spot_trade" in info and not info["spot_trade"]:
+            return "у ключа нет права Spot Trade: включи «Спот» в настройках ключа на bybit.com"
+    if name == "bingx" and ("spot_trade" in info or "read" in info) and not info.get("spot_trade"):
+        return "у ключа нет права «Спотовая торговля»: включи его в настройках API на bingx.com"
+    return None
 
 
 def days_left(info: dict, now: float | None = None) -> float | None:
@@ -276,6 +302,7 @@ class TriExecution:
     final: float = 0.0
     reason: str = ""  # почему не исполнили / что пошло не так
     steps: list[str] = field(default_factory=list)
+    code: str = ""  # машинная причина пропуска: no_balance | min_order | limits | books | moved
     stuck: str | None = None  # что осталось не в USDT после сбоя
 
     @property
@@ -315,7 +342,10 @@ class Trader:
         self.key_status: dict[str, str] = {}  # биржа -> "ok" или текст ошибки
         self.key_info: dict[str, dict] = {}  # права и срок действия ключа (где биржа это сообщает)
         self.pending: OrderedDict[str, OrderPlan] = OrderedDict()
-        self.recent_tri: dict[str, float] = {}
+        self.recent_tri: dict[str, float] = {}  # ключ цикла -> до какого времени его не повторять
+        self.auto_status: dict = {}  # что автоторговля сделала на последнем скане и почему
+        self.auto_stats: dict = new_auto_stats()  # сводка с момента включения / последнего отчёта
+        self.free_cache: dict[str, tuple[float, float]] = {}  # биржа -> (когда, свободно USDT)
         self.balance_cache: dict[str, tuple[float, list]] = {}
         self._lock = asyncio.Lock()  # одна операция с деньгами за раз
         for name, cred in self.creds.items():
@@ -341,6 +371,15 @@ class Trader:
     def working(self) -> list[str]:
         """Биржи с проверенными рабочими ключами (или ещё не проверенными)."""
         return [n for n in self.creds if self.key_status.get(n, "ok") == "ok"]
+
+    def trade_block_reason(self, name: str) -> str | None:
+        """Почему на этой бирже бот сейчас не может торговать сам (None — может)."""
+        status = self.key_status.get(name, "ok")
+        if status != "ok":
+            return f"ключ не работает: {status}"
+        if self.state.live:  # в тесте ордера не уходят, права ключа не важны
+            return key_trade_problem(name, self.key_info.get(name))
+        return None
 
     async def check_keys(self) -> dict[str, str]:
         async def one(name: str) -> tuple[str, str]:
@@ -910,25 +949,31 @@ class Trader:
                 amount = cap
             res = TriExecution(False, self.state.live, opp, amount)
             if amount <= 0:
-                res.reason = f"на {self.scanner.display_name(name)} нет свободных {start}"
+                res.reason = f"на {self.scanner.display_name(name)} нет свободных {start} (торговый счёт пуст)"
+                res.code = "no_balance"
                 return res
             try:
                 self._check_limits(amount, True, source)
             except TradeError as e:
-                res.reason = str(e)
+                res.reason, res.code = str(e), "limits"
                 return res
             markets = {leg.symbol: self.scanner.market(name, leg.symbol) for leg in opp.legs}
             if not path_min_order_ok(opp.legs, amount, markets):
-                res.reason = f"${amount:.2f} меньше минимального ордера одной из пар"
+                need_amount = path_min_amount(opp.legs, markets) * 1.02
+                where = f"свободно {free:.2f} {start}" if self.state.live else f"лимит ${cap:g}"
+                res.reason = (f"${amount:.2f} меньше минимального ордера биржи: для этого цикла нужно от "
+                              f"${need_amount:.2f} ({where})")
+                res.code = "min_order"
                 return res
             try:
                 books = await self.scanner.order_books(name, [leg.symbol for leg in opp.legs])
             except Exception as e:
-                res.reason = f"не получил стаканы: {human_error(e)}"
+                res.reason, res.code = f"не получил стаканы: {human_error(e)}", "books"
                 return res
             sim = simulate_path(books, opp.legs, amount)
             if not sim.filled or sim.profit_percent < need:
                 res.reason = f"на свежих стаканах {sim.profit_percent:+.3f}% (нужно ≥{need:g}%), возможность ушла"
+                res.code = "moved"
                 return res
 
             if not self.state.live:
@@ -987,23 +1032,255 @@ class Trader:
 
     # --- автоторговля -------------------------------------------------------
 
+    def _auto_estimate(self, opp: TriOpportunity) -> float:
+        """Оценка прибыли цикла для отбора кандидатов (точная проверка будет по свежим стаканам).
+
+        Проверка стакана сканером сделана на trade_amount_usd ($100). Если эта сумма не больше той,
+        с которой торгуем, её результат честный; если больше (а торгуем мы $10), большой стакан
+        занижает прибыль, и берём оценку по лучшим ценам.
+        """
+        d = opp.depth
+        if d is not None and d.filled and d.amount_usd <= self.settings.max_trade_usd * 1.01:
+            return d.profit_percent
+        return opp.net_percent
+
     async def auto_step(self, result) -> list[TriExecution]:
-        """Вызывается после каждого скана. Исполняет не больше одного лучшего цикла."""
+        """Вызывается после каждого скана. Пробует до AUTO_TRY_MAX лучших циклов, исполняет не больше одного.
+
+        Возвращает только исполненные циклы (пропуски не шлём в чат каждый скан, а пишем в auto_status:
+        их видно в /why, /trade, /doctor и в приложении, плюс раз в несколько часов приходит сводка).
+        """
         if not self.state.auto:
             return []
         now = time.time()
-        self.recent_tri = {k: t for k, t in self.recent_tri.items() if now - t < TRI_REPEAT_SEC}
-        ok = set(self.working)
-        for opp in result.triangles:
-            key = "|".join(opp.key)
-            if opp.exchange not in ok or key in self.recent_tri:
-                continue
-            if not opp.depth or not opp.depth.filled or opp.depth.profit_percent < self.settings.auto_min_profit_percent:
-                continue
-            self.recent_tri[key] = now
-            res = await self.execute_triangle(opp, source="auto", min_net=self.settings.auto_min_profit_percent)
-            return [res]
-        return []
+        s = self.settings
+        need = s.auto_min_profit_percent
+        self.recent_tri = {k: t for k, t in self.recent_tri.items() if t > now}
+        triangles = list(getattr(result, "triangles", None) or [])
+        status: dict = {"at": now, "live": self.state.live, "need": need, "triangles": len(triangles),
+                        "candidates": 0, "tried": [], "blocked": {}, "reason": "", "code": "", "executed": False,
+                        "best": None}
+        if triangles:
+            top = max(triangles, key=lambda o: o.net_percent)
+            status["best"] = {"net": round(top.net_percent, 4), "path": top.path_text, "exchange": top.exchange}
+        else:
+            near = getattr(result, "near_tri", None)
+            if near is not None:
+                status["best"] = {"net": round(near.net_percent, 4), "path": near.text, "exchange": ""}
+
+        usable = []
+        for name in self.creds:
+            why = self.trade_block_reason(name)
+            if why:
+                status["blocked"][name] = why
+            else:
+                usable.append(name)
+        executions: list[TriExecution] = []
+        if self.state.live and usable:
+            status["free"] = await self._free_quote(usable, now)
+            status["low_money"] = {n: v for n, v in status["free"].items() if v is not None and v < AUTO_MIN_FREE_USD}
+        if not self.creds:
+            status["reason"], status["code"] = "нет API-ключей бирж (/keys)", "no_keys"
+        elif not usable:
+            status["reason"], status["code"] = "ни на одной бирже с ключом бот сейчас не может торговать", "blocked"
+        elif not s.triangular_enabled:
+            status["reason"], status["code"] = "треугольный арбитраж выключен (TRIANGULAR=0)", "disabled"
+        else:
+            self._roll_day()
+            if self.state.day_trades >= s.daily_trades:
+                status["reason"], status["code"] = f"лимит {s.daily_trades:g} сделок за сутки исчерпан", "limits"
+            else:
+                cands = [o for o in triangles if o.exchange in usable and "|".join(o.key) not in self.recent_tri
+                         and self._auto_estimate(o) >= need]
+                cands.sort(key=self._auto_estimate, reverse=True)
+                status["candidates"] = len(cands)
+                if not cands:
+                    best = status["best"]
+                    best_txt = f", лучший сейчас {best['net']:+.3f}%" if best else ""
+                    status["reason"] = f"нет циклов с прибылью ≥{need:g}% после комиссий{best_txt}"
+                    status["code"] = "no_candidates"
+                skip_ex: set[str] = set()
+                for opp in cands[:AUTO_TRY_MAX]:
+                    if opp.exchange in skip_ex:
+                        continue
+                    key = "|".join(opp.key)
+                    res = await self.execute_triangle(opp, source="auto", min_net=need)
+                    status["tried"].append({"path": opp.path_text, "exchange": opp.exchange,
+                                            "estimate": round(self._auto_estimate(opp), 4),
+                                            "executed": res.executed, "reason": res.reason, "code": res.code})
+                    if res.executed:
+                        self.recent_tri[key] = now + TRI_REPEAT_SEC
+                        status["executed"], status["reason"], status["code"] = True, res.reason, ""
+                        executions.append(res)
+                        break
+                    self.recent_tri[key] = now + AUTO_SKIP_REPEAT_SEC
+                    status["reason"], status["code"] = res.reason, res.code
+                    if res.code == "limits":
+                        break
+                    if res.code in ("no_balance", "min_order"):
+                        skip_ex.add(opp.exchange)  # другие циклы на этой бирже упрутся в то же самое
+        self.auto_status = status
+        self._update_auto_stats(status, executions)
+        return executions
+
+    async def _free_quote(self, names: list[str], now: float) -> dict[str, float | None]:
+        """Свободные USDT на биржах (кэш 5 минут, чтобы не дёргать биржу каждый скан)."""
+        quote = self.settings.quote
+
+        async def one(name: str) -> None:
+            cached = self.free_cache.get(name)
+            if cached and now - cached[0] < FREE_CACHE_SEC:
+                return
+            try:
+                self.free_cache[name] = (now, await self.free(name, quote))
+            except Exception as e:
+                log.info("Баланс %s для автоторговли: %s", name, e)
+
+        await asyncio.gather(*(one(n) for n in names))
+        return {n: (self.free_cache[n][1] if n in self.free_cache else None) for n in names}
+
+    def _update_auto_stats(self, status: dict, executions: list[TriExecution]) -> None:
+        st = self.auto_stats
+        st["checks"] += 1
+        st["candidates"] += status["candidates"]
+        st["attempts"] += len(status["tried"])
+        st["executed"] += len(executions)
+        st["pnl"] += sum(r.pnl for r in executions)
+        best = status.get("best")
+        if best and (st["best"] is None or best["net"] > st["best"]["net"]):
+            st["best"] = dict(best)
+        if not status["executed"] and status["code"]:
+            reasons = st["reasons"]
+            reasons[status["code"]] = {"n": (reasons.get(status["code"]) or {}).get("n", 0) + 1, "text": status["reason"]}
+
+    def reset_auto_stats(self) -> None:
+        self.auto_stats = new_auto_stats()
+        self.auto_status = {}
+
+    def auto_problem(self) -> tuple[str, str] | None:
+        """Проблема, из-за которой автоторговля в принципе не сможет торговать (не «рынок спокоен»).
+
+        Возвращает (код, текст) для разового предупреждения владельцу, или None.
+        """
+        st = self.auto_status
+        if not self.state.auto or not st:
+            return None
+        if st.get("code") in ("blocked", "no_keys", "disabled"):
+            details = "; ".join(f"{self.scanner.display_name(n)}: {why}" for n, why in st.get("blocked", {}).items())
+            return st["code"], st["reason"] + (f". {details}" if details else "")
+        tried = st.get("tried") or []
+        money = [t for t in tried if t["code"] in ("no_balance", "min_order")]
+        if self.state.live and tried and len(money) == len(tried):
+            return "money", money[0]["reason"]
+        low, free = st.get("low_money") or {}, st.get("free") or {}
+        if self.state.live and low and len(low) == len([v for v in free.values() if v is not None]):
+            parts = ", ".join(f"{self.scanner.display_name(n)} {v:.2f} {self.settings.quote}" for n, v in low.items())
+            return "money", (f"на торговом счёте мало денег ({parts}). У бирж минимальный ордер около $1–5 на каждый шаг "
+                             f"цикла, поэтому с такой суммой сделки почти всегда будут отклоняться")
+        return None
+
+    def auto_digest(self) -> str:
+        """Сводка автоторговли за период (присылается владельцу, если сделок не было)."""
+        st = self.auto_stats
+        hours = max((time.time() - st["since"]) / 3600, 0.01)
+        mode = "🔴 реально" if self.state.live else "🧪 тест"
+        lines = [f"⚙️ <b>Автоторговля: сводка за {hours:.1f} ч</b> ({mode})",
+                 f"Сканов: {st['checks']} · подходящих циклов: {st['candidates']} · проверено стаканами: "
+                 f"{st['attempts']} · исполнено: <b>{st['executed']}</b>"]
+        if st["executed"]:
+            lines.append(f"Результат: {st['pnl']:+.4f}$")
+        if st["best"]:
+            b = st["best"]
+            where = f" на {html.escape(self.scanner.display_name(b['exchange']))}" if b.get("exchange") else ""
+            lines.append(f"Лучший замеченный цикл: {b['net']:+.3f}% {html.escape(b['path'])}{where} "
+                         f"(порог {self.settings.auto_min_profit_percent:g}%)")
+        lines += self._reason_lines(st["reasons"])
+        lines.append(self._auto_hint())
+        lines.append("Подробно: /why")
+        return "\n".join(x for x in lines if x)
+
+    @staticmethod
+    def _reason_lines(reasons: dict) -> list[str]:
+        if not reasons:
+            return []
+        top = sorted(reasons.items(), key=lambda kv: -kv[1]["n"])[:AUTO_REASONS_KEEP]
+        return ["Почему не было сделок:"] + [f"  • {html.escape(v['text'])} ×{v['n']}" for _, v in top]
+
+    def _auto_hint(self) -> str:
+        st, s = self.auto_status, self.settings
+        code = st.get("code") if st else ""
+        codes = {t["code"] for t in (st.get("tried") or [])} if st else set()
+        if code in ("blocked", "no_keys"):
+            return "💡 Исправь ключ (см. выше), затем /doctor: там должно быть ✅."
+        if st and st.get("low_money") and len(st["low_money"]) == len([v for v in (st.get("free") or {}).values() if v is not None]):
+            codes.add("min_order")
+        if "min_order" in codes or "no_balance" in codes or code in ("min_order", "no_balance"):
+            return ("💡 На торговом счёте слишком мало: биржа не принимает ордера меньше своего минимума. "
+                    "Пополни торговый (Unified/Spot) счёт хотя бы до $10–20 или оставь /test.")
+        if code == "limits":
+            return "💡 Сработал дневной лимит. Завтра счётчик обнулится, или поменяй /set daily_trades."
+        if code in ("no_candidates", "moved"):
+            return (f"💡 Это нормально: циклы ≥{s.auto_min_profit_percent:g}% после комиссий бывают редко и живут секунды. "
+                    f"Бот ничего не покупает, пока нет прибыли, и это защищает деньги. Порог можно снизить: "
+                    f"<code>/set auto_min 0.15</code> (риск проскальзывания выше).")
+        return ""
+
+    def auto_status_text(self) -> str:
+        """Полный ответ на «почему автоторговля ничего не делает» (/why)."""
+        s, state, st = self.settings, self.state, self.auto_status
+        mode = "🔴 реально" if state.live else "🧪 тест (ордера не отправляются)"
+        lines = [f"⚙️ <b>Автоторговля</b>: {'🟢 включена' if state.auto else '⏸ выключена'} · {mode}"]
+        if not state.auto:
+            if state.paused_reason:
+                lines.append(f"⚠️ Остановлена: {html.escape(state.paused_reason)}")
+            lines.append("Включить: /autotrade on (в тесте можно безопасно посмотреть, что бы она делала)")
+        lines.append(f"Условие: цикл ≥{s.auto_min_profit_percent:g}% после комиссий по свежему стакану, "
+                     f"до ${s.max_trade_usd:g} за цикл, скан каждые {s.scan_interval_sec:g} с")
+        for name in self.creds:
+            why = self.trade_block_reason(name) or key_trade_problem(name, self.key_info.get(name))
+            title = html.escape(self.scanner.display_name(name))
+            if why:
+                prefix = "⛔" if self.trade_block_reason(name) else "⚠️ (в тесте не мешает)"
+                lines.append(f"{prefix} {title}: {html.escape(why)}")
+            else:
+                lines.append(f"✅ {title}: может торговать")
+        if not st:
+            lines.append("\nЕщё не было ни одной проверки после включения. Подожди один скан.")
+            return "\n".join(lines)
+        for name, value in (st.get("free") or {}).items():
+            if value is not None:
+                warn = " ⚠️ мало для циклов" if value < AUTO_MIN_FREE_USD else ""
+                lines.append(f"💵 {html.escape(self.scanner.display_name(name))}: свободно {value:.2f} {s.quote}{warn}")
+        ago = max(0, time.time() - st["at"])
+        lines.append(f"\n<b>Последняя проверка</b> {ago:.0f} с назад: циклов найдено {st['triangles']}, "
+                     f"подходящих {st['candidates']}")
+        if st.get("best"):
+            b = st["best"]
+            where = f" ({html.escape(self.scanner.display_name(b['exchange']))})" if b.get("exchange") else ""
+            lines.append(f"Лучший сейчас: {b['net']:+.3f}% {html.escape(b['path'])}{where}")
+        for t in st.get("tried") or []:
+            icon = "✅" if t["executed"] else "⏭"
+            lines.append(f"{icon} {html.escape(t['path'])} на {html.escape(self.scanner.display_name(t['exchange']))} "
+                         f"(оценка {t['estimate']:+.3f}%): {html.escape(t['reason'] or 'исполнен')}")
+        if st.get("reason") and not st.get("executed"):
+            lines.append(f"<b>Почему нет сделки:</b> {html.escape(st['reason'])}")
+        a = self.auto_stats
+        hours = (time.time() - a["since"]) / 3600
+        lines.append(f"\nЗа {hours:.1f} ч: сканов {a['checks']}, проверено стаканами {a['attempts']}, исполнено {a['executed']}"
+                     + (f" ({a['pnl']:+.4f}$)" if a["executed"] else ""))
+        hint = self._auto_hint()
+        if hint:
+            lines.append(hint)
+        return "\n".join(lines)
+
+    def auto_status_dict(self) -> dict:
+        st = dict(self.auto_status or {})
+        st["stats"] = dict(self.auto_stats)
+        st["blocked_now"] = {n: self.trade_block_reason(n) for n in self.creds if self.trade_block_reason(n)}
+        st["key_problems"] = {n: p for n in self.creds if (p := key_trade_problem(n, self.key_info.get(n)))}
+        hint = self._auto_hint()
+        st["hint"] = re.sub(r"<[^>]+>", "", hint)
+        return st
 
     # --- тексты -------------------------------------------------------------
 
@@ -1025,6 +1302,14 @@ class Trader:
         )
         if st.paused_reason and not st.auto:
             lines.append(f"⚠️ Остановлена: {html.escape(st.paused_reason)}")
+        if st.auto and self.auto_status:
+            a = self.auto_status
+            what = "исполнил цикл" if a.get("executed") else (a.get("reason") or "жду подходящий цикл")
+            lines.append(f"  Последняя проверка: {html.escape(what)} · подробно /why")
+        for n in self.creds:
+            why = self.trade_block_reason(n)
+            if why and self.key_status.get(n, "ok") == "ok":
+                lines.append(f"  ⛔ {html.escape(self.scanner.display_name(n))}: {html.escape(why)}")
         lines.append(
             f"Сегодня: сделок {st.day_trades} из {s.daily_trades:g}, результат циклов {st.day_pnl_usd:+.4f}$ "
             f"(лимит убытка ${s.daily_loss_usd:g})"

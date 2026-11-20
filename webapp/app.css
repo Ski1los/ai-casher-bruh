@@ -372,3 +372,14 @@ nav.tabbar button.on svg { transform: translateY(-1px); color: var(--accent2); }
 .doc-ic.bad { background: var(--red); }
 .doc-ic.info { background: var(--muted); }
 .doc-ic svg { width: 14px; height: 14px; }
+
+/* --- автопилот, мемкоины, Т-Инвестиции --- */
+.meter { height: 6px; border-radius: 6px; background: var(--card2); overflow: hidden; }
+.meter > div { height: 100%; border-radius: 6px; background: linear-gradient(90deg, #7c5cff, #22d3ee); transition: width 0.4s ease; }
+.auto-card .pill { font-size: 12px; white-space: nowrap; }
+img.coin { object-fit: cover; background: var(--card2); }
+.tok-stats { gap: 6px; }
+.tok-stats > div { background: var(--card2); border-radius: 10px; padding: 7px 8px; min-width: 0; }
+.tok-stats .k { font-size: 10.5px; color: var(--muted); }
+.tok-stats .num { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.token .btn.sm { padding: 7px 12px; }

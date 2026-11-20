@@ -18,6 +18,7 @@ import html
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +31,7 @@ from .ai import AIError
 from .alerts import AlertError, build_alert, parse_alert
 from .config import BOUNDS, EDITABLE, RISK_KEYS
 from .demo_manager import REASONS, account_label
+from .dex import SOL_ADDRESS_RE, DexError, best_pairs, is_address
 from .doctor import doctor_dict, run_doctor
 from .solana import WalletError
 from .trading import STABLES, OrderPlan, TradeError, human_error
@@ -242,6 +244,12 @@ class WebApp:
             ("POST", "/api/alerts"): self.alert_add,
             ("POST", "/api/alerts/delete"): self.alert_delete,
             ("GET", "/api/price"): self.price,
+            ("GET", "/api/autostatus"): self.autostatus,
+            ("GET", "/api/dex/search"): self.dex_search,
+            ("GET", "/api/dex/hot"): self.dex_hot,
+            ("GET", "/api/dex/rug"): self.dex_rug,
+            ("POST", "/api/radar"): self.radar,
+            ("GET", "/api/tinvest"): self.tinvest,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -420,6 +428,7 @@ class WebApp:
             "live": st.live, "auto": st.auto, "paused_reason": st.paused_reason,
             "keys": [{"exchange": n, "name": self._name(n), "status": t.key_status.get(n, "unchecked")} for n in t.creds],
             "key_warnings": t.key_warnings(),
+            "auto_status": t.auto_status_dict(),
             "working": t.working,
             "today": {"trades": st.day_trades, "pnl": round(st.day_pnl_usd, 6)},
             "limits": {"max_trade": self.b.settings.max_trade_usd, "daily_loss": self.b.settings.daily_loss_usd,
@@ -622,9 +631,14 @@ class WebApp:
             raise ApiError("для автоторговли нужен рабочий ключ биржи")
         if on and not self.b.settings.triangular_enabled:
             raise ApiError("треугольный арбитраж выключен (TRIANGULAR=0)")
+        was_on = t.state.auto
         t.state.auto = on
         if on:
             t.state.paused_reason = None
+            if not was_on:
+                t.reset_auto_stats()
+                self.b._auto_reports = 0
+                self.b._auto_warned.clear()
         self._changed(f"⚙️ Автоторговля {'включена' if on else 'выключена'} из приложения "
                       f"({'реальный режим' if t.state.live else 'тест'}).")
         return {"auto": on}
@@ -754,6 +768,64 @@ class WebApp:
         return {"coin": coin, "quote": self.b.settings.quote, "rows": [
             {"exchange": n, "name": self.b.scanner.display_name(n), "bid": t.get("bid"), "ask": t.get("ask"),
              "last": t.get("last"), "change": t.get("percentage")} for n, t in rows]}
+
+    async def autostatus(self, request: web.Request) -> dict:
+        self._owner(request)
+        t = self.b.trader
+        return {"auto": t.state.auto, "live": t.state.live, "status": t.auto_status_dict(),
+                "text": html.unescape(re.sub(r"<[^>]+>", "", t.auto_status_text()))}
+
+    async def dex_search(self, request: web.Request) -> dict:
+        q = (request.query.get("q") or "").strip()
+        if not q or len(q) > 64:
+            raise ApiError("введи название или адрес токена")
+        try:
+            pairs = await self.b.dex.search(q)
+        except DexError as e:
+            raise ApiError(f"DexScreener: {e}") from None
+        if is_address(q):
+            pairs = [p for p in pairs if p.address.lower() == q.lower()] or pairs
+        top = best_pairs(pairs, limit=1 if is_address(q) else 6)
+        rug = await self.b.dex.rug_safe(top[0].address) if top and top[0].chain == "solana" else None
+        return {"items": [p.as_dict(rug if i == 0 else None) for i, p in enumerate(top)]}
+
+    async def dex_hot(self, request: web.Request) -> dict:
+        try:
+            pairs = await self.b.dex.trending("solana", limit=10)
+        except DexError as e:
+            raise ApiError(f"DexScreener: {e}") from None
+        return {"items": [p.as_dict() for p in pairs], "radar": request[USER]["id"] in self.b.radar_chats}
+
+    async def dex_rug(self, request: web.Request) -> dict:
+        mint = (request.query.get("mint") or "").strip()
+        if not SOL_ADDRESS_RE.match(mint):
+            raise ApiError("нужен адрес токена Solana")
+        try:
+            rug = await self.b.dex.rugcheck(mint)
+            pairs = best_pairs(await self.b.dex.tokens("solana", [mint]), limit=1)
+        except DexError as e:
+            raise ApiError(f"RugCheck: {e}") from None
+        if rug is None and not pairs:
+            raise ApiError("токен не найден")
+        return {"rug": rug, "item": pairs[0].as_dict(rug) if pairs else None}
+
+    async def radar(self, request: web.Request) -> dict:
+        body = await self._body(request)
+        uid = request[USER]["id"]
+        if body.get("on"):
+            self.b.radar_chats.add(uid)
+        else:
+            self.b.radar_chats.discard(uid)
+        await self.b.save_extras()
+        return {"radar": uid in self.b.radar_chats}
+
+    async def tinvest(self, request: web.Request) -> dict:
+        self._owner(request)
+        ti = self.b.tinvest
+        if not ti.configured:
+            return {"configured": False}
+        snap = await ti.get(force=request.query.get("force") == "1")
+        return {"configured": True, **(snap or {})}
 
     async def set_setting(self, request: web.Request) -> dict:
         body = await self._body(request)
