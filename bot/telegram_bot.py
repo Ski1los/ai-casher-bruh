@@ -34,7 +34,7 @@ from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_set
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
 from .cloud import (BOT_VERSION, STATUS, TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
-                    version_text)
+                    instance_text, version_text)
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
@@ -123,8 +123,17 @@ DUPLICATE_TEXT = """\
 • бесплатно у Render 750 часов в месяц на всех, а два сервиса тратят 1440. Примерно к середине месяца \
 оба выключатся до 1-го числа.
 
-Что сделать: Render → открой лишний сервис → Settings → в самом низу <b>Delete Web Service</b>. \
-Оставь тот, где в Environment есть ключи бирж. Как только останется одна копия, торговля продолжится сама."""
+Как проверить: отправь /status несколько раз. Если версия то одна, то другая (например v12 и v16) — \
+работает старая копия.
+
+Что сделать:
+1) Если в Render два сервиса: открой лишний → Settings → в самом низу <b>Delete Web Service</b>. \
+Оставь тот, где в Environment есть ключи бирж.
+2) Если лишнего сервиса не видно (он в другом аккаунте Render или на другом хостинге) — отключи старую копию \
+сменой токена: @BotFather → /mybots → бот → <b>API Token</b> → <b>Revoke current token</b> → скопируй новый → \
+Render → твой сервис → Environment → <code>TELEGRAM_BOT_TOKEN</code> → вставь → Save Changes. \
+Старая копия сразу перестанет работать, где бы она ни была. Бот, чат и бэкап остаются те же.
+Как только останется одна копия, торговля продолжится сама."""
 
 HELP_TEXT = """\
 <b>Арбитражный сканер</b> 🤖
@@ -1031,7 +1040,8 @@ class ArbitrageBot:
                 return
             result = self.scanner.last_result
             if result is None:
-                await message.answer("Ещё не сканировал. Запусти /scan")
+                await message.answer(f"Ещё не сканировал. Запусти /scan\nВерсия бота: {version_text()}\n"
+                                     f"Где работает: {html.escape(instance_text())}")
                 return
             ago = int(time.time() - result.finished_at)
             auto = "включены ✅" if message.chat.id in self.subscribers.chats else "выключены"
@@ -1042,7 +1052,8 @@ class ArbitrageBot:
             await message.answer(
                 f"Последний скан: {ago} с назад. Межбиржевых связок: {len(result.opportunities)}, "
                 f"треугольников: {len(result.triangles)}.\n"
-                f"Автосигналы в этом чате: {auto}\nВерсия бота: {version_text()}\n\n" + format_footer(result, self.scanner)
+                f"Автосигналы в этом чате: {auto}\nВерсия бота: {version_text()}\n"
+                f"Где работает: {html.escape(instance_text())}\n\n" + format_footer(result, self.scanner)
             )
 
         @dp.message(Command("auto_on"))

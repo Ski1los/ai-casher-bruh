@@ -128,3 +128,20 @@ def test_new_version_self_update_and_reminder_once(bot_env, monkeypatch):
     asyncio.run(b._on_new_version(None, "100"))
     asyncio.run(b._on_new_version(None, "100"))  # напоминание не чаще раза в сутки
     assert len(session.sent) == n + 1 and "Manual Deploy" in session.sent[-1][1]
+
+
+def test_status_says_where_this_copy_runs(bot_env, monkeypatch):
+    from bot.cloud import instance_text
+    from bot.telegram_bot import DUPLICATE_TEXT
+
+    b, session = bot_env
+    monkeypatch.setenv("RENDER_SERVICE_NAME", "ai-casher-bot")
+    monkeypatch.setenv("RENDER_EXTERNAL_HOSTNAME", "ai-casher-bot.onrender.com")
+    assert instance_text() == "Render: ai-casher-bot · ai-casher-bot.onrender.com"
+    asyncio.run(send(b, "/status"))
+    text = session.sent[-1][1]
+    assert f"v{BOT_VERSION}" in text and "ai-casher-bot.onrender.com" in text
+    monkeypatch.delenv("RENDER_SERVICE_NAME")
+    monkeypatch.delenv("RENDER_EXTERNAL_HOSTNAME")
+    assert "не Render" in instance_text()
+    assert "Revoke current token" in DUPLICATE_TEXT and "TELEGRAM_BOT_TOKEN" in DUPLICATE_TEXT
