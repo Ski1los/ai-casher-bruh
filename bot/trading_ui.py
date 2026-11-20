@@ -104,8 +104,8 @@ def scalp_keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
                                   callback_data="sc:off" if sc.on else "sc:on")],
             [InlineKeyboardButton(text="📊 Проверка на истории", callback_data="sc:bt"),
              InlineKeyboardButton(text="🔄 Обновить", callback_data="sc:show")]]
-    if sc.st["pos"]:
-        rows.append([InlineKeyboardButton(text="💸 Продать позицию сейчас", callback_data="sc:sell")])
+    if sc.positions:
+        rows.append([InlineKeyboardButton(text="💸 Продать позиции сейчас", callback_data="sc:sell")])
     if not b.trader.state.live:
         rows.append([InlineKeyboardButton(text="🔴 Включить реальный режим", callback_data="tr:live")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -126,31 +126,34 @@ def why_text(b: ArbitrageBot) -> str:
 async def scalp_preflight(b: ArbitrageBot) -> list[str]:
     """Что помешает режиму $5: ключ, права, деньги на торговом счёте, вторая копия бота."""
     t = b.trader
-    name = b.scalper.exchange()
+    names = b.scalper.exchanges()
     out: list[str] = []
-    if name is None:
+    if not names:
         return ["нет рабочего ключа биржи: /keys"]
-    title = b.scanner.display_name(name)
     try:
         await t.inspect_keys()
     except Exception:
         pass
-    problem = key_trade_problem(name, t.key_info.get(name))
-    if problem:
-        out.append(f"{title}: {problem}" + ("" if t.state.live else " (в тесте не мешает)"))
-    try:
-        free = await t.free(name, b.settings.quote)
-    except Exception as e:
-        out.append(f"{title}: не смог прочитать баланс ({human_error(e)})")
-        free = None
-    if free is not None and free < 5:
-        funding = await t.funding_usd(name)
-        if funding and funding >= 1:
-            out.append(t._funding_text({name: funding}))
-        else:
-            out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}, а биржа принимает ордер от $5. "
-                       "Пополни хотя бы до $5,5 (с запасом на округление)"
-                       + ("" if t.state.live else " (в тесте бот возьмёт виртуальные $5)"))
+    for name in names:
+        title = b.scanner.display_name(name)
+        problem = key_trade_problem(name, t.key_info.get(name))
+        if problem:
+            out.append(f"{title}: {problem}" + ("" if t.state.live else " (в тесте не мешает)"))
+        if b.scalper.positions.get(name):
+            continue  # деньги сейчас в монете — это нормально
+        try:
+            free = await t.free(name, b.settings.quote)
+        except Exception as e:
+            out.append(f"{title}: не смог прочитать баланс ({human_error(e)})")
+            continue
+        if free < 5:
+            funding = await t.funding_usd(name)
+            if funding and funding >= 1:
+                out.append(t._funding_text({name: funding}))
+            else:
+                out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}, а биржа принимает ордер от $5. "
+                           "Пополни хотя бы до $5,5 (с запасом на округление), пока эта биржа будет ждать"
+                           + ("" if t.state.live else " (в тесте бот возьмёт виртуальные $5)"))
     if b.duplicate_running():
         out.append("работают две копии бота: покупки на паузе, пока не удалишь лишний сервис в Render")
     return out
@@ -277,29 +280,61 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
                 lines.append(f"1️⃣ ✅ {title}: ключ работает, торговать может" + perms_line(t.key_info.get(name)))
     name = sc.exchange()
 
-    # 2. деньги
-    if name:
-        title = html.escape(b.scanner.display_name(name))
+    async def _stuck_coin(ex_name: str, quote: str):
+        """Монета ≥ $5, в которой лежат деньги вне режима $5: (монета, $, занята ли ордером)."""
         try:
-            free = await t.free(name, quote)
+            for c, f, total, usd in await t.balances(ex_name):
+                if c != quote and usd and usd >= 5:
+                    return c, usd, f < total * 0.9
+        except Exception:
+            pass
+        return None
+
+    # 2. деньги: режим $5 торгует на каждой бирже с ключом своими деньгами
+    ready, low, tips = 0, [], []
+    for ex_name in sc.exchanges():
+        title = html.escape(b.scanner.display_name(ex_name))
+        held = sc.positions.get(ex_name)
+        if held:
+            ready += 1
+            lines.append(f"2️⃣ ✅ {title}: деньги в сделке ({html.escape(held['symbol'].split('/')[0])}), "
+                         "продажа по цели стоит на бирже")
+            continue
+        try:
+            free = await t.free(ex_name, quote)
         except Exception as e:
-            free = None
             lines.append(f"2️⃣ ⚠️ {title}: баланс не прочитан ({html.escape(human_error(e))})")
-        if free is not None:
-            if free >= 5:
-                lines.append(f"2️⃣ ✅ На торговом счёте {title}: <b>{free:.2f} {quote}</b> — режиму $5 хватает")
+            continue
+        if free >= 5:
+            ready += 1
+            lines.append(f"2️⃣ ✅ На торговом счёте {title}: <b>{free:.2f} {quote}</b> — режиму $5 хватает")
+            continue
+        funding = await t.funding_usd(ex_name)
+        if funding and funding >= 1:
+            lines.append(f"2️⃣ ❌ {title}: на торговом счёте {free:.2f} {quote}, а на <b>Funding ${funding:.2f}</b>. "
+                         "Бот видит только торговый счёт")
+            todo.append(f"перевести деньги: приложение {title} → Активы → Перевод → Funding → "
+                        + ("Unified Trading" if ex_name == "bybit" else "Spot"))
+        else:
+            coin = await _stuck_coin(ex_name, quote)
+            if coin:
+                c, usd, locked = coin
+                lines.append(f"2️⃣ ❌ {title}: {free:.2f} {quote} свободно, а <b>≈${usd:.2f} лежит в {html.escape(c)}</b> "
+                             "(купил не режим $5, он такую монету не ведёт)")
+                tips.append((f"на {title} {html.escape(c)} занят ордером: сначала /orders → отменить, потом " if locked
+                             else f"на {title} вернуть деньги в USDT: ")
+                            + f"<code>/sell {ex_name} {html.escape(c)} all</code> (или в приложении: Спот → {html.escape(c)}/USDT → Продать по рынку)")
             else:
-                funding = await t.funding_usd(name)
-                if funding and funding >= 1:
-                    lines.append(f"2️⃣ ❌ На торговом счёте {free:.2f} {quote}, а на <b>Funding ${funding:.2f}</b>. "
-                                 "Бот видит только торговый счёт")
-                    todo.append(f"перевести деньги: приложение {title} → Активы → Перевод → Funding → "
-                                + ("Unified Trading" if name == "bybit" else "Spot"))
-                else:
-                    lines.append(f"2️⃣ ❌ На торговом счёте {free:.2f} {quote}: биржа принимает ордер от $5")
-                    todo.append(f"пополнить торговый счёт {title} хотя бы до $5,5 (USDT)")
-    else:
+                lines.append(f"2️⃣ ➖ {title}: на торговом счёте {free:.2f} {quote} — меньше $5, эта биржа будет ждать")
+                low.append(title)
+    if not sc.exchanges():
         lines.append("2️⃣ ➖ Деньги проверю, когда заработает ключ")
+    elif not ready:
+        todo += tips
+        if low and not tips:
+            todo.append(f"пополнить торговый счёт ({', '.join(low)}) хотя бы до $5,5 USDT")
+    else:
+        lines += [f"   💡 {x}" for x in tips]
 
     # 3. проверка стратегии на истории
     if name:
@@ -598,9 +633,9 @@ def register(b: ArbitrageBot) -> None:
         if not on:
             sc.turn_off()
             await after_change()
-            pos = sc.st["pos"]
-            extra = ("\nОткрытая позиция осталась: продажа по цели стоит на бирже. Продать сразу: кнопка в /scalp."
-                     if pos and pos.get("live") else "")
+            live_pos = any(p.get("live") for p in sc.positions.values())
+            extra = ("\nОткрытые позиции остались: продажа по цели стоит на бирже. Продать сразу: кнопка в /scalp."
+                     if live_pos else "")
             await b._send(chat_id, "⏸ Режим $5 выключен." + extra)
             return
         if not b.trader.working:

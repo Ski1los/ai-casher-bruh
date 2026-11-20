@@ -202,7 +202,9 @@ def best_params(candles: list[list[float]], fee: float) -> dict | None:
 
 
 def new_scalp_state() -> dict:
-    return {"on": False, "pos": None, "paper_usd": None, "stats": {"cycles": 0, "wins": 0, "pnl": 0.0, "since": 0.0},
+    # positions: биржа -> позиция (на каждой бирже своя, деньги разных бирж работают одновременно)
+    # paper: биржа -> тестовый баланс
+    return {"on": False, "positions": {}, "paper": {}, "stats": {"cycles": 0, "wins": 0, "pnl": 0.0, "since": 0.0},
             "events": [], "last_buy_candle": {}}
 
 
@@ -212,8 +214,36 @@ class Scalper:
         self.duplicate_fn = duplicate_fn or (lambda: False)
         self.ranking: dict[str, list[dict]] = {}  # биржа -> [результаты проверки по монетам, лучшие сверху]
         self.ranked_at: dict[str, float] = {}
-        self.last_reason = ""  # что бот делал на последнем шаге и почему
+        self.reasons: dict[str, str] = {}  # биржа -> что режим делал на последнем шаге и почему
+        self._cur: str | None = None  # биржа, с которой сейчас работает шаг
         self.last_step = 0.0
+
+    @property
+    def last_reason(self) -> str:
+        items = [(n, r) for n, r in self.reasons.items() if r]
+        if len(items) == 1:
+            return items[0][1]
+        return "; ".join(f"{self._name(n) if n != '_' else 'общее'}: {r}" for n, r in items)
+
+    @last_reason.setter
+    def last_reason(self, text: str) -> None:
+        self.reasons[self._cur or "_"] = text
+
+    @property
+    def positions(self) -> dict[str, dict]:
+        return self.st["positions"]
+
+    @property
+    def pos(self) -> dict | None:
+        """Позиция на текущей бирже шага."""
+        return self.positions.get(self._cur or "")
+
+    @pos.setter
+    def pos(self, value: dict | None) -> None:
+        if value is None:
+            self.positions.pop(self._cur or "", None)
+        else:
+            self.positions[value["exchange"]] = value
 
     # --- состояние ----------------------------------------------------------
 
@@ -224,6 +254,10 @@ class Scalper:
             raw.update(new_scalp_state())
         for k, v in new_scalp_state().items():
             raw.setdefault(k, v)
+        old = raw.pop("pos", None)  # версия до v14: одна позиция и один тестовый баланс
+        if old:
+            raw["positions"][old["exchange"]] = old
+        raw.pop("paper_usd", None)  # старый тестовый баланс начнётся заново: теперь он у каждой биржи свой
         return raw
 
     @property
@@ -231,6 +265,8 @@ class Scalper:
         return bool(self.st["on"])
 
     def _event(self, text: str) -> None:
+        if self._cur and len(self.exchanges()) > 1:
+            text = f"{self._name(self._cur)}: {text}"
         ev = self.st["events"]
         ev.append([time.time(), text])
         del ev[:-EVENTS_KEEP]
@@ -259,12 +295,15 @@ class Scalper:
         lowest_sale = coins_usd * (1 + BREAKEVEN_EXTRA) / (1 - fee) ** 2  # самая низкая продажа — в безубыток
         return lowest_sale >= self._min_cost(name, symbol, price) * 1.001
 
+    def exchanges(self) -> list[str]:
+        """Все биржи с рабочими ключами: режим $5 торгует на каждой своими деньгами (Bybit первым)."""
+        working = list(self.trader.working)
+        return sorted(working, key=lambda n: (n != "bybit", n))
+
     def exchange(self) -> str | None:
-        """На какой бирже торговать: Bybit, если на ней есть ключ, иначе первая рабочая."""
-        working = self.trader.working
-        if not working:
-            return None
-        return "bybit" if "bybit" in working else working[0]
+        """Главная биржа (для проверки на истории и подсказок): Bybit, если есть ключ, иначе первая рабочая."""
+        ex = self.exchanges()
+        return ex[0] if ex else None
 
     def turn_on(self) -> None:
         st = self.st
@@ -352,44 +391,55 @@ class Scalper:
         self.last_step = now
         if not self.on:
             return []
-        name = self.exchange()
-        if name is None:
+        names = self.exchanges()
+        # позиции на биржах, ключ которых сейчас не работает, тоже не теряем из виду
+        names += [n for n in self.positions if n not in names and n in self.trader.scanner.exchanges]
+        self.reasons = {n: r for n, r in self.reasons.items() if n in names}
+        if not names:
+            self._cur = None
             self.last_reason = "нет рабочего ключа биржи (/keys)"
             return []
+        self.reasons.pop("_", None)
         out: list[str] = []
-        if not self.st["pos"]:
+        for name in names:
+            out += await self._step_one(name, now)
+        return out
+
+    async def _step_one(self, name: str, now: float) -> list[str]:
+        self._cur = name
+        if not self.pos:
             try:  # проверка на истории — до блокировки: она долгая, а ручные ордера ждать не должны
                 await self.rank(name)
             except Exception as e:
                 log.info("Проверка на истории: %s", e)
         async with self.trader._lock:
+            self._cur = name
             try:
-                if self.st["pos"]:
-                    out += await self._manage(now)
-                else:
-                    if self.duplicate_fn():
-                        self.last_reason = ("работают две копии бота: новые покупки на паузе, "
-                                            "удали лишний сервис в Render (/doctor)")
-                        return out
-                    out += await self._look_for_entry(name, now)
+                if self.pos:
+                    return await self._manage(now)
+                if self.duplicate_fn():
+                    self.last_reason = ("работают две копии бота: новые покупки на паузе, "
+                                        "удали лишний сервис в Render (/doctor)")
+                    return []
+                return await self._look_for_entry(name, now)
             except TradeError as e:
                 self.last_reason = str(e)
             except Exception as e:
-                log.exception("Ошибка режима $5")
+                log.exception("Ошибка режима $5 (%s)", name)
                 self.last_reason = human_error(e)
-        return out
+        return []
 
     async def _free_usd(self, name: str) -> float:
-        st = self.st
+        paper = self.st["paper"]
         if self.trader.state.live:
             return await self.trader.free(name, self.trader.settings.quote)
-        if st["paper_usd"] is None:  # тест: начинаем с реального свободного баланса (или $5, если пусто)
+        if paper.get(name) is None:  # тест: начинаем с реального свободного баланса (или $5, если пусто)
             try:
                 real = await self.trader.free(name, self.trader.settings.quote)
             except Exception:
                 real = 0.0
-            st["paper_usd"] = round(real if real >= 5 else 5.0, 4)
-        return float(st["paper_usd"])
+            paper[name] = round(real if real >= 5 else 5.0, 4)
+        return float(paper[name])
 
     async def _look_for_entry(self, name: str, now: float) -> list[str]:
         t = self.trader
@@ -424,7 +474,7 @@ class Scalper:
             i = len(closes) - 1
             p = Params(r["tp"], r["rsi_buy"])
             candle_ts = float(candles[-2][0])
-            if self.st["last_buy_candle"].get(symbol) == candle_ts:
+            if self.st["last_buy_candle"].get(f"{name}:{symbol}") == candle_ts:
                 continue
             if not signal_at(closes, ema(closes, EMA_LEN), rsi(closes), i, p):
                 continue
@@ -435,7 +485,7 @@ class Scalper:
             if not self._sellable(name, symbol, cost, ask):
                 skipped.append(symbol.split("/")[0])
                 continue
-            self.st["last_buy_candle"] = {symbol: candle_ts}
+            self.st["last_buy_candle"][f"{name}:{symbol}"] = candle_ts
             return await self._buy(name, symbol, cost, ask, p, now)
         names = ", ".join(r["symbol"].split("/")[0] for r in good)
         self.last_reason = f"жду отката: слежу за {names} (${cost:.2f} готовы к покупке)"
@@ -459,12 +509,12 @@ class Scalper:
             oid = str(order.get("id"))
         else:
             spent, got, oid = cost, cost / ask * (1 - fee), None
-            self.st["paper_usd"] = round(float(self.st["paper_usd"]) - cost, 6)
+            self.st["paper"][name] = round(float(self.st["paper"].get(name) or 0) - cost, 6)
         entry = spent / got * (1 - fee)  # цена до комиссии: комиссию считаем в target_price
         pos = {"exchange": name, "symbol": symbol, "amount": got, "cost": spent, "entry": entry,
                "tp": target_price(entry, p.tp, fee), "tp_pct": p.tp, "fee": fee, "opened_at": now,
                "order_id": None, "live": live, "breakeven": False}
-        self.st["pos"] = pos
+        self.pos = pos
         t._record(TradeRecord(now, name, "buy", symbol, live, spent, t.settings.quote, got, coin, spent,
                               source="scalp", order_id=oid,
                               note="режим $5: покупка на откате" + ("" if live else " (тест)")))
@@ -512,13 +562,13 @@ class Scalper:
         pos["order_id"] = None
 
     async def _manage(self, now: float) -> list[str]:
-        pos = self.st["pos"]
+        pos = self.pos
         t = self.trader
         name, symbol = pos["exchange"], pos["symbol"]
         coin = symbol.split("/")[0]
         if pos["live"] != t.state.live and not pos["live"]:
             # тестовую позицию в реальном режиме не продолжаем: закрываем её как тест
-            self.st["pos"] = None
+            self.pos = None
             self.last_reason = "тестовая позиция закрыта: включён реальный режим"
             return []
         if pos["live"] and not pos.get("order_id"):
@@ -561,7 +611,7 @@ class Scalper:
         return []
 
     async def _stop(self, bid: float, now: float) -> list[str]:
-        pos = self.st["pos"]
+        pos = self.pos
         t = self.trader
         if pos["live"]:
             await self._cancel_tp(pos)
@@ -576,7 +626,7 @@ class Scalper:
         return self._closed(got, "стоп-лосс", now)
 
     def _closed(self, got: float, why: str, now: float) -> list[str]:
-        pos = self.st["pos"]
+        pos = self.pos
         t = self.trader
         coin = pos["symbol"].split("/")[0]
         pnl = got - pos["cost"]
@@ -585,62 +635,81 @@ class Scalper:
         stats["wins"] += pnl > 0
         stats["pnl"] = round(stats["pnl"] + pnl, 6)
         if not pos["live"]:
-            self.st["paper_usd"] = round(float(self.st["paper_usd"] or 0) + got, 6)
+            ex_name = pos["exchange"]
+            self.st["paper"][ex_name] = round(float(self.st["paper"].get(ex_name) or 0) + got, 6)
         t._record(TradeRecord(now, pos["exchange"], "sell", pos["symbol"], pos["live"], pos["amount"], coin, got,
                               t.settings.quote, got, pnl_usd=pnl, source="scalp",
                               note=f"режим $5: {why}" + ("" if pos["live"] else " (тест)")))
-        self.st["pos"] = None
+        self.positions.pop(pos["exchange"], None)
         hours = (now - pos["opened_at"]) / 3600
         icon = "✅" if pnl >= 0 else "🔻"
         mode = "" if pos["live"] else "🧪 ТЕСТ: "
         self._event(f"продал {coin}: {pnl:+.4f}$ ({why})")
         self.last_reason = "продал, ищу следующий откат"
-        return [f"{icon} {mode}<b>Режим $5: продал {html.escape(coin)}</b> ({why}) через {hours:.1f} ч\n"
+        return [f"{icon} {mode}<b>Режим $5: продал {html.escape(coin)}</b> на {html.escape(self._name(pos['exchange']))} "
+                f"({why}) через {hours:.1f} ч\n"
                 f"${pos['cost']:.4f} → ${got:.4f} = <b>{pnl:+.4f}$</b> ({pnl / pos['cost'] * 100:+.2f}%)\n"
                 f"Всего в режиме $5: {stats['cycles']} сделок, {stats['pnl']:+.4f}$"]
 
-    async def sell_now(self) -> str:
+    async def sell_now(self, name: str | None = None) -> str:
         """Кнопка «Продать сейчас»: снять цель и продать по рынку (если позиция больше минимума биржи)."""
+        names = [name] if name else list(self.positions)
+        if not names or not any(self.positions.get(n) for n in names):
+            return "Позиций нет: продавать нечего."
+        out = []
         async with self.trader._lock:
-            pos = self.st["pos"]
-            if not pos:
-                return "Позиции нет: продавать нечего."
-            t = self.trader
-            ticker = await t.scanner.exchanges[pos["exchange"]].fetch_ticker(pos["symbol"])
-            bid = float(ticker.get("bid") or 0)
-            if pos["live"] and pos["amount"] * bid < self._min_cost(pos["exchange"], pos["symbol"], bid):
-                return (f"Сейчас позиция стоит ${pos['amount'] * bid:.2f}, это меньше минимального ордера биржи. "
-                        "Продать по рынку нельзя: ордер на продажу по цели остаётся стоять.")
-            out = await self._stop(bid, time.time())
-            return out[0].replace("стоп-лосс", "продажа вручную")
+            for n in names:
+                self._cur = n
+                pos = self.pos
+                if not pos:
+                    continue
+                t = self.trader
+                title = self._name(n)
+                try:
+                    ticker = await t.scanner.exchanges[n].fetch_ticker(pos["symbol"])
+                    bid = float(ticker.get("bid") or 0)
+                    if pos["live"] and pos["amount"] * bid < self._min_cost(n, pos["symbol"], bid):
+                        out.append(f"{html.escape(title)}: позиция стоит ${pos['amount'] * bid:.2f}, это меньше "
+                                   "минимального ордера биржи. Продать по рынку нельзя: продажа по цели остаётся стоять.")
+                        continue
+                    res = await self._stop(bid, time.time())
+                    out.append(res[0].replace("стоп-лосс", "продажа вручную"))
+                except TradeError as e:
+                    out.append(f"{html.escape(title)}: ❌ {html.escape(str(e))}")
+        return "\n\n".join(out)
 
     # --- тексты -------------------------------------------------------------
+
+    def _pos_line(self, pos: dict) -> str:
+        coin = pos["symbol"].split("/")[0]
+        hours = (time.time() - pos["opened_at"]) / 3600
+        be = " (безубыток)" if pos["breakeven"] else ""
+        return (f"<b>{fmt(pos['amount'])} {html.escape(coin)}</b> за ${pos['cost']:.2f}, держу {hours:.1f} ч, "
+                f"продажа по {pos['tp']:.6g}{be}")
 
     def status_text(self) -> str:
         st, t = self.st, self.trader
         live = t.state.live
         lines = ["🎯 <b>Режим $5: ловец откатов</b>",
                  "Покупает монету на откате на все свободные USDT и сразу ставит продажу на +0,6…1,3% после "
-                 "комиссий. Два ордера вместо трёх, поэтому хватает $5."]
+                 "комиссий. Два ордера вместо трёх, поэтому хватает $5. Торгует на каждой бирже с ключом "
+                 "своими деньгами одновременно."]
         state = ("🟢 включён" if st["on"] else "⚪️ выключен") + (", 🔴 реальные деньги" if live else ", 🧪 тест")
         lines.append(f"Состояние: <b>{state}</b>")
-        name = self.exchange()
-        if name:
-            lines.append(f"Биржа: {html.escape(self._name(name))}")
-        if not live and st["paper_usd"] is not None:
-            lines.append(f"Тестовый баланс: ${float(st['paper_usd']):.2f}")
-        pos = st["pos"]
-        if pos:
-            coin = pos["symbol"].split("/")[0]
-            hours = (time.time() - pos["opened_at"]) / 3600
-            be = " (безубыток)" if pos["breakeven"] else ""
-            lines.append(f"Позиция: <b>{fmt(pos['amount'])} {html.escape(coin)}</b> за ${pos['cost']:.2f}, "
-                         f"держу {hours:.1f} ч, продажа по {pos['tp']:.6g}{be}")
+        names = self.exchanges() + [n for n in self.positions if n not in self.exchanges()]
+        for n in names:
+            lines.append(f"\n<b>{html.escape(self._name(n))}</b>")
+            if not live and st["paper"].get(n) is not None:
+                lines.append(f"  тестовый баланс: ${float(st['paper'][n]):.2f}")
+            if self.positions.get(n):
+                lines.append("  позиция: " + self._pos_line(self.positions[n]))
+            if self.reasons.get(n):
+                lines.append(f"  сейчас: {html.escape(self.reasons[n])}")
+        if self.reasons.get("_"):
+            lines.append(f"Сейчас: {html.escape(self.reasons['_'])}")
         s = st["stats"]
         if s["cycles"]:
-            lines.append(f"Итог с включения: {s['cycles']} сделок, в плюс {s['wins']}, <b>{s['pnl']:+.4f}$</b>")
-        if self.last_reason:
-            lines.append(f"Сейчас: {html.escape(self.last_reason)}")
+            lines.append(f"\nИтог с включения: {s['cycles']} сделок, в плюс {s['wins']}, <b>{s['pnl']:+.4f}$</b>")
         if st["events"]:
             lines.append("\nПоследнее:")
             for at, text in st["events"][-4:]:
@@ -652,10 +721,13 @@ class Scalper:
 
     def status_dict(self) -> dict:
         st = self.st
-        pos = st["pos"]
+        keys = ("exchange", "symbol", "amount", "cost", "entry", "tp", "opened_at", "breakeven")
+        positions = [{k: p.get(k) for k in keys} for p in self.positions.values() if p]
+        paper = {n: v for n, v in st["paper"].items() if v is not None}
         return {"on": st["on"], "live": self.trader.state.live, "reason": self.last_reason,
-                "paper_usd": st["paper_usd"], "stats": dict(st["stats"]),
-                "pos": {k: pos[k] for k in ("symbol", "amount", "cost", "entry", "tp", "opened_at", "breakeven")} if pos else None,
+                "reasons": {n: r for n, r in self.reasons.items() if r},
+                "paper": paper, "paper_usd": round(sum(paper.values()), 4) if paper else None,
+                "stats": dict(st["stats"]), "positions": positions, "pos": positions[0] if positions else None,
                 "top": [{k: r[k] for k in ("symbol", "trades", "wins", "net_pct", "worst_pct", "tp")}
                         for r in (self.ranking.get(self.exchange() or "") or [])[:5]]}
 

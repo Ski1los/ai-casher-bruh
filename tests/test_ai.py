@@ -278,3 +278,15 @@ def test_assistant_ask_keeps_history_and_extracts_proposals():
         assert "ДАННЫЕ" in system and '"bybit":0.1' in system and "tri_min (" in system
 
     asyncio.run(run())
+
+
+def test_ai_advice_to_enable_withdraw_is_removed():
+    from bot.ai import WITHDRAW_NOTE, guard_withdraw
+
+    text = ("Рекомендации\n• Включить вывод средств на биржах, если планируешь реальную торговлю.\n"
+            "• Проверить срок действия API-ключей (/keys).\n• Создай ключ без права вывода.\n"
+            "• Плата за вывод монеты съедает прибыль на $5.")
+    out = guard_withdraw(text)
+    assert "Включить вывод" not in out and WITHDRAW_NOTE in out
+    assert "без права вывода" in out and "Плата за вывод" in out and "/keys" in out
+    assert guard_withdraw("Всё хорошо.") == "Всё хорошо."

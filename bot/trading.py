@@ -924,7 +924,7 @@ class Trader:
     async def panic(self) -> str:
         """Стоп-кран: выключить автоторговлю и реальный режим, отменить все открытые ордера."""
         self.state.auto = False
-        scalp_pos = bool(self.state.scalp.get("pos"))
+        scalp_pos = bool(self.state.scalp.get("positions") or self.state.scalp.get("pos"))
         if self.state.scalp:
             self.state.scalp["on"] = False
         was_live = self.state.live
@@ -1351,9 +1351,9 @@ class Trader:
                 icon = "✅" if status == "ok" else ("❔ не проверен" if status is None else f"❌ {status}")
                 lines.append(f"  {html.escape(self.scanner.display_name(n))}: {html.escape(icon)}")
         sc = st.scalp or {}
-        pos = sc.get("pos")
+        held = [p["symbol"].split("/")[0] for p in (sc.get("positions") or {}).values() if p]
         lines.append(f"🎯 Режим $5 (ловец откатов): {'🟢 включён' if sc.get('on') else '⏸ выключен'}"
-                     + (f", держу {html.escape(pos['symbol'].split('/')[0])}" if pos else "") + " · /scalp")
+                     + (f", держу {html.escape(', '.join(held))}" if held else "") + " · /scalp")
         lines.append(
             f"Автоторговля треугольниками: {'🟢 включена' if st.auto else '⏸ выключена'} "
             f"(циклы от {s.auto_min_profit_percent:g}% по стакану)"

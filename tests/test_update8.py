@@ -537,3 +537,14 @@ def test_version_text(monkeypatch):
     assert version_text() == f"v{BOT_VERSION}"
     monkeypatch.setenv("RENDER_GIT_COMMIT", "abcdef1234567")
     assert version_text() == f"v{BOT_VERSION} (abcdef1)"
+
+
+def test_ai_sees_plain_words_about_keys(market_env):
+    """ИИ путал withdraw=false с «надо включить» и писал «у BingX срок не указан»."""
+    b, _ = market_env
+    b.trader.key_info = {"bingx": {"spot_trade": True, "withdraw": False},
+                         "bybit": {"spot_trade": True, "withdraw": True}}
+    keys = b._extras_context()["api_keys"]
+    assert keys["bingx"]["expiry"].startswith("не истекает")
+    assert keys["bingx"]["withdraw_permission"].startswith("выключен — ПРАВИЛЬНО")
+    assert keys["bybit"]["withdraw_permission"].startswith("ВКЛЮЧЁН")
