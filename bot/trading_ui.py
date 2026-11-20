@@ -16,7 +16,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .ai import OrderIntent
-from .trading import (AUTO_MIN_FREE_USD, KEY_PAGES, OrderPlan, TradeError, fmt_amount, human_error,
+from .cloud import version_text
+from .trading import (KEY_PAGES, OrderPlan, TradeError, fmt_amount, human_error,
                       key_trade_problem)
 from .triangular import TriOpportunity
 
@@ -183,14 +184,19 @@ async def preflight(b: ArbitrageBot) -> list[str]:
         problem = key_trade_problem(name, t.key_info.get(name))
         if problem:
             out.append(f"{title}: {problem}" + ("" if t.state.live else " (в тесте не мешает, в реальном режиме ордера не пройдут)"))
-        if t.state.live:
-            try:
-                free = await t.free(name, b.settings.quote)
-            except Exception:
-                continue
-            if free < AUTO_MIN_FREE_USD:
-                out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}. Биржи не принимают ордера меньше "
-                           f"~$1–5 на шаг, циклы будут пропускаться. Пополни до $10–20 или включи /test")
+        try:
+            free = await t.free(name, b.settings.quote)
+        except Exception:
+            continue
+        need = t.min_start_usd(name)
+        if free < need:
+            funding = await t.funding_usd(name)
+            if funding and funding >= 1:
+                out.append(t._funding_text({name: funding}))
+            else:
+                out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}, а для цикла нужно от ${need:.2f} "
+                           f"(биржа принимает ордер через API от $5 на каждый из трёх шагов). Пополни до $10–20"
+                           + ("" if t.state.live else " (в тесте не мешает)"))
     return out
 
 
@@ -384,7 +390,7 @@ def register(b: ArbitrageBot) -> None:
     @dp.message(Command("why", "autostatus"))
     async def cmd_why(message: Message) -> None:
         if await owner_only(message):
-            await b._answer(message, b.trader.auto_status_text())
+            await b._answer(message, b.trader.auto_status_text() + f"\n\n<i>Версия бота: {version_text()}</i>")
 
     @dp.message(Command("autotrade"))
     async def cmd_autotrade(message: Message, command: CommandObject) -> None:
@@ -516,7 +522,7 @@ def register(b: ArbitrageBot) -> None:
         elif action == "log":
             await b._send(chat_id, b.trader.log_text())
         elif action == "why":
-            await b._send(chat_id, b.trader.auto_status_text())
+            await b._send(chat_id, b.trader.auto_status_text() + f"\n\n<i>Версия бота: {version_text()}</i>")
         elif action == "keys":
             await b._send(chat_id, await keys_text(b))
         elif action == "stop":

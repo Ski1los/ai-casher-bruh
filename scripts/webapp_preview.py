@@ -114,6 +114,11 @@ def build():
     b.scanner.exchanges["bingx"].funding = {"USDT": 12.5}  # деньги «не на том счёте» — /doctor подскажет
     b.scanner.exchanges["bingx"].options = {"accountsByType": {"funding": "fund", "spot": "spot"}}
 
+    if os.getenv("PREVIEW_FUNDING") == "1":  # сценарий «закинул $5, а они легли на Funding»
+        b.scanner.exchanges["bybit"].balance = {"USDT": 0.0}
+        b.scanner.exchanges["bybit"].funding = {"USDT": 5.0}
+        b.scanner.exchanges["bybit"].options = {"accountsByType": {"funding": "FUND", "spot": "UNIFIED"}}
+        b.trader.state.live = True
     blocked = os.getenv("PREVIEW_BLOCKED") == "1"  # сценарий «ключ только чтение и $1 на счёте»
     if blocked:
         b.scanner.exchanges["bybit"].balance = {"USDT": 1.14}

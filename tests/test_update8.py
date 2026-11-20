@@ -124,7 +124,7 @@ def test_live_low_balance_is_explained_and_skips_exchange():
     code, text = trader.auto_problem()
     assert code == "money"
     assert "Пополни" in trader._auto_hint()
-    assert "мало для циклов" in trader.auto_status_text()
+    assert "мало: для цикла нужно от" in trader.auto_status_text()
 
 
 def test_live_read_only_key_blocks_and_test_mode_does_not():
@@ -467,3 +467,73 @@ def test_ai_context_has_autotrade_and_extras(market_env):
     assert extras["tinvest"]["connected"] is False and "/dex" in extras["useful_commands"]
     json.dumps(ctx, ensure_ascii=False)
     json.dumps(extras, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# $5 на Bybit: минимум API и деньги на счёте Funding
+# ---------------------------------------------------------------------------
+
+
+def bybit_with_api_minimum(balances):
+    """Как настоящий Bybit с 2025 года: ордер через API от 5 USDT на каждой паре."""
+    trader, ex = bybit_trader(balances, auto_min_profit_percent=0.3)
+    for sym, m in ex.markets.items():
+        m["limits"]["cost"]["min"] = 5.0 if sym.endswith("/USDT") else 0.0001
+    return trader, ex
+
+
+def test_five_dollars_is_not_enough_for_a_bybit_cycle():
+    trader, ex = bybit_with_api_minimum({"USDT": 5.0})
+    need = trader.min_start_usd("bybit")
+    assert 5.0 < need < 5.3  # три шага по ≥ $5 после комиссии и движения цены
+    trader.state.auto = True  # тестовый режим: баланс всё равно виден
+    run(trader.auto_step(R([])))
+    st = trader.auto_status
+    assert st["free"] == {"bybit": 5.0} and st["low_money"] == {"bybit": 5.0}
+    text = trader.auto_status_text()
+    assert "на торговом счёте 5.00 USDT" in text and f"нужно от ${need:.2f}" in text
+    trader.recent_tri.clear()
+    trader.free_cache.clear()
+    ex.balance["USDT"] = 20.0
+    run(trader.auto_step(R([])))
+    assert trader.auto_status["low_money"] == {}
+
+
+def test_money_on_funding_account_is_found_and_explained():
+    trader, ex = bybit_with_api_minimum({"USDT": 0.0})
+    ex.options = {"accountsByType": {"funding": "FUND", "spot": "UNIFIED"}}
+    ex.funding = {"USDT": 5.0}
+    trader.state.auto = trader.state.live = True
+    run(trader.auto_step(R([])))
+    st = trader.auto_status
+    assert st["funding"] == {"bybit": 5.0}
+    code, text = trader.auto_problem()
+    assert code == "funding" and "Funding" in text and "Unified Trading" in text
+    hint = trader._auto_hint()
+    assert hint.startswith("💡 Деньги не на том счёте")
+    assert "на счёте Funding $5.00 (ими бот не торгует)" in trader.auto_status_text()
+    # биржа без отдельного Funding: ничего не выдумываем
+    ex.options = {}
+    trader.funding_cache.clear()
+    assert run(trader.funding_usd("bybit")) is None
+
+
+def test_period_best_says_it_is_the_market(monkeypatch):
+    trader, ex = bybit_trader({"USDT": 50})
+    trader.state.auto = True
+    trader.auto_stats["checks"] = 120
+    trader.auto_stats["best"] = {"net": 0.12, "path": "USDT → PEPE → BTC → USDT", "exchange": "bybit"}
+    run(trader.auto_step(R([])))
+    trader.auto_stats["checks"] = 120
+    trader.auto_stats["best"] = {"net": 0.12, "path": "USDT → PEPE → BTC → USDT", "exchange": "bybit"}
+    text = trader.auto_status_text()
+    assert "Лучший цикл за это время: +0.120%" in text and "дело в рынке" in text
+
+
+def test_version_text(monkeypatch):
+    from bot.cloud import BOT_VERSION, version_text
+
+    monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    assert version_text() == f"v{BOT_VERSION}"
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "abcdef1234567")
+    assert version_text() == f"v{BOT_VERSION} (abcdef1)"

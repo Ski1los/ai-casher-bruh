@@ -45,7 +45,8 @@ AUTO_TRY_MAX = 3  # сколько лучших циклов за один ск�
 AUTO_SKIP_REPEAT_SEC = 90  # пропущенный цикл (ушла цена, мало денег) снова пробуем через 1,5 минуты
 AUTO_REASONS_KEEP = 6
 AUTO_MIN_FREE_USD = 5.0  # меньше этого на торговом счёте циклы почти всегда упираются в минимальный ордер
-FREE_CACHE_SEC = 300  # как часто автоторговля перечитывает свободный баланс (в реальном режиме)
+FREE_CACHE_SEC = 300  # как часто автоторговля перечитывает свободный баланс
+FUNDING_CACHE_SEC = 600  # как часто проверять, не лежат ли деньги на счёте Funding
 HISTORY_EVERY_SEC = 15 * 60  # как часто записывать стоимость портфеля для графика
 HISTORY_KEEP = 1000  # ≈ 10 дней по 15 минут
 
@@ -335,6 +336,7 @@ class Trader:
         self.auto_status: dict = {}  # что автоторговля сделала на последнем скане и почему
         self.auto_stats: dict = new_auto_stats()  # сводка с момента включения / последнего отчёта
         self.free_cache: dict[str, tuple[float, float]] = {}  # биржа -> (когда, свободно USDT)
+        self.funding_cache: dict[str, tuple[float, float]] = {}  # биржа -> (когда, $ в стейблах на Funding)
         self.balance_cache: dict[str, tuple[float, list]] = {}
         self._lock = asyncio.Lock()  # одна операция с деньгами за раз
         for name, cred in self.creds.items():
@@ -488,6 +490,38 @@ class Trader:
     async def free(self, name: str, ccy: str) -> float:
         bal = await self._fetch_balance(name)
         return float((bal.get("free") or {}).get(ccy) or 0)
+
+    def min_start_usd(self, name: str) -> float:
+        """Сколько USDT нужно на торговом счёте, чтобы цикл из трёх шагов прошёл минимальный ордер биржи.
+
+        Bybit с января 2025 принимает ордера через API от 5 USDT. После первого шага сумма чуть
+        уменьшается на комиссию, поэтому ровно $5 на третьем шаге уже меньше минимума.
+        """
+        m = self.scanner.market(name, f"BTC/{self.settings.quote}") or {}
+        min_cost = float(((m.get("limits") or {}).get("cost") or {}).get("min") or 0)
+        fee = float(m.get("taker") or 0.001)
+        need = min_cost / (1 - fee) ** 3 * 1.02 if min_cost else 0.0  # +2% на движение цены за секунды цикла
+        return round(max(need, AUTO_MIN_FREE_USD), 2)
+
+    async def funding_usd(self, name: str, now: float | None = None) -> float | None:
+        """Сколько $ в стейблкоинах лежит на счёте Funding (бот им не торгует). None, если у биржи его нет."""
+        now = time.time() if now is None else now
+        cached = self.funding_cache.get(name)
+        if cached and now - cached[0] < FUNDING_CACHE_SEC:
+            return cached[1]
+        ex = self.scanner.exchanges.get(name)
+        accounts = (getattr(ex, "options", None) or {}).get("accountsByType") or {}
+        if "funding" not in accounts or str(accounts["funding"]).lower() == str(accounts.get("spot", "spot")).lower():
+            return None
+        try:
+            bal = await ex.fetch_balance({"type": "funding"})
+        except Exception as e:
+            log.info("Баланс Funding %s: %s", name, e)
+            return None
+        total = bal.get("total") or {}
+        usd = sum(float(total.get(c) or 0) for c in STABLES)
+        self.funding_cache[name] = (now, usd)
+        return usd
 
     async def usd_prices(self, name: str, coins: list[str]) -> dict[str, float]:
         prices = {c: 1.0 for c in coins if c in STABLES}
@@ -1058,9 +1092,18 @@ class Trader:
             else:
                 usable.append(name)
         executions: list[TriExecution] = []
-        if self.state.live and usable:
+        if usable:  # и в тесте: сразу видно, что на торговом счёте пусто, ещё до реального режима
             status["free"] = await self._free_quote(usable, now)
-            status["low_money"] = {n: v for n, v in status["free"].items() if v is not None and v < AUTO_MIN_FREE_USD}
+            status["low_money"] = {n: v for n, v in status["free"].items()
+                                   if v is not None and v < self.min_start_usd(n)}
+            status["need_usd"] = {n: self.min_start_usd(n) for n in usable}
+            funding = {}
+            for n in status["low_money"]:
+                f = await self.funding_usd(n, now)
+                if f and f >= 1:
+                    funding[n] = round(f, 2)
+            if funding:
+                status["funding"] = funding
         if not self.creds:
             status["reason"], status["code"] = "нет API-ключей бирж (/keys)", "no_keys"
         elif not usable:
@@ -1156,9 +1199,12 @@ class Trader:
             return "money", money[0]["reason"]
         low, free = st.get("low_money") or {}, st.get("free") or {}
         if self.state.live and low and len(low) == len([v for v in free.values() if v is not None]):
-            parts = ", ".join(f"{self.scanner.display_name(n)} {v:.2f} {self.settings.quote}" for n, v in low.items())
-            return "money", (f"на торговом счёте мало денег ({parts}). У бирж минимальный ордер около $1–5 на каждый шаг "
-                             f"цикла, поэтому с такой суммой сделки почти всегда будут отклоняться")
+            if st.get("funding"):
+                return "funding", self._funding_text(st["funding"])
+            parts = ", ".join(f"{self.scanner.display_name(n)} {v:.2f} {self.settings.quote} (нужно от "
+                              f"${self.min_start_usd(n):.2f})" for n, v in low.items())
+            return "money", (f"на торговом счёте мало денег: {parts}. Биржа принимает ордер через API только от "
+                             f"минимума (у Bybit $5) на КАЖДЫЙ из трёх шагов цикла, поэтому с такой суммой цикл не пройдёт")
         return None
 
     def auto_digest(self) -> str:
@@ -1188,17 +1234,29 @@ class Trader:
         top = sorted(reasons.items(), key=lambda kv: -kv[1]["n"])[:AUTO_REASONS_KEEP]
         return ["Почему не было сделок:"] + [f"  • {html.escape(v['text'])} ×{v['n']}" for _, v in top]
 
+    def _funding_text(self, funding: dict) -> str:
+        where = {"bybit": "Bybit → Активы → Перевод → со счёта Funding на Unified Trading",
+                 "bingx": "BingX → Активы → Перевод → со счёта Fund на Spot"}
+        return "; ".join(
+            f"на {self.scanner.display_name(n)} ${v:.2f} лежат на счёте Funding, а бот торгует только с торгового счёта. "
+            f"Переведи (бесплатно, 10 секунд): {where.get(n, 'Активы → Перевод → с Funding на торговый счёт')}"
+            for n, v in funding.items())
+
     def _auto_hint(self) -> str:
         st, s = self.auto_status, self.settings
         code = st.get("code") if st else ""
         codes = {t["code"] for t in (st.get("tried") or [])} if st else set()
         if code in ("blocked", "no_keys"):
             return "💡 Исправь ключ (см. выше), затем /doctor: там должно быть ✅."
+        if st and st.get("funding"):
+            return "💡 Деньги не на том счёте: " + self._funding_text(st["funding"]) + "."
         if st and st.get("low_money") and len(st["low_money"]) == len([v for v in (st.get("free") or {}).values() if v is not None]):
             codes.add("min_order")
         if "min_order" in codes or "no_balance" in codes or code in ("min_order", "no_balance"):
-            return ("💡 На торговом счёте слишком мало: биржа не принимает ордера меньше своего минимума. "
-                    "Пополни торговый (Unified/Spot) счёт хотя бы до $10–20 или оставь /test.")
+            need = max((st.get("need_usd") or {}).values(), default=AUTO_MIN_FREE_USD) if st else AUTO_MIN_FREE_USD
+            return (f"💡 На торговом счёте слишком мало. Bybit принимает ордера через API от $5 на каждый из трёх шагов "
+                    f"цикла, поэтому нужно минимум ${need:.2f}, а с запасом на движение цены $10–20. Пополни торговый "
+                    f"(Unified/Spot) счёт или оставь /test.")
         if code == "limits":
             return "💡 Сработал дневной лимит. Завтра счётчик обнулится, или поменяй /set daily_trades."
         if code in ("no_candidates", "moved"):
@@ -1231,8 +1289,11 @@ class Trader:
             return "\n".join(lines)
         for name, value in (st.get("free") or {}).items():
             if value is not None:
-                warn = " ⚠️ мало для циклов" if value < AUTO_MIN_FREE_USD else ""
-                lines.append(f"💵 {html.escape(self.scanner.display_name(name))}: свободно {value:.2f} {s.quote}{warn}")
+                need = self.min_start_usd(name)
+                warn = f" ⚠️ мало: для цикла нужно от ${need:.2f}" if value < need else ""
+                lines.append(f"💵 {html.escape(self.scanner.display_name(name))}: на торговом счёте {value:.2f} {s.quote}{warn}")
+        for name, value in (st.get("funding") or {}).items():
+            lines.append(f"📥 {html.escape(self.scanner.display_name(name))}: на счёте Funding ${value:.2f} (ими бот не торгует)")
         ago = max(0, time.time() - st["at"])
         lines.append(f"\n<b>Последняя проверка</b> {ago:.0f} с назад: циклов найдено {st['triangles']}, "
                      f"подходящих {st['candidates']}")
@@ -1250,6 +1311,10 @@ class Trader:
         hours = (time.time() - a["since"]) / 3600
         lines.append(f"\nЗа {hours:.1f} ч: сканов {a['checks']}, проверено стаканами {a['attempts']}, исполнено {a['executed']}"
                      + (f" ({a['pnl']:+.4f}$)" if a["executed"] else ""))
+        if a.get("best") and a["checks"] >= 10:
+            pb = a["best"]
+            lines.append(f"Лучший цикл за это время: {pb['net']:+.3f}% (нужно ≥{s.auto_min_profit_percent:g}%)"
+                         + (". Ни разу не дотянул до порога: дело в рынке, а не в боте" if pb["net"] < s.auto_min_profit_percent else ""))
         hint = self._auto_hint()
         if hint:
             lines.append(hint)
