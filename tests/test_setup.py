@@ -69,3 +69,31 @@ def test_hello_after_fresh_install(bot_env):
     assert "su:again" in buttons(session.markups[-1])
     asyncio.run(b._hello(None))
     assert len(session.sent) == 1
+
+
+def test_withdraw_question_answered_without_ai(bot_env):
+    b, session = bot_env
+    asyncio.run(send(b, "для реальной торговли просит включить вывод в апи ключе"))
+    text = session.sent[-1][1]
+    assert "«Вывод» боту НЕ нужно" in text and "Спот торговля" in text
+    asyncio.run(send(b, "сделай вывод по рынку"))  # «вывод» = итог, не про ключ: обычный ответ
+    assert "«Вывод» боту НЕ нужно" not in session.sent[-1][1]
+
+
+def test_perms_line_says_withdraw_off_is_right():
+    from bot.trading import parse_bingx_key
+    from bot.trading_ui import perms_line
+
+    info = parse_bingx_key({"permissions": [1, 2], "ipAddresses": []})
+    line = perms_line(info)
+    assert "спот ✅" in line and "вывод ⬜️ выключен, так и надо" in line
+    assert "включён" in perms_line(parse_bingx_key({"permissions": [1, 2, 5]}))
+    assert perms_line(None) == ""
+
+
+def test_keys_help_never_asks_for_withdraw(bot_env):
+    b, session = bot_env
+    b.trader.creds = {}
+    asyncio.run(send(b, "/keys"))
+    text = session.sent[-1][1]
+    assert "Вывод (Withdraw) НЕ включай" in text and "⬜️ Вывод" in text
