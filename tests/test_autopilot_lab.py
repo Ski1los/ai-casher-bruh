@@ -4,8 +4,10 @@
 import asyncio
 import time
 
+import pytest
+
 from bot.opportunities import Promo, risk_coins
-from bot.scalper import CANDLE_SEC, COIN_COOLDOWN_SEC, STREAK_PAUSE_SEC
+from bot.scalper import CANDLE_SEC, COIN_COOLDOWN_SEC, STREAK_PAUSE_SEC, SLIPPAGE, trade_return
 from tests.test_ai_flow import buttons
 from tests.test_scalper import dip_candles, make
 from tests.test_telegram_flow import send
@@ -39,6 +41,23 @@ def test_lab_opens_paper_trade_on_live_signal_and_closes_at_target():
     assert s["n"] == 1 and s["wins"] == 1 and s["sum"] > 0.5
     assert not ex.created  # лаборатория никогда не отправляет ордера
     assert "Лаборатория" in sc.lab_text() and "1 сделок (1 в плюс)" in sc.lab_text()
+
+
+def test_lab_stop_gap_uses_open_and_does_not_send_orders():
+    sc, trader, ex = make(balance=5.1, live=False)
+    run(sc.rank("a"))
+    run(sc.lab_step("a", now=1_000_000))
+    key, _ = lab_key(sc)
+    pos = sc.lab["open"][key]
+    candles = [list(c) for c in ex.ohlcv["SOL/USDT"]]
+    opening = pos["stop"] * 0.8
+    candles[-1][1:5] = [opening, opening * 1.01, opening * 0.99, opening]
+    candles.append([candles[-1][0] + 300_000, opening, opening, opening, opening, 1])
+    ex.ohlcv["SOL/USDT"] = candles
+    expected = trade_return(pos["entry"], opening * (1 - SLIPPAGE), pos["fee"]) * 100
+    run(sc.lab_step("a", now=1_000_000 + CANDLE_SEC))
+    assert sc.lab["stats"][key]["sum"] == pytest.approx(expected, abs=0.001)
+    assert not ex.created
 
 
 def test_lab_runs_once_per_candle():
@@ -177,7 +196,7 @@ def test_alt_strategy_proven_in_lab_trades_for_real_with_star():
     assert sc.positions["a"]["strategy"] == alt["strategy"]
     rows = sc.lab_rows("a")
     assert any(x["promoted"] and not x["main"] for x in rows)
-    assert "⭐ <b>доказала себя вживую" in sc.lab_text("a")
+    assert "⭐ <b>прошла бумажный порог лаборатории" in sc.lab_text("a")
 
 
 def test_alt_with_losing_history_is_never_promoted():
