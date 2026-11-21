@@ -1085,11 +1085,16 @@ class Scalper:
         price = t._price(ex, pos["symbol"], pos["tp"])
         try:
             order = await ex.create_order(pos["symbol"], "limit", "sell", amount, price)
+            if not isinstance(order, dict) or not order.get("id"):
+                raise TradeError("биржа не вернула ID ордера")
         except Exception as e:
-            pos["order_id"] = None
-            self._event(f"не смог выставить продажу {coin}: {human_error(e)}")
-            raise TradeError(f"не смог выставить продажу {coin}: {human_error(e)}. Попробую снова") from e
-        pos["order_id"] = str(order.get("id"))
+            # Запрос мог дойти до биржи, даже если ответ потерялся: не выставляем повторно.
+            pos["reconcile_required"] = True
+            self.turn_off()
+            self._event(f"статус продажи {coin} неясен: {human_error(e)}")
+            raise TradeError(f"статус продажи {coin} неясен; автопилот остановлен: "
+                             "сверь открытые ордера и баланс на бирже") from e
+        pos["order_id"] = str(order["id"])
         pos["amount"] = amount
 
     async def _cancel_tp(self, pos: dict) -> None:
@@ -1140,7 +1145,16 @@ class Scalper:
                 got = cost - fee_usd if fees else cost * (1 - pos["fee"])
                 return self._closed(got, "цель", now)
             if status in ("canceled", "cancelled", "expired", "rejected"):
-                pos["order_id"] = None  # ордер сняли (например, вручную): выставим заново на следующем шаге
+                try:
+                    no_fill = o.get("filled") is not None and float(o["filled"]) == 0
+                except (TypeError, ValueError):
+                    no_fill = False
+                if not no_fill:
+                    pos["reconcile_required"] = True
+                    self.turn_off()
+                    raise TradeError("отменённая продажа могла частично исполниться: "
+                                     "сверь ордер и баланс на бирже; повторная продажа заблокирована")
+                pos["order_id"] = None  # подтверждена отмена без исполнения
                 self._event(f"продажа {coin} была отменена, выставляю заново")
                 return []
         ticker = await t.scanner.exchanges[name].fetch_ticker(symbol)
