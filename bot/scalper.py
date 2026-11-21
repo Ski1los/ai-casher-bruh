@@ -537,6 +537,8 @@ class Scalper:
         self.reasons.pop("_", None)
         out: list[str] = []
         for name in names:
+            if not self.on:
+                break
             out += await self._step_one(name, now)
         return out
 
@@ -573,6 +575,8 @@ class Scalper:
                 return await self._look_for_entry(name, now)
             except TradeError as e:
                 self.last_reason = str(e)
+                if self.pos and self.pos.get("reconcile_required"):
+                    return [f"⛔ Автопилот остановлен: {html.escape(str(e))}"]
             except Exception as e:
                 log.exception("Ошибка режима $5 (%s)", name)
                 self.last_reason = human_error(e)
@@ -1083,14 +1087,26 @@ class Scalper:
         pos["amount"] = amount
 
     async def _cancel_tp(self, pos: dict) -> None:
+        if pos.get("reconcile_required"):
+            raise TradeError("позиция требует ручной сверки ордера и баланса на бирже; повторная продажа заблокирована")
         if pos["live"] and pos.get("order_id"):
+            oid = pos["order_id"]
             try:
-                await self.trader._ex(pos["exchange"]).cancel_order(pos["order_id"], pos["symbol"])
+                ex = self.trader._ex(pos["exchange"])
+                result = await ex.cancel_order(oid, pos["symbol"])
+                # Ответ на отмену часто содержит только ID. Нужно подтвердить и статус, и объём исполнения.
+                if not isinstance(result, dict) or result.get("status") not in ("canceled", "cancelled") or result.get("filled") is None:
+                    result = await self.trader._fetch_order(ex, oid, pos["symbol"])
+                if (not isinstance(result, dict) or result.get("status") not in ("canceled", "cancelled")
+                        or result.get("filled") is None or float(result["filled"]) != 0):
+                    raise TradeError("отмена или отсутствие частичного исполнения не подтверждены")
             except Exception as e:
-                # Не знаем, отменён ли ордер: нельзя выставлять замену или продавать повторно.
-                log.info("Отмена ордера %s: %s", pos["order_id"], e)
-                raise TradeError(f"не удалось подтвердить отмену ордера {pos['order_id']}; "
-                                 "проверь /orders и баланс перед повторной продажей") from e
+                # Повторная продажа может задеть другие активы или продублировать исполнение.
+                pos["reconcile_required"] = True
+                self.turn_off()
+                log.info("Отмена ордера %s не подтверждена: %s", oid, e)
+                raise TradeError(f"не удалось подтвердить отмену ордера {oid} без исполнения; "
+                                 "автопилот остановлен: сверь ордер и баланс на бирже") from e
         pos["order_id"] = None
 
     async def _manage(self, now: float) -> list[str]:
@@ -1098,6 +1114,9 @@ class Scalper:
         t = self.trader
         name, symbol = pos["exchange"], pos["symbol"]
         coin = symbol.split("/")[0]
+        if pos.get("reconcile_required"):
+            self.turn_off()
+            raise TradeError("позиция требует ручной сверки ордера и баланса на бирже")
         if pos["live"] != t.state.live and not pos["live"]:
             # тестовую позицию в реальном режиме не продолжаем: закрываем её как тест
             self.pos = None
