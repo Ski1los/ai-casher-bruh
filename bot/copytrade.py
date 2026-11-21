@@ -321,7 +321,9 @@ def shrunk_avg(w: dict) -> float:
 
 def buy_links(mint: str) -> dict[str, str]:
     jup = f"https://jup.ag/swap/SOL-{mint}"
-    return {"phantom": f"https://phantom.app/ul/browse/{quote(jup, safe='')}?ref={quote('https://jup.ag', safe='')}",
+    ref = quote("https://jup.ag", safe="")
+    return {"phantom": f"https://phantom.app/ul/browse/{quote(jup, safe='')}?ref={ref}",
+            "phantom_sell": f"https://phantom.app/ul/browse/{quote(f'https://jup.ag/swap/{mint}-SOL', safe='')}?ref={ref}",
             "jupiter": jup, "dexscreener": f"https://dexscreener.com/solana/{mint}",
             "gmgn": f"https://gmgn.ai/sol/token/{mint}"}
 
@@ -329,7 +331,7 @@ def buy_links(mint: str) -> dict[str, str]:
 def new_state() -> dict:
     return {"on": False, "signals": True, "wallets": {}, "open": {}, "closed": [], "filter": dict(FILTER_DEFAULT),
             "lessons": [], "mistakes": {}, "candidates": {}, "graveyard": [], "discovered_at": 0.0,
-            "signal_log": {}, "stats": {"copies": 0, "skipped_stale": 0, "no_pair": 0}}
+            "signal_log": {}, "stats": {"copies": 0, "skipped_stale": 0, "no_pair": 0}, "real": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +385,8 @@ class CopyTrader:
         self.changes = 0  # растёт при каждом изменении: пора сохранить в бэкап
         self._sol_usd: tuple[float, float] = (0.0, 0.0)
         self._busy = asyncio.Lock()
+        self.opened_now: list[str] = []
+        self.closed_now: list[tuple[str, dict, str]] = []
 
     # --- состояние ----------------------------------------------------------
 
@@ -495,6 +499,7 @@ class CopyTrader:
         async with self._busy:
             now = time.time() if now is None else now
             self.last_step = now
+            self.opened_now, self.closed_now = [], []  # для реальной торговли (bot/memetrade.py)
             events: list[dict] = []
             try:
                 sol = await self.sol_usd()
@@ -567,6 +572,7 @@ class CopyTrader:
                                 "w_amount": sw["amount"], "w_usd": round(sw["usd"] or sw["sol"] * sol_usd, 2),
                                 "feats": feats, "passed": passed, "reasons": reasons[:3], "hard_fail": hard}
         self.st["stats"]["copies"] += 1
+        self.opened_now.append(key)
         w["tokens"] = ([p.symbol[:16]] + [t for t in w["tokens"] if t != p.symbol[:16]])[:8]
         if chase is not None:
             w["chase"] = (w["chase"] + [round(chase, 3)])[-WINDOW:]
@@ -596,7 +602,8 @@ class CopyTrader:
                 f"Цена ${p.price_usd:.8g}. Если копируешь — не больше суммы, которую не жалко; "
                 f"выход: когда кошелёк продаст (пришлю), или стоп −{STOP_PCT:.0%}.")
         links = buy_links(pos["mint"])
-        return {"text": text, "buttons": [("👻 Купить в Phantom", links["phantom"]), ("📈 DexScreener", links["dexscreener"])]}
+        return {"text": text, "buttons": [("👻 Купить в Phantom", links["phantom"]), ("📈 DexScreener", links["dexscreener"])],
+                "mint": pos["mint"]}
 
     async def _mark(self, now: float, events: list[dict]) -> None:
         if not self.st["open"]:
@@ -617,6 +624,7 @@ class CopyTrader:
     def _close(self, key: str, price: float, why: str, now: float, events: list[dict]) -> None:
         pos = self.st["open"].pop(key)
         pos["closed_at"] = now
+        self.closed_now.append((key, pos, why))
         exit_eff = price * (1 - SLIPPAGE - PHANTOM_FEE)
         ret = (exit_eff / pos["entry"] - 1 - 2 * NETWORK_USD / COPY_USD) * 100
         if why == "ликвидность ушла":
@@ -636,7 +644,7 @@ class CopyTrader:
             if w["status"] == "star" and pos["passed"] and why == "кошелёк продал" and self.st["signals"]:
                 events.append({"text": (f"🐋 ⭐ <b>{html.escape(w['name'])}</b> продал <b>{html.escape(pos['symbol'])}</b>. "
                                         f"Если копировал — продавай. Копия без денег: <b>{ret:+.1f}%</b>"),
-                               "buttons": [("👻 Продать в Phantom", buy_links(pos["mint"])["phantom"])]})
+                               "buttons": [("👻 Продать в Phantom", buy_links(pos["mint"])["phantom_sell"])]})
             self._evolve(pos["wallet"], w, ret, now, events)
         filt, lesson = learn_filter(self.st["closed"], self.st["filter"])
         if lesson:

@@ -1283,8 +1283,59 @@ function copyCard() {
       <label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
     <div class="small muted press" data-act="copy" style="margin-top:8px;white-space:normal">${c.wallets ? `Слежу за ${c.wallets} кошельками · ⭐ ${c.star_count}${c.stars.length ? ": " + c.stars.map(esc).join(", ") : ""}${c.open ? ` · открыто копий ${c.open}` : ""}` : "Сам найдёт кошельки, которые рано покупают растущие токены, проверит их копиями без денег и пришлёт сигналы лучших."}</div>
     ${s.taken ? `<div class="small" style="margin-top:6px">Копии без денег: ${s.taken} · в плюс ${s.taken_wins} · <b class="${cls(s.taken_sum)}">${pct(s.taken_sum, 1)}</b></div>` : ""}
+    ${c.real && c.real.configured ? `<div class="small press" data-act="copy" style="margin-top:6px">💸 Реально: ${c.real.on ? "🟢 автокопирование" : "⏸ выкл"}${c.real.positions ? ` · позиций ${c.real.positions}` : ""}${c.real.sells ? ` · <b class="${cls(c.real.pnl_usd)}">${money(c.real.pnl_usd, { sign: true, d: 2 })}</b>` : ""}</div>` : ""}
     ${c.lesson ? `<div class="tiny muted" style="margin-top:6px;white-space:normal">🧠 ${esc(c.lesson)}</div>` : ""}
   </div>`;
+}
+
+function realBlock(c) {
+  const r = c.real || {};
+  if (!r.configured) {
+    if (!owner()) return "";
+    return `<div class="card" style="margin-top:10px"><div class="b">💸 Торговать реально</div>
+      ${r.error ? `<div class="banner" style="margin-top:8px">⚠️ ${esc(r.error)}</div>` : ""}
+      <div class="small muted" style="margin-top:6px;white-space:normal">Бот сам покупает и продаёт мемкоины вслед за ⭐-кошельками — с отдельного аккаунта «Бот» в твоём Phantom.</div>
+      <ol class="small" style="margin:8px 0 0 18px;padding:0;white-space:normal;line-height:1.5">
+        <li>Phantom → «Добавить аккаунт» → «Создать новый», назови «Бот», переведи на него ~$5–10 в SOL.</li>
+        <li>Настройки → «Управление аккаунтами» → «Бот» → «Показать приватный ключ» → скопируй.</li>
+        <li>Render → Environment → <b>SOLANA_TRADER_KEY</b> = ключ → Save. Бот перезапустится.</li></ol>
+      <div class="tiny muted" style="margin-top:8px;white-space:normal">⛔ Ключ — только в Render. Никогда не присылай его в чат: бот удалит такое сообщение. Сид-фраза не нужна.</div></div>`;
+  }
+  const s = r.stats || {};
+  const bal = r.balance_sol != null ? `${r.balance_sol.toFixed(4)} SOL${r.balance_usd != null ? " ≈ " + money(r.balance_usd, { d: 2 }) : ""}` : "—";
+  const pos = (r.positions || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.symbol)}${p.selling ? ` <span class="pill test">продаю…</span>` : ""}</div><div class="s">${p.source === "copy" ? "копия ⭐ " + esc(p.wallet) : "вручную"} · ${money(p.usd_in, { d: 2 })} · ${ago(p.opened)}</div></div>
+    <div class="r" style="display:flex;gap:8px;align-items:center"><div class="b num ${p.pct == null ? "muted" : cls(p.pct)}">${p.pct == null ? "—" : pct(p.pct, 1)}</div>${owner() ? `<button class="btn sm ghost" data-act="meme-sell" data-v="${esc(p.mint)}" data-s="${esc(p.symbol)}">Продать</button>` : ""}</div></div>`).join("");
+  const closed = (r.closed || []).slice(0, 5).map((t) => `<div class="item"><div class="grow"><div class="t">${esc(t.symbol)}</div><div class="s" style="white-space:normal">${esc(t.why)} · ${when(t.closed)}</div></div><div class="r"><div class="b num ${t.pnl_usd == null ? "muted" : cls(t.pnl_usd)}">${t.pnl_usd == null ? "—" : money(t.pnl_usd, { sign: true, d: 2 })}</div>${t.pct != null ? `<div class="s">${pct(t.pct, 1)}</div>` : ""}</div></div>`).join("");
+  const dec = (r.decisions || []).slice(0, 5).map((x) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">${hm(x.at)} <b>${esc(x.symbol)}</b> — ${esc(x.text)}</div>`).join("");
+  return `<div class="card pilot-card ${r.on ? "on" : ""}" style="margin-top:10px">
+    <div class="row between"><div><div class="b">💸 Реальная торговля</div><div class="tiny muted">кошелёк «Бот» · Jupiter</div></div>
+      ${owner() ? `<label class="switch"><input type="checkbox" data-act="meme-on" ${r.on ? "checked" : ""}><span></span></label>` : `<span class="pill ${r.on ? "ok" : "gray"}">${r.on ? "вкл" : "выкл"}</span>`}</div>
+    ${r.address ? `<div class="small" style="margin-top:8px">Баланс: <b>${bal}</b> <span class="tiny dim">${esc(r.address.slice(0, 4) + "…" + r.address.slice(-4))}</span></div>` : ""}
+    ${r.paused_until ? `<div class="banner" style="margin-top:8px">⏸ Пауза после убытков до ${hm(r.paused_until)}</div>` : ""}
+    ${owner() ? `<div class="small muted" style="margin-top:10px">Сумма сделки</div>
+      <div class="chips" style="margin-top:6px">${(r.sizes || [1, 2, 3, 5]).map((v) => `<div class="chip ${r.size_usd === v ? "on" : ""}" data-act="meme-size" data-v="${v}">$${v}</div>`).join("")}</div>
+      <div class="small muted" style="margin-top:10px">Кого копировать</div>
+      <div class="chips" style="margin-top:6px"><div class="chip ${r.scope === "star" ? "on" : ""}" data-act="meme-scope" data-v="star">только ⭐</div><div class="chip ${r.scope === "good" ? "on" : ""}" data-act="meme-scope" data-v="good">⭐ + 👀 хорошие</div></div>` : ""}
+    <div class="tiny muted" style="margin-top:8px;white-space:normal">До ${r.max_open} позиций · стоп −${Math.round(r.stop_pct * 100)}% · лимит убытка ${money(r.daily_loss_usd, { d: 0 })}/день · сегодня ${money(r.day_pnl_usd, { sign: true, d: 2 })}</div>
+    ${s.sells ? `<div class="small" style="margin-top:6px">Продаж ${s.sells} · в плюс ${s.wins} · <b class="${cls(s.pnl_usd)}">${money(s.pnl_usd, { sign: true, d: 2 })}</b></div>` : ""}
+    ${pos ? `<div class="list" style="margin-top:10px">${pos}</div>${owner() && (r.positions || []).length > 1 ? `<button class="btn block ghost sm" style="margin-top:8px" data-act="meme-sellall">🧯 Продать всё</button>` : ""}` : ""}
+    ${owner() ? `<div class="row" style="gap:8px;margin-top:10px"><input id="memeMint" class="grow" placeholder="Адрес токена — купить вручную" autocomplete="off"><button class="btn sm primary" data-act="meme-buy">$${r.size_usd}</button></div>` : ""}
+    ${closed ? `<div class="small muted" style="margin-top:10px">Сделки</div><div class="list" style="margin-top:6px">${closed}</div>` : ""}
+    ${dec ? `<div class="small muted" style="margin-top:10px">Решения бота</div>${dec}` : ""}
+    ${r.last_error ? `<div class="tiny" style="margin-top:8px;color:var(--red);white-space:normal">⚠️ ${esc(r.last_error)}</div>` : ""}
+  </div>`;
+}
+
+async function memeAction(body, okText, btn) {
+  if (btn) busy(btn, true);
+  try {
+    const r = await api("/api/meme", body);
+    S.copy = r;
+    toast((r.done && r.done[0] ? r.done[0].split("\n")[0] : okText) || "Готово");
+    haptic.ok();
+    copySheet();
+    refresh();
+  } catch (e) { fail(e); } finally { if (btn) busy(btn, false); }
 }
 
 async function loadCopy() {
@@ -1310,6 +1361,7 @@ function copySheet() {
   const lessons = (c.lessons || []).map((l) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="s" style="white-space:normal;color:var(--text)">${esc(l.text)}</div><div class="tiny dim">${when(l.at)}</div></div></div>`).join("");
   Sheet.open("Копитрейдинг", `
     <div class="row between"><span class="pill ${c.on ? "ok" : "gray"}">${c.on ? "🟢 работает" : "⏸ выключен"}</span>${c.searching ? `<span class="pill test">🔎 ищу кошельки…</span>` : ""}</div>
+    ${realBlock(c)}
     ${owner() ? `<div class="list" style="margin-top:10px">
       <div class="item"><div class="grow"><div class="t">🐋 Копитрейдинг</div><div class="s">проверяет кошельки каждые 1,5 мин, ищет новые раз в 2 ч</div></div><label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""}><span></span></label></div>
       <div class="item"><div class="grow"><div class="t">🔔 Сигналы ⭐</div><div class="s">покупки и продажи лучших кошельков — в чат с кнопкой Phantom</div></div><label class="switch"><input type="checkbox" data-act="copy-sig" ${c.signals ? "checked" : ""}><span></span></label></div>
@@ -1755,6 +1807,12 @@ document.addEventListener("click", async (e) => {
     case "pilot": haptic.tap(); pilotSheet(); break;
     case "copy": haptic.tap(); copySheet(); loadCopy(); break;
     case "copy-w": haptic.tap(); copyWalletSheet(d.v); break;
+    case "meme-size": haptic.sel(); memeAction({ size: Number(d.v) }, "Сумма $" + d.v); break;
+    case "meme-scope": haptic.sel(); memeAction({ scope: d.v }, d.v === "star" ? "Только ⭐" : "⭐ + 👀"); break;
+    case "meme-sell": if (await popup("Продать " + (d.s || "") + "?", "Бот продаст всю позицию за SOL через Jupiter.", "Продать")) memeAction({ sell: d.v }, "Продано", el); break;
+    case "meme-sellall": if (await popup("Продать всё?", "Все позиции бота будут проданы за SOL.", "Продать всё")) memeAction({ sell_all: true }, "Продано", el); break;
+    case "meme-buy": { const m = ($("#memeMint").value || "").trim(); if (!m) { toast("Вставь адрес токена", true); break; }
+      if (await popup("Купить?", "Бот проверит токен (можно ли продать обратно, ликвидность) и купит на $" + (S.copy.real || {}).size_usd + ".", "Купить")) memeAction({ buy: m }, "Куплено", el); break; }
     case "copy-find": haptic.tap(); copyAction({ find: true }, "Ищу кошельки — результат придёт в чат"); break;
     case "copy-add": { const a = ($("#cpAddr").value || "").trim(); if (a) copyAction({ add: a }, "Кошелёк добавлен"); break; }
     case "copy-del": if (await popup("Убрать кошелёк?", "Бот перестанет его отслеживать.", "Убрать")) copyAction({ remove: d.v }, "Убрал"); break;
@@ -1841,6 +1899,11 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.act === "copy-on") copyAction({ on: el.checked }, el.checked ? "Копитрейдинг включён" : "Выключен");
   else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
+  else if (el.dataset.act === "meme-on") {
+    if (!el.checked) memeAction({ on: false }, "Автокопирование выключено");
+    else popup("Торговать реальными SOL?", "Бот сам будет покупать мемкоины за ⭐-кошельками с аккаунта «Бот» и сам продавать (вслед за кошельком, стоп −40%, 48 ч). Мемкоины часто падают до нуля — клади только то, что не жалко.", "Включить")
+      .then((ok) => { if (ok) memeAction({ on: true }, "Автокопирование включено"); else el.checked = false; });
+  }
   else if (el.dataset.set) saveSetting(el);
 });
 document.addEventListener("input", (e) => {
