@@ -2,10 +2,12 @@
 
 import asyncio
 
+import pytest
+
 from bot.config import Settings
 from bot.scalper import (MAX_HOLD_SEC, Params, Scalper, backtest, best_params, ema, indicators, rsi, signal_at,
                          target_price, trade_return)
-from bot.trading import Trader
+from bot.trading import TradeError, Trader
 from tests.fake_exchange import FakeTradingExchange, mk_market
 from tests.test_trading import KEYS, FakeScanner
 
@@ -311,3 +313,21 @@ def test_webapp_autopilot_start_and_coins(bot_env, monkeypatch):
         assert st == 200 and r["scalp"]["on"] and not r["scalp"]["use_coins"]
 
     tw.call(b, flow)
+
+
+def test_failed_tp_cancel_does_not_submit_market_sell():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    original_id = pos["order_id"]
+    before = list(ex.created)
+
+    async def cancel_uncertain(*args, **kwargs):
+        raise TimeoutError("timeout")
+
+    ex.cancel_order = cancel_uncertain
+    with pytest.raises(TradeError, match="не удалось подтвердить отмену"):
+        run(sc._stop(90.0, 1000))
+    assert pos["order_id"] == original_id
+    assert ex.created == before
+    assert ex.orders[original_id]["status"] == "open"
