@@ -218,6 +218,53 @@ def build():
     sc.set_risk({"LOOM": (time.time() + 30 * 86400, "Bybit объявил делистинг: Delisting of LOOM/USDT")})
     sc.st["blocked"]["DOGE"] = [time.time() + 20 * 3600, "был стоп-лосс"]
 
+    # копитрейдинг: пример кошельков, копий и уроков
+    from bot.copytrade import analyze_history
+    ct, now = b.copy, time.time()
+    ct.st["on"] = True
+    hist_good = analyze_history([{"ts": now - 86400 + k * 3000, "side": s, "mint": f"M{k // 2}", "sol": v,
+                                  "amount": 100, "usd": 0}
+                                 for k, (s, v) in enumerate([("buy", 1), ("sell", 1.7), ("buy", 1), ("sell", 0.8),
+                                                            ("buy", .5), ("sell", 1.1), ("buy", 1), ("sell", 1.4)])], now)
+    hist_bot = dict(hist_good, grade="bot", grade_text="🤖 бот-снайпер: сотни сделок, копировать бесполезно")
+    for addr, name, status, rets, src, hist, tokens in [
+        ("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", "7xKX…gAsU (MOODENG, PNUT)", "star",
+         [18.0, -12.0, 34.0, 6.0, 9.5, -4.0, 22.0], "auto", hist_good, ["MOODENG", "PNUT", "GOAT"]),
+        ("5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9", "Кит из GMGN", "watch", [12.0, -8.0, 3.0], "user", hist_good,
+         ["WIF", "POPCAT"]),
+        ("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", "9WzD…AWWM (FWOG)", "watch", [], "auto", None, ["FWOG"]),
+        ("H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS", "H8sM…3WjS (CHILLGUY)", "dropped",
+         [-30.0, -22.0, -41.0, -18.0], "auto", hist_bot, ["CHILLGUY"])]:
+        w = ct._new_wallet(name, src, now - 3 * 86400)
+        w.update(status=status, rets=rets, n=len(rets), wins=sum(r > 0 for r in rets), sum=round(sum(rets), 1),
+                 hist=hist, tokens=tokens, last_trade=now - 1800, primed=True,
+                 reason={"star": "копии вживую: 7 сделок, +73.5%", "dropped": "4 убытка подряд, копия в среднем на +31% "
+                         "дороже его цены (не успеваем)"}.get(status, ""))
+        ct.st["wallets"][addr] = w
+    feats = {"liq": 85000, "age_h": 10, "rug": 12, "chase": 0.04, "h1": 12, "fdv_liq": 12}
+    ct.st["open"]["x|m1"] = {"wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", "mint": "m1", "symbol": "GOAT",
+                             "opened": now - 2400, "raw": 1.0, "entry": 1.0185, "last": 1.12, "peak": 1.15, "liq0": 9e4,
+                             "w_amount": 5, "w_usd": 120, "feats": feats, "passed": True, "reasons": []}
+    ct.st["open"]["y|m2"] = {"wallet": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", "mint": "m2", "symbol": "FWOG",
+                             "opened": now - 600, "raw": 1.0, "entry": 1.0185, "last": 0.93, "peak": 1.0, "liq0": 9e3,
+                             "w_amount": 5, "w_usd": 40, "feats": dict(feats, liq=9000), "passed": False,
+                             "reasons": ["ликвидность $9.0K < $20K"]}
+    for sym, ret, why, passed, mis in [("PNUT", 33.6, "кошелёк продал", True, []),
+                                       ("CHILLGUY", -41.8, "стоп-лосс", True, ["late", "pump"]),
+                                       ("RETARDIO", -90.0, "ликвидность ушла", False, ["liq", "rugpull"]),
+                                       ("MOODENG", 17.2, "кошелёк продал", True, [])]:
+        ct.st["closed"].append({"wallet": "x", "mint": sym, "symbol": sym, "ret": ret, "why": why, "opened": now - 9000,
+                                "closed": now - 3000, "feats": feats, "passed": passed, "hard_fail": False, "mistakes": mis})
+    ct.st["mistakes"] = {"late": 4, "liq": 3, "fast": 2, "dump": 2, "rugpull": 1}
+    ct.st["candidates"] = {f"c{k}": {"seen": 1, "tokens": [], "first": now} for k in range(23)}
+    ct._lesson("🔴 Кошелёк H8sM…3WjS (CHILLGUY) выгнан: 4 убытка подряд, копия в среднем на +31% дороже его цены "
+               "(не успеваем). Ищу замену.", now - 7200)
+    ct._lesson("🧠 Урок: «переплата к цене кошелька не больше» 30% → 20%. На истории копий так было бы +48.3% вместо "
+               "+21.0% (19 сделок вместо 24).", now - 3600)
+    ct._lesson("⭐ Кошелёк 7xKX…gAsU (MOODENG, PNUT) повышен: его копии без денег дали +73.5% за 7 сделок. Теперь его "
+               "покупки приходят сигналом.", now - 1200)
+    ct.st["filter"]["max_chase"] = 0.2
+
     b.opps._get_json = opps_json
     b.opps.news = opps_news
 

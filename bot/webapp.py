@@ -170,6 +170,7 @@ class WebApp:
         self._tickers_cache: dict[str, tuple[float, list]] = {}
         self._scan_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task] = set()  # фоновые сохранения: держим ссылку, чтобы задачу не съел сборщик
+        self._copy_search: asyncio.Task | None = None  # поиск кошельков из приложения (идёт в фоне)
         self._load_static()
 
     # --- статика ------------------------------------------------------------
@@ -254,6 +255,8 @@ class WebApp:
             ("GET", "/api/tinvest"): self.tinvest,
             ("GET", "/api/opps"): self.opps,
             ("POST", "/api/opps/notify"): self.opps_notify,
+            ("GET", "/api/copy"): self.copy,
+            ("POST", "/api/copy"): self.copy_set,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -462,7 +465,17 @@ class WebApp:
             "ai": self.b.ai.configured,
             "auto_signals": request[USER]["id"] in self.b.subscribers.chats,
             "interval": self.b.settings.scan_interval_sec,
+            "copy": self._copy_brief(),
         }
+
+    def _copy_brief(self) -> dict:
+        """Коротко для главного экрана: полный список — в /api/copy."""
+        ct = self.b.copy
+        ws = ct.st["wallets"].values()
+        stars = [w["name"] for w in ws if w["status"] == "star"]
+        last = ct.st["lessons"][-1]["text"] if ct.st["lessons"] else None
+        return {"on": ct.on, "wallets": len(ct.active()), "stars": stars[:3], "star_count": len(stars),
+                "open": len(ct.st["open"]), "summary": ct.summary(), "lesson": last}
 
     async def portfolio(self, request: web.Request) -> dict:
         if not self.b.trader.creds:
@@ -873,6 +886,59 @@ class WebApp:
 
         snap = await snapshot(self.b, force=request.query.get("force") == "1")
         return {**snap, "notify": self.b.opps_notify, "ai": self.b.ai.configured, "plan_q": PLAN_QUESTION}
+
+    async def copy(self, request: web.Request) -> dict:
+        """🐋 Копитрейдинг: кошельки, копии без денег, уроки."""
+        d = self.b.copy.status_dict()
+        d["searching"] = bool(self._copy_search and not self._copy_search.done())
+        return d
+
+    async def copy_set(self, request: web.Request) -> dict:
+        """{on} / {signals} / {add: адрес, name} / {remove: адрес} / {find: true} — только владелец."""
+        self._owner(request)
+        body = await self._body(request)
+        ct = self.b.copy
+        notify = None
+        if "add" in body:
+            try:
+                await ct.add_wallet(str(body["add"]), str(body.get("name") or "")[:30])
+            except WalletError as e:
+                raise ApiError(str(e)) from None
+            notify = f"🐋 Кошелёк добавлен из приложения: {html.escape(ct.st['wallets'][str(body['add']).strip()]['name'])}"
+        if "remove" in body:
+            ct.remove_wallet(str(body["remove"]))
+        if "signals" in body:
+            ct.st["signals"] = bool(body["signals"])
+        if "on" in body:
+            ct.st["on"] = bool(body["on"])
+            notify = "🐋 Копитрейдинг " + ("включён" if ct.on else "выключен") + " из приложения. Подробно: /copy"
+            if ct.on and not ct.st["wallets"]:
+                body["find"] = True
+        if body.get("find") and not (self._copy_search and not self._copy_search.done()):
+            async def search():
+                try:
+                    report = await ct.discover(force=True)
+                    self.b.save_copy()
+                    if report and self.b.owner_id:
+                        await self.b._send(self.b.owner_id, "🔎 <b>Поиск кошельков</b>\n" + "\n".join(html.escape(r) for r in report))
+                except Exception as e:
+                    log.info("Поиск кошельков из приложения: %s", e)
+                    ct.last_error = f"поиск кошельков: {e}"
+            self._copy_search = asyncio.get_running_loop().create_task(search())
+        self.b.save_copy()
+
+        async def later():
+            try:
+                await self.b._backup_now()
+                if notify and self.b.owner_id:
+                    await self.b._send(self.b.owner_id, notify)
+            except Exception:
+                log.exception("Фоновое сохранение копитрейдинга")
+
+        task = asyncio.get_running_loop().create_task(later())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return await self.copy(request)
 
     async def opps_notify(self, request: web.Request) -> dict:
         self._owner(request)
