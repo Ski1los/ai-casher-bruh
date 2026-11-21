@@ -331,3 +331,43 @@ def test_failed_tp_cancel_does_not_submit_market_sell():
     assert pos["order_id"] == original_id
     assert ex.created == before
     assert ex.orders[original_id]["status"] == "open"
+
+
+def test_partial_cancel_pauses_and_blocks_repeat_sales():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    oid = pos["order_id"]
+    before = list(ex.created)
+
+    async def partial_cancel(*args, **kwargs):
+        return {"id": oid, "status": "canceled", "filled": 0.001}
+
+    ex.cancel_order = partial_cancel
+    with pytest.raises(TradeError, match="не удалось подтвердить отмену"):
+        run(sc._stop(90.0, 1000))
+    assert not sc.on and pos["reconcile_required"] and pos["order_id"] == oid
+    assert ex.created == before
+    sc.turn_on()  # без сверки включение не должно приводить к новому ордеру
+    events = run(sc._step_one("a", 1100))
+    assert events and "сверки" in events[0]
+    assert not sc.on and ex.created == before
+
+
+def test_cancel_without_confirmed_status_blocks_replacement():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    before = list(ex.created)
+
+    async def unknown_cancel(*args, **kwargs):
+        return {"id": pos["order_id"]}
+
+    async def unknown_fetch(*args, **kwargs):
+        return None
+
+    ex.cancel_order = unknown_cancel
+    trader._fetch_order = unknown_fetch
+    with pytest.raises(TradeError, match="не удалось подтвердить отмену"):
+        run(sc._cancel_tp(pos))
+    assert not sc.on and pos["reconcile_required"] and ex.created == before
