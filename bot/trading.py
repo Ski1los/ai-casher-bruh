@@ -471,7 +471,8 @@ class Trader:
             raise TradeError(f"автоторговля на паузе: дневной убыток достиг ${s.daily_loss_usd:g}")
 
     def _record(self, rec: TradeRecord) -> None:
-        if rec.live and rec.ok:
+        # Неуспешный цикл тоже мог совершить сделки и получить убыток при возврате.
+        if rec.live and (rec.ok or rec.kind == "triangle"):
             self._roll_day()
             self.state.day_trades += 1
             if rec.pnl_usd is not None:
@@ -863,7 +864,8 @@ class Trader:
             f"Средняя цена ≈ {plan.est_price:.8g}",
         ]
         if plan.type == "market":
-            lines.append(f"Если цена уйдёт хуже чем на {self.settings.max_slippage_percent:g}%, ордер отменится сам.")
+            lines.append(f"Перед отправкой проверка стакана: допустимое ухудшение {self.settings.max_slippage_percent:g}%. "
+                         "После отправки рыночный ордер может исполниться по худшей цене; это не гарантия.")
         lines += [f"⚠️ {html.escape(w)}" for w in plan.warnings]
         lines.append(mode)
         return "\n".join(lines)
@@ -914,6 +916,8 @@ class Trader:
             spent, coins = simulate_buy(book.get("asks") or [], plan.spent, plan.fee_rate)
             if coins <= 0:
                 raise TradeError("стакан пустой, ордер не отправлен")
+            if spent < plan.spent * (1 - 1e-9):
+                raise TradeError("недостаточно глубины стакана для покупки, ордер не отправлен")
             price = spent / (coins / (1 - plan.fee_rate))
             if price > plan.est_price * (1 + slip):
                 raise TradeError(f"цена выросла на {(price / plan.est_price - 1) * 100:.2f}%, ордер не отправлен")
@@ -921,6 +925,8 @@ class Trader:
             received, left = simulate_sell(book.get("bids") or [], plan.spent, plan.fee_rate)
             if received <= 0:
                 raise TradeError("стакан пустой, ордер не отправлен")
+            if left > plan.spent * 1e-9:
+                raise TradeError("недостаточно глубины стакана для продажи, ордер не отправлен")
             price = received / ((plan.spent - left) * (1 - plan.fee_rate))
             if price < plan.est_price * (1 - slip):
                 raise TradeError(f"цена упала на {(1 - price / plan.est_price) * 100:.2f}%, ордер не отправлен")
