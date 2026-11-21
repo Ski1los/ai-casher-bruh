@@ -537,6 +537,7 @@ function renderHome() {
     </div>
     <div class="banner info press" data-act="opps" style="margin-top:10px"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
     ${scalpCard()}
+    ${copyCard()}
     ${autoCard()}
     <div class="grid4" style="margin-top:10px">
       <div class="action" data-act="scan"><div class="ic">${ICON.scan}</div>Скан</div>
@@ -1266,6 +1267,106 @@ function pilotSheet() {
     <button class="btn block ghost" style="margin-top:14px" data-act="why">Треугольники: почему нет сделок</button>`, { full: true });
 }
 
+// ---------------------------------------------------------------------------
+// 🐋 Копитрейдинг
+// ---------------------------------------------------------------------------
+
+const CP_ICON = { star: "⭐", watch: "👀", dropped: "🔴" };
+const CP_STATUS = { star: "копирую сигналами", watch: "проверяю копиями", dropped: "выгнан" };
+
+function copyCard() {
+  const c = (S.ov && S.ov.copy) || null;
+  if (!c) return "";
+  const s = c.summary || {};
+  return `<div class="card pilot-card ${c.on ? "on" : ""}" style="margin-top:10px">
+    <div class="row between"><div class="press" data-act="copy"><div class="b">🐋 Копитрейдинг</div><div class="tiny muted">умные кошельки Solana · учится на ошибках</div></div>
+      <label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
+    <div class="small muted press" data-act="copy" style="margin-top:8px;white-space:normal">${c.wallets ? `Слежу за ${c.wallets} кошельками · ⭐ ${c.star_count}${c.stars.length ? ": " + c.stars.map(esc).join(", ") : ""}${c.open ? ` · открыто копий ${c.open}` : ""}` : "Сам найдёт кошельки, которые рано покупают растущие токены, проверит их копиями без денег и пришлёт сигналы лучших."}</div>
+    ${s.taken ? `<div class="small" style="margin-top:6px">Копии без денег: ${s.taken} · в плюс ${s.taken_wins} · <b class="${cls(s.taken_sum)}">${pct(s.taken_sum, 1)}</b></div>` : ""}
+    ${c.lesson ? `<div class="tiny muted" style="margin-top:6px;white-space:normal">🧠 ${esc(c.lesson)}</div>` : ""}
+  </div>`;
+}
+
+async function loadCopy() {
+  try { S.copy = await api("/api/copy"); if (Sheet.isOpen() && $("#sheetTitle").textContent === "Копитрейдинг") copySheet(); }
+  catch (e) { fail(e); }
+}
+
+function copyWalletRow(w) {
+  const res = w.copies ? `${w.copies} копий · ${w.wins} в плюс` : "копий ещё нет";
+  return `<div class="item press" data-act="copy-w" data-v="${esc(w.address)}"><div class="grow"><div class="t">${CP_ICON[w.status] || "•"} ${esc(w.name)}${w.source === "user" ? ` <span class="pill gray" style="margin-left:4px">твой</span>` : ""}</div>
+    <div class="s" style="white-space:normal">${esc(w.grade_text.split(":")[0])} · ${res}${w.tokens.length ? " · " + w.tokens.slice(0, 3).map(esc).join(", ") : ""}</div></div>
+    <div class="r"><div class="b num ${w.copies ? cls(w.sum) : "muted"}">${w.copies ? pct(w.sum, 1) : "—"}</div><div class="s">${esc(CP_STATUS[w.status] || "")}</div></div></div>`;
+}
+
+function copySheet() {
+  const c = S.copy;
+  if (!c) { Sheet.open("Копитрейдинг", `<div class="card empty">Загружаю…</div>`, { full: true }); loadCopy(); return; }
+  const s = c.summary || {}, f = c.filter || {};
+  const wallets = (c.wallets || []).map(copyWalletRow).join("");
+  const open = (c.open || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.symbol)} <span class="muted small">${esc(p.wallet)}</span></div><div class="s" style="white-space:normal">${p.passed ? "✅ прошла фильтр" : "🚫 " + esc((p.reasons || [])[0] || "не прошла фильтр")} · ${ago(p.opened)}</div></div><div class="r"><div class="b num ${cls(p.ret)}">${pct(p.ret, 1)}</div></div></div>`).join("");
+  const recent = (c.recent || []).map((t) => `<div class="item"><div class="grow"><div class="t">${esc(t.symbol)} <span class="muted small">${esc(t.why)}</span></div><div class="s" style="white-space:normal">${t.passed ? "✅ прошла фильтр" : "🚫 отсеяна фильтром"}${(t.mistakes || []).length ? " · ошибка: " + t.mistakes.map((m) => esc(CP_MISTAKE[m] || m)).join(", ") : ""}</div></div><div class="r"><div class="b num ${cls(t.ret)}">${pct(t.ret, 1)}</div></div></div>`).join("");
+  const mistakes = (c.mistakes || []).map((m) => `<div class="kv"><span>${esc(m.text)}</span><span class="num">${m.count}</span></div>`).join("");
+  const lessons = (c.lessons || []).map((l) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="s" style="white-space:normal;color:var(--text)">${esc(l.text)}</div><div class="tiny dim">${when(l.at)}</div></div></div>`).join("");
+  Sheet.open("Копитрейдинг", `
+    <div class="row between"><span class="pill ${c.on ? "ok" : "gray"}">${c.on ? "🟢 работает" : "⏸ выключен"}</span>${c.searching ? `<span class="pill test">🔎 ищу кошельки…</span>` : ""}</div>
+    ${owner() ? `<div class="list" style="margin-top:10px">
+      <div class="item"><div class="grow"><div class="t">🐋 Копитрейдинг</div><div class="s">проверяет кошельки каждые 1,5 мин, ищет новые раз в 2 ч</div></div><label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""}><span></span></label></div>
+      <div class="item"><div class="grow"><div class="t">🔔 Сигналы ⭐</div><div class="s">покупки и продажи лучших кошельков — в чат с кнопкой Phantom</div></div><label class="switch"><input type="checkbox" data-act="copy-sig" ${c.signals ? "checked" : ""}><span></span></label></div>
+    </div>` : ""}
+    ${s.closed ? `<div class="grid2" style="margin-top:10px"><div class="stat center"><div class="v num">${s.taken} / ${s.taken_wins}</div><div class="k">копий / в плюс</div></div><div class="stat center"><div class="v num ${cls(s.taken_sum)}">${pct(s.taken_sum, 1)}</div><div class="k">≈ ${money(s.taken_usd, { sign: true, d: 2 })} по $${c.copy_usd}</div></div></div>
+      <div class="tiny muted" style="margin-top:6px">Отсеянные фильтром копии дали бы ${pct(s.skipped_sum, 1)} — так видно, помогает ли фильтр.</div>` : ""}
+    <div class="section-title">Кошельки <span class="muted small">кандидатов ${c.candidates}</span></div>
+    ${wallets ? `<div class="list">${wallets}</div>` : `<div class="card empty">Кошельков пока нет${c.on ? " — ищу" : ". Включи — бот найдёт сам"}</div>`}
+    ${owner() ? `<div class="row" style="gap:8px;margin-top:10px"><input id="cpAddr" class="grow" placeholder="Адрес кошелька Solana (из GMGN, Axiom…)" autocomplete="off"><button class="btn sm primary" data-act="copy-add">Добавить</button></div>
+      <button class="btn block ghost" style="margin-top:8px" data-act="copy-find" ${c.searching ? "disabled" : ""}>🔎 Найти кошельки сейчас</button>` : ""}
+    ${open ? `<div class="section-title">Открытые копии (без денег)</div><div class="list">${open}</div>` : ""}
+    ${recent ? `<div class="section-title">Последние копии</div><div class="list">${recent}</div>` : ""}
+    <div class="section-title">🧠 Чему научился</div>
+    <div class="card"><div class="small muted" style="margin-bottom:6px">Фильтр рисков сейчас (сам двигает пороги):</div>
+      <div class="kv"><span>Ликвидность от</span><span class="num">$${Math.round(f.min_liq || 0).toLocaleString("ru-RU")}</span></div>
+      <div class="kv"><span>RugCheck не больше</span><span class="num">${f.max_rug}</span></div>
+      <div class="kv"><span>Возраст токена от</span><span class="num">${f.min_age_h} ч</span></div>
+      <div class="kv"><span>Переплата к цене кошелька</span><span class="num">до ${Math.round((f.max_chase || 0) * 100)}%</span></div>
+      <div class="kv"><span>Рост за час</span><span class="num">до ${f.max_h1}%</span></div>
+      ${mistakes ? `<div class="small muted" style="margin:10px 0 6px">Ошибки в убыточных копиях:</div>${mistakes}` : ""}</div>
+    ${lessons ? `<div class="list" style="margin-top:8px">${lessons}</div>` : `<div class="tiny muted" style="margin-top:6px">Уроки появятся после 20 закрытых копий.</div>`}
+    ${c.error ? `<div class="banner" style="margin-top:10px">⚠️ ${esc(c.error)}</div>` : ""}
+    <div class="tiny muted" style="margin-top:12px;white-space:normal">Копии — без денег: цена в момент, когда бот увидел сделку, комиссия Phantom 0,85% и проскальзывание 1% в обе стороны. ⭐ — от 5 копий и в среднем от +2% на копию с поправкой на везение. 🔴 — 4 убытка подряд или −40%. Бот не покупает с твоего кошелька (нужен приватный ключ — не давай его никому). Мемкоины чаще всего падают почти до нуля.</div>`, { full: true });
+}
+
+const CP_MISTAKE = { late: "поздний вход", fast: "кошелёк продал за минуты", liq: "мало ликвидности", rug: "RugCheck", young: "токену < 1 ч", pump: "вход после роста", rugpull: "слив пула", dump: "токен упал" };
+
+function copyWalletSheet(addr) {
+  const w = ((S.copy || {}).wallets || []).find((x) => x.address === addr);
+  if (!w) return;
+  Sheet.open(w.name, `
+    <div class="row between"><span class="pill ${w.status === "star" ? "ok" : w.status === "dropped" ? "live" : "gray"}">${CP_ICON[w.status]} ${esc(CP_STATUS[w.status])}</span><span class="tiny muted">${esc(w.short)}</span></div>
+    ${w.reason ? `<div class="small muted" style="margin-top:8px">${esc(w.reason)}</div>` : ""}
+    <div class="section-title">По своей истории</div>
+    <div class="card"><div class="b" style="margin-bottom:6px">${esc(w.grade_text)}</div>
+      ${w.hist_pnl_sol != null ? `<div class="kv"><span>Итог закрытых сделок</span><span class="num ${cls(w.hist_pnl_sol)}">${w.hist_pnl_sol > 0 ? "+" : ""}${w.hist_pnl_sol} SOL</span></div>` : ""}
+      ${w.hist_win != null ? `<div class="kv"><span>Удачных</span><span class="num">${Math.round(w.hist_win * 100)}%</span></div>` : ""}
+      ${w.hold_min != null ? `<div class="kv"><span>Держит</span><span class="num">~${w.hold_min} мин</span></div>` : ""}
+      ${w.per_day != null ? `<div class="kv"><span>Обменов в день</span><span class="num">${w.per_day}</span></div>` : ""}</div>
+    <div class="section-title">Копии без денег</div>
+    <div class="card"><div class="kv"><span>Копий</span><span class="num">${w.copies} (в плюс ${w.wins})</span></div>
+      <div class="kv"><span>Итог</span><span class="num ${cls(w.sum)}">${pct(w.sum, 1)}</span></div>
+      <div class="kv"><span>В среднем с поправкой на везение</span><span class="num ${cls(w.avg)}">${pct(w.avg, 2)}</span></div></div>
+    <div class="row" style="gap:8px;margin-top:12px"><a class="btn ghost sm grow" style="text-decoration:none" href="${esc(w.links.gmgn)}" target="_blank" rel="noopener">GMGN</a><a class="btn ghost sm grow" style="text-decoration:none" href="${esc(w.links.solscan)}" target="_blank" rel="noopener">Solscan</a></div>
+    ${owner() ? `<button class="btn block ghost" style="margin-top:8px;color:var(--red)" data-act="copy-del" data-v="${esc(w.address)}">Убрать кошелёк</button>` : ""}`);
+}
+
+async function copyAction(body, okText) {
+  try {
+    S.copy = await api("/api/copy", body);
+    if (okText) toast(okText);
+    haptic.ok();
+    copySheet();
+    refresh();
+  } catch (e) { fail(e); loadCopy(); }
+}
+
 async function panic() {
   if (!(await popup("Стоп-кран", "Выключить автоторговлю и реальный режим, отменить все открытые ордера?", "Остановить всё"))) return;
   try { const r = await api("/api/stop", {}); Sheet.close(); toast(r.text.split("\n")[0]); refresh(); loadOrders(); } catch (e) { fail(e); }
@@ -1652,6 +1753,11 @@ document.addEventListener("click", async (e) => {
     case "phantom": haptic.tap(); phantomSheet(); loadPhantom(); break;
     case "why": haptic.tap(); whySheet(); break;
     case "pilot": haptic.tap(); pilotSheet(); break;
+    case "copy": haptic.tap(); copySheet(); loadCopy(); break;
+    case "copy-w": haptic.tap(); copyWalletSheet(d.v); break;
+    case "copy-find": haptic.tap(); copyAction({ find: true }, "Ищу кошельки — результат придёт в чат"); break;
+    case "copy-add": { const a = ($("#cpAddr").value || "").trim(); if (a) copyAction({ add: a }, "Кошелёк добавлен"); break; }
+    case "copy-del": if (await popup("Убрать кошелёк?", "Бот перестанет его отслеживать.", "Убрать")) copyAction({ remove: d.v }, "Убрал"); break;
     case "pilot-start": haptic.tap(); pilotStart(); break;
     case "dex": haptic.tap(); dexSheet(d.v || "hot"); break;
     case "opps": haptic.tap(); oppsSheet(); break;
@@ -1733,6 +1839,8 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "opps-notify") toggleOppsNotify(el);
   else if (el.dataset.act === "scalp-coins") toggleScalpCoins(el);
   else if (el.dataset.act === "live") toggleLive(el);
+  else if (el.dataset.act === "copy-on") copyAction({ on: el.checked }, el.checked ? "Копитрейдинг включён" : "Выключен");
+  else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
   else if (el.dataset.set) saveSetting(el);
 });
 document.addEventListener("input", (e) => {
@@ -1756,7 +1864,10 @@ if (tg) {
 applyTheme();
 renderHeader();
 go(S.tab);                         // мгновенно рисуем по кэшу
-refresh().then(() => { if (S.tab === "home" && tr().keys && tr().keys.length) loadPortfolio(); });
+refresh().then(() => {
+  if (S.tab === "home" && tr().keys && tr().keys.length) loadPortfolio();
+  if (new URLSearchParams(location.search).get("open") === "copy") { copySheet(); loadCopy(); }
+});
 
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 7000);
 setInterval(() => { if (document.visibilityState === "visible" && S.tab === "market") loadMarket(false); }, 5000);

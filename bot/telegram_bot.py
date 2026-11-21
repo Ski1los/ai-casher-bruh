@@ -29,7 +29,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import extras_ui, market_ui, opps_ui, trading_ui, updater
+from . import copy_ui, extras_ui, market_ui, opps_ui, trading_ui, updater
+from .copytrade import CopyTrader
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
@@ -57,6 +58,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"  # изменения из /set, /fee и кнопок (переживают перезапуск)
 TRADING_FILE = DATA_DIR / "trading.json"  # режим торговли, автоторговля, журнал сделок (без ключей!)
+COPY_FILE = DATA_DIR / "copytrade.json"  # копитрейдинг: кошельки, копии без денег, уроки
 EXPLAIN_KEEP = 30  # для скольких последних сообщений с сигналами помнить данные для кнопки «Разбор»
 MAX_IN_MESSAGE = 10  # сколько связок показывать в одном сообщении
 MAX_TRI_IN_MESSAGE = 5  # сколько треугольников показывать
@@ -149,6 +151,7 @@ HELP_TEXT = """\
 /autopilot — 🤖 <b>бот торгует сам</b>: одна кнопка, дальше без тебя
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
+/copy — 🐋 копитрейдинг: умные кошельки Solana, копии без денег, сигналы ⭐
 /news — новости крипты
 
 <b>Сигналы</b>
@@ -490,6 +493,14 @@ class ArbitrageBot:
                 self.trader.restore(json.loads(self.trading_file.read_text("utf-8")))
             except (ValueError, TypeError) as e:
                 log.warning("Не удалось прочитать %s: %s", self.trading_file, e)
+        self.copy = CopyTrader(self.dex)  # 🐋 копитрейдинг (bot/copytrade.py)
+        self.copy_file = COPY_FILE
+        self._copy_saved = 0
+        if self.copy_file.exists():
+            try:
+                self.copy.restore(json.loads(self.copy_file.read_text("utf-8")))
+            except (ValueError, TypeError) as e:
+                log.warning("Не удалось прочитать %s: %s", self.copy_file, e)
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.webapp = WebApp(self, token)  # Telegram Mini App: /app на том же сервере, что и /health
@@ -510,8 +521,16 @@ class ArbitrageBot:
             "demo": self.demo.export(),
             "settings": self._settings_state(),
             "trading": self.trader.export(),
+            "copy": self.copy.export(),
             "bot_version": BOT_VERSION,
         }
+
+    def save_copy(self) -> None:
+        try:
+            self.copy_file.parent.mkdir(parents=True, exist_ok=True)
+            self.copy_file.write_text(json.dumps(self.copy.export(), ensure_ascii=False), "utf-8")
+        except OSError as e:
+            log.warning("Не смог сохранить копитрейдинг: %s", e)
 
     def save_trading(self) -> None:
         try:
@@ -622,6 +641,9 @@ class ArbitrageBot:
         if state.get("trading") and not self.trading_file.exists():
             self.trader.restore(state["trading"])
             self.save_trading()
+        if state.get("copy") and not self.copy_file.exists():
+            self.copy.restore(state["copy"])
+            self.save_copy()
         if DEMO_FILE.exists():
             log.info("Бэкап найден, но есть локальные данные. Использую локальные")
             return result
@@ -757,7 +779,17 @@ class ArbitrageBot:
                                 "/hot", "/radar", "/tinvest"],
             "tinvest": self._tinvest_context(),
             "memecoin_radar_on": bool(self.radar_chats),
+            "copytrading_solana": self._copy_context(),
         }
+
+    def _copy_context(self) -> dict:
+        """Копитрейдинг для ИИ: коротко, без лишних цифр (ИИ видит итоги, уроки и ошибки)."""
+        d = self.copy.status_dict()
+        return {"on": d["on"], "how": "/copy: бот копирует сделки кошельков Solana без денег, ⭐ = сигналы с кнопкой Phantom",
+                "summary": d["summary"], "filter": d["filter"], "mistakes": d["mistakes"][:4],
+                "lessons": [x["text"] for x in d["lessons"][:3]],
+                "wallets": [{k: w[k] for k in ("name", "status", "copies", "sum", "grade")} for w in d["wallets"][:8]],
+                "cannot": "бот не покупает с кошелька пользователя: нужен приватный ключ, его нельзя давать"}
 
     def _tinvest_context(self) -> dict:
         if not self.tinvest.configured:
@@ -908,6 +940,9 @@ class ArbitrageBot:
         pilot = self.scalper.report_text()
         if pilot:
             parts.append(pilot)
+        copy_line = copy_ui.short_line(self)
+        if copy_line:
+            parts.append(copy_line)
         parts.append("Комиссии, узкие места и рекомендации: /analysis" + (" · мнение ИИ: /ai" if self.ai.configured else ""))
         return "\n\n".join(parts)
 
@@ -1338,6 +1373,7 @@ class ArbitrageBot:
         extras_ui.register(self)
         market_ui.register(self)
         opps_ui.register(self)
+        copy_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1729,6 +1765,7 @@ class ArbitrageBot:
                     BotCommand(command="autopilot", description="🤖 Автопилот: бот торгует сам"),
                     BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
                     BotCommand(command="lab", description="🧪 Лаборатория: стратегии вживую"),
+                    BotCommand(command="copy", description="🐋 Копитрейдинг: умные кошельки"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости крипты"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
@@ -1758,6 +1795,7 @@ class ArbitrageBot:
             tasks.append(asyncio.create_task(extras_ui.alerts_loop(self)))
             tasks.append(asyncio.create_task(market_ui.radar_loop(self)))
             tasks.append(asyncio.create_task(opps_ui.opps_loop(self)))
+            tasks.append(asyncio.create_task(copy_ui.copy_loop(self)))
             tasks.append(asyncio.create_task(self._auto_loop()))
             tasks.append(asyncio.create_task(self._scalp_loop()))
             tasks.append(asyncio.create_task(self._equity_loop()))
@@ -1784,5 +1822,6 @@ class ArbitrageBot:
             await self.ai.client.close()
             await self.phantom.close()
             await self.dex.close()
+            await self.copy.rpc.close()
             await self.tinvest.close()
             await self.bot.session.close()
