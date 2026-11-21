@@ -371,3 +371,30 @@ def test_cancel_without_confirmed_status_blocks_replacement():
     with pytest.raises(TradeError, match="не удалось подтвердить отмену"):
         run(sc._cancel_tp(pos))
     assert not sc.on and pos["reconcile_required"] and ex.created == before
+
+
+@pytest.mark.parametrize("test_trades,expected", [(0, False), (1, False), (2, False), (3, True)])
+def test_strategy_requires_closed_trades_in_holdout(monkeypatch, test_trades, expected):
+    import bot.scalper as module
+    candles = [[i, 100, 101, 99, 100, 1] for i in range(200)]
+    def fake_backtest(candles, params, fee, start=0, ind=None):
+        count = test_trades if start else 8
+        net = (1.0 if count else 0.0) if start else 3.0
+        return {"trades": count, "wins": count, "net_pct": net, "days": 1,
+                "tp": params.tp, "rsi_buy": params.rsi_buy, "strategy": params.strategy}
+    monkeypatch.setattr(module, "backtest", fake_backtest)
+    result = module.best_params(candles, 0.001)
+    assert result["test_trades"] == test_trades
+    assert result["ok"] is expected
+
+
+def test_backtest_stop_gap_uses_open_not_unreachable_stop(monkeypatch):
+    import bot.scalper as module
+    candles = [[i, 100, 100, 99, 100, 1] for i in range(55)]
+    candles[52] = [52, 80, 81, 79, 80, 1]
+    monkeypatch.setattr(module, "signal_at", lambda closes, ind, i, p: i == 50)
+    result = module.backtest(candles, module.Params(), fee=0)
+    entry = 100 * (1 + module.SLIPPAGE)
+    expected = (80 * (1 - module.SLIPPAGE) / entry - 1) * 100
+    assert result["trades"] == 1
+    assert result["net_pct"] == pytest.approx(expected, abs=0.001)
