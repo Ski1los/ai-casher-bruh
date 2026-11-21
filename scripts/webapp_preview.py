@@ -275,9 +275,36 @@ def build():
             return 41_250_000
 
     ct._sol_usd = (now + 10**9, 152.4)
-    b.meme = MemeTrader(ct, env={}, wallet=PreviewWallet())
+    real = os.environ.get("PREVIEW_REAL") == "1"  # по умолчанию — как у новичка: кошелька нет, торгует демо
+    b.meme = MemeTrader(ct, env={}, wallet=PreviewWallet() if real else None)
+    b.meme.start_demo_if_new()
     rs = b.meme.st
-    rs.update(on=True, size_usd=2.0)
+    rs.update(on=real, size_usd=2.0, tp_pct=0.5, stop_pct=0.3)
+    ct.st["calib"] = {"rts": [0.021, 0.018, 0.024, 0.02, 0.019], "cost": 0.013}
+    rs["learn"].update(good_ok=True, good_n=14, good_avg=3.4)
+    ct._lesson("🧪 Калибровка: по настоящим котировкам Jupiter вход+выход стоит ≈ 2.6% (я считал 3.7%). Копии без "
+               "денег теперь считаются с этой стоимостью — оценки кошельков честнее.", now - 900)
+    ct._lesson("🧠 Урок по выходам: тейк-профит нет → +50%. На 31 копии с настоящим путём цены так было бы +96.0% "
+               "вместо +58.2%. Применяю к демо и реальным сделкам.", now - 600)
+    d = b.meme.demo
+    sol = 152.4
+    d.update(start_usd=10.0, start_sol=int(10 / sol * 1e9))
+    d["positions"]["d1"] = {"mint": "d1", "symbol": "GOAT", "source": "copy", "key": "x|d1", "category": "star",
+                            "wallet": "7xKX…gAsU (MOODENG, PNUT)", "opened": now - 2400, "sol_in": 13_100_000,
+                            "raw": 0, "price_in": None, "value0": 12_800_000, "value": 15_200_000, "src": "jupiter",
+                            "usd_in": 2.0, "sell_why": None}
+    demo_closed = [("PNUT", 0.71, 35.6, "копия: кошелёк продал", "star"), ("WIF", -0.62, -31.0, "стоп −30%", "good"),
+                   ("POPCAT", 1.04, 52.0, "тейк-профит +50%", "star"), ("FWOG", 0.18, 9.0, "копия: кошелёк продал", "good"),
+                   ("CHILLGUY", -0.58, -29.0, "копия: кошелёк продал", "star"), ("MEW", 0.33, 16.5, "копия: кошелёк продал", "star")]
+    for k, (sym, usd, pc, why, cat) in enumerate(demo_closed):
+        d["closed"].append({"symbol": sym, "mint": sym, "pnl_sol": usd / sol, "pnl_usd": usd, "pct": pc, "why": why,
+                            "opened": now - 90000 + k * 12000, "closed": now - 85000 + k * 12000, "source": "copy",
+                            "sig": None, "category": cat})
+    pnl = sum(x[1] for x in demo_closed)
+    d["stats"].update(buys=7, sells=6, wins=4, pnl_usd=round(pnl, 2), pnl_sol=round(pnl / sol, 6))
+    d["cash"] = int((10 + pnl - 2.0) / sol * 1e9)
+    d["decisions"] += [{"at": now - 7000, "symbol": "RETARDIO", "text": "не купил: риск-фильтр: ликвидность $9.0K < $20K"},
+                       {"at": now - 2400, "symbol": "GOAT", "text": "купил за ⭐ 7xKX…gAsU (MOODENG, PNUT)"}]
     rs["positions"]["m1"] = {"mint": "m1", "symbol": "GOAT", "source": "copy", "key": "x|m1",
                              "wallet": "7xKX…gAsU (MOODENG, PNUT)", "opened": now - 2400, "sol_in": 13_100_000,
                              "raw": 1, "usd_in": 2.0, "sig": "s", "value": 14_650_000, "sell_fails": 0,
