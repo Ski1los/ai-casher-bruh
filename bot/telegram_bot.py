@@ -499,6 +499,7 @@ class ArbitrageBot:
         # Бэкап в Telegram работает, только если известен владелец (ALLOWED_USER_IDS)
         self.backup = TelegramBackup(self.bot, owner) if owner else None
         self._last_backup = 0.0
+        self._lab_saved = 0  # сколько бумажных сделок лаборатории уже сохранено
 
     # --- резервная копия ----------------------------------------------------
 
@@ -1521,16 +1522,31 @@ class ArbitrageBot:
         while True:
             try:
                 await self._warn_duplicate()
-                if self.scalper.on and self.owner_id is not None:
-                    events = await self.scalper.step()
-                    for text in events:
-                        await self._send(self.owner_id, text)
-                    if events:
-                        self.save_trading()
-                        await self._backup_now()
+                await self._scalp_tick()
             except Exception:
                 log.exception("Ошибка режима $5")
             await asyncio.sleep(SCALP_STEP_SEC)
+
+    async def _scalp_tick(self) -> None:
+        """Один шаг автопилота: торговля (если включён) или обучение лаборатории (если выключен)."""
+        events = []
+        if self.scalper.on and self.owner_id is not None:
+            events = await self.scalper.step()
+            for text in events:
+                await self._send(self.owner_id, text)
+        elif self.owner_id is not None and self.trader.working:
+            await self.scalper.learn()
+        if events:
+            self.save_trading()
+            await self._backup_now()
+            self._lab_saved = self.scalper.lab_changes
+        elif (self.scalper.lab_changes != self._lab_saved
+              and time.time() - self._last_backup > BACKUP_EVERY_SEC):
+            # результаты лаборатории — это опыт бота: на Render файлы стираются при перезапуске,
+            # поэтому не реже раза в полчаса отправляем их в бэкап в Telegram
+            self._lab_saved = self.scalper.lab_changes
+            self.save_trading()
+            await self._backup_now()
 
     # --- приложение ---------------------------------------------------------
 

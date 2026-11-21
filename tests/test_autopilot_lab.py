@@ -141,3 +141,96 @@ def test_lab_command_and_report(bot_env):
     assert "Лаборатория: проверено вживую 1" in b.report_text() and "Автопилот" in b.report_text()
     ctx = b.ai_context()["trading"]["scalp_mode_5usd"]
     assert ctx["lab"][0]["verdict"] == "ok" and "shield" in ctx
+
+
+# --- v21: самообучение -------------------------------------------------------
+
+def test_best_params_keeps_alternative_strategies():
+    from bot.scalper import best_params
+    r = best_params(dip_candles(), 0.001)
+    codes = {a["strategy"] for a in r["alts"]}
+    assert r["strategy"] not in codes and codes <= {"dip", "bounce", "trend"} and codes
+    assert all({"tp", "rsi_buy", "net_pct", "train_pct"} <= set(a) for a in r["alts"])
+
+
+def _demote_main(sc):
+    """Главная стратегия монеты не прошла историю, а прежняя становится «запасной»."""
+    r = sc.ranking["a"][0]
+    alt = {"strategy": r["strategy"], "tp": r["tp"], "rsi_buy": r["rsi_buy"], "net_pct": 1.0, "train_pct": 1.0,
+           "trades": 5}
+    r.update(strategy="trend" if r["strategy"] != "trend" else "bounce", ok=False, alts=[alt])
+    return r, alt
+
+
+def test_alt_strategy_proven_in_lab_trades_for_real_with_star():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.rank("a"))
+    r, alt = _demote_main(sc)
+    key = sc.lab_key("a", r["symbol"], alt["strategy"])
+    sc.lab["stats"][key] = {"rets": [0.8] * 5, "sum": 4.0, "n": 5, "wins": 5, "since": 0}
+    assert run(sc.step()) == [] and not ex.created  # 5 сделок мало
+    sc.lab["stats"][key] = {"rets": [0.8] * 5 + [-6.2, 0.8, 0.8], "sum": 0.2, "n": 8, "wins": 7, "since": 0}
+    assert run(sc.step()) == [] and not ex.created  # стоп-лосс не перекрыт: сумма < +1,5%
+    sc.lab["stats"][key] = {"rets": [0.8] * 6, "sum": 4.8, "n": 6, "wins": 6, "since": 0}
+    events = run(sc.step())
+    assert events and "купил SOL" in events[0] and "⭐ Стратегию выбрала лаборатория: вживую без денег 6 сделок" in events[0]
+    assert sc.positions["a"]["strategy"] == alt["strategy"]
+    rows = sc.lab_rows("a")
+    assert any(x["promoted"] and not x["main"] for x in rows)
+    assert "⭐ <b>доказала себя вживую" in sc.lab_text("a")
+
+
+def test_alt_with_losing_history_is_never_promoted():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.rank("a"))
+    r, alt = _demote_main(sc)
+    alt["net_pct"] = -0.5
+    sc.lab["stats"][sc.lab_key("a", r["symbol"], alt["strategy"])] = {"rets": [0.8] * 8, "sum": 6.4, "n": 8, "wins": 8,
+                                                                       "since": 0}
+    assert run(sc.step()) == [] and not ex.created
+
+
+def test_lab_learns_even_when_autopilot_is_off():
+    sc, trader, ex = make(balance=5.1, live=False)
+    sc.st["on"] = False
+    run(sc.learn())
+    assert sc.ranking["a"] and sc.lab["open"]  # проверка на истории есть, бумажная сделка открыта
+    assert not ex.created
+
+
+def test_lab_results_are_backed_up(bot_env):
+    b, session = bot_env
+    sc, trader, ex = make(balance=5.1, live=False)
+    b.trader, b.scalper = trader, sc
+    sc.st["on"] = False
+    saved = []
+
+    async def fake_backup():
+        saved.append(1)
+        b._last_backup = time.time()
+
+    b._backup_now = fake_backup
+    b._last_backup = 0
+    run(b._scalp_tick())  # автопилот выключен: лаборатория учится, но пока нечего сохранять
+    assert sc.ranking["a"] and not saved
+    sc.lab_changes += 1  # закрылась бумажная сделка
+    run(b._scalp_tick())
+    assert saved == [1]
+    sc.lab_changes += 1
+    run(b._scalp_tick())  # не чаще раза в полчаса
+    assert saved == [1]
+
+
+def test_lab_survives_restart_via_backup_json():
+    import json
+    sc, trader, ex = make(balance=5.1, live=False)
+    run(sc.rank("a"))
+    run(sc.lab_step("a", now=1_000_000))
+    key, _ = lab_key(sc)
+    sc.lab["stats"][key].update(rets=[0.8, 0.8], sum=1.6, n=2, wins=2)
+    sc.set_risk({"LOOM": (time.time() + 3600, "делистинг")})
+    raw = json.loads(json.dumps(trader.export()))  # как в бэкапе
+    sc2, trader2, _ = make(balance=5.1, live=False)
+    trader2.restore(raw)
+    assert sc2.lab["stats"][key]["sum"] == 1.6 and key in sc2.lab["open"]
+    assert sc2.shield_reason("LOOM")
