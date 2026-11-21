@@ -1087,7 +1087,10 @@ class Scalper:
             try:
                 await self.trader._ex(pos["exchange"]).cancel_order(pos["order_id"], pos["symbol"])
             except Exception as e:
+                # Не знаем, отменён ли ордер: нельзя выставлять замену или продавать повторно.
                 log.info("Отмена ордера %s: %s", pos["order_id"], e)
+                raise TradeError(f"не удалось подтвердить отмену ордера {pos['order_id']}; "
+                                 "проверь /orders и баланс перед повторной продажей") from e
         pos["order_id"] = None
 
     async def _manage(self, now: float) -> list[str]:
