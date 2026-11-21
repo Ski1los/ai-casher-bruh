@@ -511,3 +511,41 @@ def test_risk_settings_only_by_human(bot_env):
         assert b.settings.max_trade_usd == 25
 
     run(flow())
+
+
+def test_failed_triangle_loss_counts_and_pauses_auto():
+    trader, ex = make_trader(daily_loss_usd=0.01)
+    trader.state.live = True
+    trader.state.auto = True
+    opp = triangle_opp(trader)
+    ex.fail_symbols = {"PEPE/BTC"}
+    res = run(trader.execute_triangle(opp, source="auto"))
+    assert res.reason and res.pnl < -0.01
+    assert trader.state.day_trades == 1
+    assert trader.state.day_pnl_usd == pytest.approx(res.pnl)
+    assert not trader.state.auto
+    assert "дневной убыток" in trader.state.paused_reason
+
+
+def test_market_order_rejects_insufficient_depth_at_recheck():
+    trader, ex = make_trader()
+    trader.state.live = True
+    buy = run(trader.plan_market("a", "buy", "BTC", "5"))
+    ex.depth = 0.00005  # чуть больше половины покупки по прежней цене
+    with pytest.raises(TradeError, match="глубины стакана"):
+        run(trader.execute_plan(buy.id))
+    assert ex.created == []
+
+    ex.depth = 1e12
+    ex.balance["BTC"] = 0.001
+    sell = run(trader.plan_market("a", "sell", "BTC", "0.001"))
+    ex.depth = 0.0005
+    with pytest.raises(TradeError, match="глубины стакана"):
+        run(trader.execute_plan(sell.id))
+    assert ex.created == []
+
+
+def test_market_preview_does_not_promise_slippage_limit():
+    trader, _ = make_trader()
+    plan = run(trader.plan_market("a", "buy", "BTC", "5"))
+    assert "не гарантия" in trader.plan_text(plan)
