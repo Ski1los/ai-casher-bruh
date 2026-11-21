@@ -265,6 +265,32 @@ def build():
                "покупки приходят сигналом.", now - 1200)
     ct.st["filter"]["max_chase"] = 0.2
 
+    # 💸 реальная торговля: поддельный кошелёк «Бот» (без сети и без ключа)
+    from bot.memetrade import MemeTrader
+
+    class PreviewWallet:
+        address = "BoT7r4d3rWa11et1111111111111111111111111111"
+
+        async def sol_balance(self):
+            return 41_250_000
+
+    ct._sol_usd = (now + 10**9, 152.4)
+    b.meme = MemeTrader(ct, env={}, wallet=PreviewWallet())
+    rs = b.meme.st
+    rs.update(on=True, size_usd=2.0)
+    rs["positions"]["m1"] = {"mint": "m1", "symbol": "GOAT", "source": "copy", "key": "x|m1",
+                             "wallet": "7xKX…gAsU (MOODENG, PNUT)", "opened": now - 2400, "sol_in": 13_100_000,
+                             "raw": 1, "usd_in": 2.0, "sig": "s", "value": 14_650_000, "sell_fails": 0,
+                             "sell_why": None}
+    rs["closed"] += [{"symbol": "PNUT", "mint": "p", "pnl_sol": 0.0042, "pnl_usd": 0.64, "pct": 32.1,
+                      "why": "копия: кошелёк продал", "opened": now - 9000, "closed": now - 5000, "source": "copy"},
+                     {"symbol": "CHILLGUY", "mint": "c", "pnl_sol": -0.0055, "pnl_usd": -0.84, "pct": -41.9,
+                      "why": "стоп −40%", "opened": now - 20000, "closed": now - 15000, "source": "copy"}]
+    rs["stats"].update(buys=3, sells=2, wins=1, pnl_sol=-0.0013, pnl_usd=-0.2, rent_back_sol=0.004)
+    rs["decisions"] += [{"at": now - 15500, "symbol": "CHILLGUY", "text": "купил за ⭐ 7xKX…gAsU (MOODENG, PNUT)"},
+                        {"at": now - 7000, "symbol": "RETARDIO", "text": "не купил: риск-фильтр: ликвидность $9.0K < $20K"},
+                        {"at": now - 2400, "symbol": "GOAT", "text": "купил за ⭐ 7xKX…gAsU (MOODENG, PNUT)"}]
+
     b.opps._get_json = opps_json
     b.opps.news = opps_news
 

@@ -114,7 +114,7 @@ async def radar_loop(b: ArbitrageBot) -> None:
 def register(b: ArbitrageBot) -> None:
     dp = b.dp
 
-    @dp.message(Command("dex", "token", "meme"))
+    @dp.message(Command("dex", "token"))
     async def cmd_dex(message: Message, command: CommandObject) -> None:
         if not b._allowed(message):
             return

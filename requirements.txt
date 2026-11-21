@@ -2,3 +2,4 @@ ccxt>=4.5,<4.6
 aiogram>=3.20,<3.33  # 3.33 падает при импорте (TypeError: unhashable FailFast)
 python-dotenv>=1.0
 aiohttp>=3.9,<4
+cryptography>=42  # подпись сделок Solana (кошелёк бота для /meme)

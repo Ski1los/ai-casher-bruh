@@ -34,6 +34,7 @@ from .demo_manager import REASONS, account_label
 from .opportunities import PLAN_QUESTION
 from .dex import SOL_ADDRESS_RE, DexError, best_pairs, is_address
 from .doctor import doctor_dict, run_doctor
+from .memetrade import SwapError
 from .solana import WalletError
 from .trading import STABLES, OrderPlan, TradeError, human_error
 
@@ -257,6 +258,7 @@ class WebApp:
             ("POST", "/api/opps/notify"): self.opps_notify,
             ("GET", "/api/copy"): self.copy,
             ("POST", "/api/copy"): self.copy_set,
+            ("POST", "/api/meme"): self.meme_set,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -474,8 +476,11 @@ class WebApp:
         ws = ct.st["wallets"].values()
         stars = [w["name"] for w in ws if w["status"] == "star"]
         last = ct.st["lessons"][-1]["text"] if ct.st["lessons"] else None
+        mt = self.b.meme
         return {"on": ct.on, "wallets": len(ct.active()), "stars": stars[:3], "star_count": len(stars),
-                "open": len(ct.st["open"]), "summary": ct.summary(), "lesson": last}
+                "open": len(ct.st["open"]), "summary": ct.summary(), "lesson": last,
+                "real": {"configured": mt.configured, "on": mt.on, "positions": len(mt.st["positions"]),
+                         "pnl_usd": mt.st["stats"]["pnl_usd"], "sells": mt.st["stats"]["sells"]}}
 
     async def portfolio(self, request: web.Request) -> dict:
         if not self.b.trader.creds:
@@ -891,7 +896,80 @@ class WebApp:
         """🐋 Копитрейдинг: кошельки, копии без денег, уроки."""
         d = self.b.copy.status_dict()
         d["searching"] = bool(self._copy_search and not self._copy_search.done())
+        mt = self.b.meme
+        if mt.configured:
+            try:
+                await asyncio.wait_for(mt.balance(max_age=30), 6)
+            except asyncio.TimeoutError:
+                pass
+        d["real"] = mt.status_dict()
+        if not request[OWNER]:  # друг видит итоги, но не адрес кошелька и не баланс
+            d["real"] = {k: v for k, v in d["real"].items() if k not in ("address", "balance_sol", "balance_usd")}
         return d
+
+    async def meme_set(self, request: web.Request) -> dict:
+        """💸 Реальные сделки: {on} / {size} / {scope} / {max_open} / {sell: mint} / {sell_all} / {buy: mint, usd}."""
+        self._owner(request)
+        body = await self._body(request)
+        mt = self.b.meme
+        if not mt.configured:
+            raise ApiError(mt.key_error or "кошелёк бота не подключён: Render → Environment → SOLANA_TRADER_KEY")
+        st = mt.st
+        notify, events = None, []
+        if "size" in body:
+            try:
+                st["size_usd"] = max(0.5, min(float(body["size"]), 50.0))
+            except (TypeError, ValueError):
+                raise ApiError("неверная сумма") from None
+        if body.get("scope") in ("star", "good"):
+            st["scope"] = body["scope"]
+        if body.get("max_open") in (1, 2, 3):
+            st["max_open"] = body["max_open"]
+        if "on" in body:
+            st["on"] = bool(body["on"])
+            if st["on"] and not self.b.copy.on:
+                self.b.copy.st["on"] = True
+            notify = ("🟢 Реальное автокопирование мемкоинов включено из приложения. /meme" if st["on"]
+                      else "⏸ Реальное автокопирование выключено из приложения. Позиции бот продолжает вести.")
+        try:
+            if body.get("sell"):
+                e = await mt.sell(str(body["sell"]), "вручную из приложения")
+                if e:
+                    events.append(e)
+            if body.get("sell_all"):
+                events += await mt.sell_all("продать всё (приложение)")
+            if body.get("buy"):
+                mint = str(body["buy"]).strip()
+                if not is_address(mint):
+                    raise ApiError("нужен адрес токена (mint) из DexScreener или GMGN")
+                symbol = ""
+                try:
+                    pair = (await self.b.copy._pairs([mint])).get(mint)
+                    symbol = pair.symbol if pair else ""
+                except Exception:
+                    pass
+                events.append(await mt.buy(mint, float(body.get("usd") or st["size_usd"]), symbol=symbol))
+        except (SwapError, WalletError) as e:
+            raise ApiError(str(e)) from None
+        self.b.save_copy()
+        if events:
+            from . import copy_ui
+            await copy_ui.send_events(self.b, events)
+
+        async def later():
+            try:
+                await self.b._backup_now()
+                if notify and self.b.owner_id:
+                    await self.b._send(self.b.owner_id, notify)
+            except Exception:
+                log.exception("Фоновое сохранение после сделки")
+
+        task = asyncio.get_running_loop().create_task(later())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        out = await self.copy(request)
+        out["done"] = [html.unescape(re.sub(r"<[^>]+>", "", e["text"])) for e in events]
+        return out
 
     async def copy_set(self, request: web.Request) -> dict:
         """{on} / {signals} / {add: адрес, name} / {remove: адрес} / {find: true} — только владелец."""

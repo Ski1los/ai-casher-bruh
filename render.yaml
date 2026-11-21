@@ -40,6 +40,13 @@ services:
       # Можно не заполнять, а прислать боту командой /phantom АДРЕС.
       - key: PHANTOM_ADDRESS
         sync: false
+      # 💸 Мемкоины (/meme): приватный ключ ОТДЕЛЬНОГО аккаунта «Бот» в Phantom с небольшой суммой.
+      # Только здесь, в Render. Никогда в чат, ИИ или репозиторий. Основной кошелёк и сид-фраза не нужны.
+      - key: SOLANA_TRADER_KEY
+        sync: false
+      # Необязательно: бесплатный ключ Jupiter (developers.jup.ag/portal) — быстрее сделки
+      - key: JUPITER_API_KEY
+        sync: false
       # Т-Инвестиции: токен T-Invest API с доступом «Только чтение» (бот только показывает портфель)
       - key: TINVEST_TOKEN
         sync: false

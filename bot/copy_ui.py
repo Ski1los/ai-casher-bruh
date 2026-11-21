@@ -40,7 +40,8 @@ COPY_HELP = """\
 4. Фильтр рисков (ликвидность, RugCheck, возраст токена, переплата к цене кошелька, рост за час) сам
    сдвигает пороги, если сделки за порогом теряли. Каждое изменение — «урок» с цифрами.
 
-⚠️ Бот не покупает с твоего кошелька: для этого нужен приватный ключ, а его нельзя давать никому.
+💸 <b>Торговать реально</b>: /meme. Бот покупает и продаёт сам с ОТДЕЛЬНОГО кошелька «Бот» (новый аккаунт
+в Phantom с небольшой суммой), ключ которого лежит только в Render. Основной кошелёк и сид-фраза не нужны.
 Мемкоины — самый рискованный рынок: заходи только суммой, которую не жалко потерять."""
 
 
@@ -50,6 +51,7 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
              InlineKeyboardButton(text=f"🔔 Сигналы: {'вкл' if ct.st['signals'] else 'выкл'}", callback_data="cp:sig")],
             [InlineKeyboardButton(text="🔎 Найти кошельки сейчас", callback_data="cp:find"),
              InlineKeyboardButton(text="🧠 Уроки", callback_data="cp:lessons")],
+            [InlineKeyboardButton(text="💸 Торговать реально" + (" 🟢" if b.meme.on else ""), callback_data="mt:show")],
             [InlineKeyboardButton(text="❔ Как это работает", callback_data="cp:help"),
              InlineKeyboardButton(text="🔄 Обновить", callback_data="cp:show")]]
     url = b.app_url()
@@ -81,15 +83,22 @@ def lessons_text(b: ArbitrageBot) -> str:
 
 
 def event_markup(e: dict) -> InlineKeyboardMarkup | None:
+    """Кнопки события: ссылка или действие в боте («cb:mt:s:…» → callback)."""
     if not e.get("buttons"):
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t, url=u)] for t, u in e["buttons"]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, callback_data=u[3:]) if u.startswith("cb:") else InlineKeyboardButton(text=t, url=u)]
+        for t, u in e["buttons"]])
 
 
 async def send_events(b: ArbitrageBot, events: list[dict]) -> None:
     if b.owner_id is None:
         return
     for e in events:
+        if e.get("mint") and e.get("signal") is not False and b.meme.configured and not any(
+                u.startswith("cb:") for _, u in e.get("buttons", [])):
+            e = {**e, "buttons": [(f"💸 Купить ботом ${b.meme.st['size_usd']:g}", f"cb:mt:b:{e['mint']}")]
+                 + list(e.get("buttons", []))}
         await b._send(b.owner_id, e["text"], event_markup(e))
 
 
@@ -189,18 +198,33 @@ def register(b: ArbitrageBot) -> None:
 
 
 async def copy_tick(b: ArbitrageBot) -> None:
-    """Один шаг: копии, поиск новых кошельков раз в 2 часа, сохранение."""
-    ct = b.copy
-    if not ct.on or b.owner_id is None:
+    """Один шаг: копии, реальные сделки (если подключён кошелёк бота), поиск новых кошельков раз в 2 часа,
+    сохранение. Открытые реальные позиции ведём, даже если копитрейдинг выключен."""
+    ct, mt = b.copy, b.meme
+    if b.owner_id is None or (not ct.on and not mt.st["positions"]):
         return
-    events = await ct.step()
+    events: list[dict] = []
+    if ct.on:
+        events += await ct.step()
+        try:
+            events += await mt.after_copy_step()
+        except Exception as e:
+            log.exception("Реальные сделки после шага копитрейдинга")
+            mt.last_error = str(e)[:200]
     try:
-        report = await ct.discover()
-        added = [r for r in report if r.startswith("➕")]
-        if added:
-            events.append({"text": "🔎 Нашёл новые кошельки:\n" + "\n".join(html.escape(r) for r in added), "buttons": []})
+        events += await mt.guard()
     except Exception as e:
-        log.info("Поиск кошельков: %s", e)
+        log.exception("Сторож реальных позиций")
+        mt.last_error = str(e)[:200]
+    if ct.on:
+        try:
+            report = await ct.discover()
+            added = [r for r in report if r.startswith("➕")]
+            if added:
+                events.append({"text": "🔎 Нашёл новые кошельки:\n" + "\n".join(html.escape(r) for r in added),
+                               "buttons": []})
+        except Exception as e:
+            log.info("Поиск кошельков: %s", e)
     await send_events(b, events)
     if ct.changes != b._copy_saved:
         b._copy_saved = ct.changes
@@ -220,7 +244,13 @@ async def copy_loop(b: ArbitrageBot) -> None:
 
 
 def short_line(b: ArbitrageBot) -> str:
-    """Строка для ежедневного отчёта."""
+    """Строка для ежедневного отчёта (копии без денег + реальные сделки)."""
+    real = b.meme.short_line()
+    line = _copy_line(b)
+    return "\n".join(x for x in (line, real) if x)
+
+
+def _copy_line(b: ArbitrageBot) -> str:
     ct = b.copy
     if not ct.on and not ct.st["wallets"]:
         return ""

@@ -29,8 +29,10 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import copy_ui, extras_ui, market_ui, opps_ui, trading_ui, updater
+from . import copy_ui, extras_ui, meme_ui, market_ui, opps_ui, trading_ui, updater
 from .copytrade import CopyTrader
+from .memetrade import MemeTrader
+from .solkey import looks_like_secret
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
@@ -151,7 +153,7 @@ HELP_TEXT = """\
 /autopilot — 🤖 <b>бот торгует сам</b>: одна кнопка, дальше без тебя
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
-/copy — 🐋 копитрейдинг: умные кошельки Solana, копии без денег, сигналы ⭐
+/copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 бот сам торгует мемкоинами
 /news — новости крипты
 
 <b>Сигналы</b>
@@ -501,6 +503,13 @@ class ArbitrageBot:
                 self.copy.restore(json.loads(self.copy_file.read_text("utf-8")))
             except (ValueError, TypeError) as e:
                 log.warning("Не удалось прочитать %s: %s", self.copy_file, e)
+        # 💸 реальные сделки с мемкоинами: отдельный кошелёк бота из SOLANA_TRADER_KEY (bot/memetrade.py).
+        # Состояние лежит внутри копитрейдинга (copy.st["real"]) — сохраняется и бэкапится вместе с ним.
+        self.meme = MemeTrader(self.copy)
+        if self.meme.key_error:
+            log.warning("%s", self.meme.key_error)
+        elif self.meme.configured:
+            log.info("Кошелёк бота для мемкоинов: %s", self.meme.address)
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.webapp = WebApp(self, token)  # Telegram Mini App: /app на том же сервере, что и /health
@@ -789,7 +798,20 @@ class ArbitrageBot:
                 "summary": d["summary"], "filter": d["filter"], "mistakes": d["mistakes"][:4],
                 "lessons": [x["text"] for x in d["lessons"][:3]],
                 "wallets": [{k: w[k] for k in ("name", "status", "copies", "sum", "grade")} for w in d["wallets"][:8]],
-                "cannot": "бот не покупает с кошелька пользователя: нужен приватный ключ, его нельзя давать"}
+                "real_trading": self._meme_context()}
+
+    def _meme_context(self) -> dict:
+        mt = self.meme
+        if not mt.configured:
+            return {"connected": False, "how": "/meme: отдельный аккаунт «Бот» в Phantom, его приватный ключ — ТОЛЬКО в "
+                                               "Render → Environment → SOLANA_TRADER_KEY; никогда не в чат и не ИИ",
+                    "error": mt.key_error}
+        d = mt.status_dict()
+        return {"connected": True, "auto_on": d["on"], "balance_sol": d["balance_sol"], "size_usd": d["size_usd"],
+                "scope": d["scope"], "positions": [{k: p[k] for k in ("symbol", "usd_in", "pct", "source")}
+                                                   for p in d["positions"]],
+                "stats": d["stats"], "today_usd": d["day_pnl_usd"],
+                "last_decisions": [x["symbol"] + ": " + x["text"] for x in d["decisions"][:4]]}
 
     def _tinvest_context(self) -> dict:
         if not self.tinvest.configured:
@@ -1374,6 +1396,7 @@ class ArbitrageBot:
         market_ui.register(self)
         opps_ui.register(self)
         copy_ui.register(self)
+        meme_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1382,6 +1405,9 @@ class ArbitrageBot:
             if not self._allowed(message):
                 return
             text = (message.text or "").strip()
+            if looks_like_secret(text):  # ключ/сид-фраза в чате: удалить, предупредить, ИИ не отдавать
+                await meme_ui.guard_secret(self, message)
+                return
             if text.startswith("/"):
                 await message.answer("Не знаю такой команды. Список: /help")
                 return
@@ -1766,6 +1792,7 @@ class ArbitrageBot:
                     BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
                     BotCommand(command="lab", description="🧪 Лаборатория: стратегии вживую"),
                     BotCommand(command="copy", description="🐋 Копитрейдинг: умные кошельки"),
+                    BotCommand(command="meme", description="💸 Мемкоины: бот торгует сам"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости крипты"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
@@ -1823,5 +1850,6 @@ class ArbitrageBot:
             await self.phantom.close()
             await self.dex.close()
             await self.copy.rpc.close()
+            await self.meme.jup.close()
             await self.tinvest.close()
             await self.bot.session.close()
