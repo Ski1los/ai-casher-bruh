@@ -11,7 +11,8 @@ from aiogram import F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from .memetrade import SETUP_TEXT, SIZES, SwapError
+from .copytrade import tp_text
+from .memetrade import DEMO_SIZES, SETUP_TEXT, SIZES, SwapError
 from .solana import WalletError, valid_address
 
 if TYPE_CHECKING:
@@ -28,7 +29,8 @@ CONFIRM_TEXT = """\
 риск-фильтр, и сам продавать: когда кошелёк продаст, по стопу −{stop:.0%} или через 48 ч.
 
 Сумма сделки ${size:g} · не больше {max_open} позиций · запас {reserve:g} SOL на комиссии ·
-дневной лимит убытка ${loss:g} · пауза 12 ч после 3 убытков подряд.
+дневной лимит убытка ${loss:g} · пауза 12 ч после 3 убытков подряд. Тейк-профит: {tp}.
+🧪 Демо-счёт: {demo}.
 
 Честно: мемкоины чаще всего падают, копия всегда хуже оригинала (мы покупаем позже кошелька).
 Прошлые успехи ⭐ не гарантируют будущих. Клади на «Бот» только то, что не жалко потерять."""
@@ -44,24 +46,32 @@ LEAK_TEXT = """\
 
 def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
     mt = b.meme
-    if not mt.configured:
-        rows = [[InlineKeyboardButton(text="🔄 Проверить подключение", callback_data="mt:show")],
-                [InlineKeyboardButton(text="🐋 Копитрейдинг (без денег)", callback_data="cp:show")]]
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-    st = mt.st
-    rows = [[InlineKeyboardButton(text="⏸ Выключить автокопирование" if mt.on else "🟢 Включить автокопирование",
-                                  callback_data="mt:off" if mt.on else "mt:on")],
-            [InlineKeyboardButton(text=("✓ " if st["size_usd"] == s else "") + f"${s:g}", callback_data=f"mt:size:{s:g}")
-             for s in SIZES],
-            [InlineKeyboardButton(text="Кого: только ⭐" if st["scope"] == "star" else "Кого: ⭐ + 👀 хорошие",
-                                  callback_data="mt:scope"),
-             InlineKeyboardButton(text=f"Позиций до {st['max_open']}", callback_data="mt:maxopen")]]
+    st, d = mt.st, mt.demo
+    rows: list[list[InlineKeyboardButton]] = []
+    if mt.configured:
+        rows.append([InlineKeyboardButton(text="⏸ Выключить автокопирование" if mt.on else "🟢 Включить автокопирование",
+                                          callback_data="mt:off" if mt.on else "mt:on")])
+    rows += [[InlineKeyboardButton(text=("✓ " if st["size_usd"] == s else "") + f"${s:g}", callback_data=f"mt:size:{s:g}")
+              for s in SIZES],
+             [InlineKeyboardButton(text="Кого: только ⭐" if st["scope"] == "star" else "Кого: ⭐ + 👀 хорошие",
+                                   callback_data="mt:scope"),
+              InlineKeyboardButton(text=f"Позиций до {st['max_open']}", callback_data="mt:maxopen")]]
     for mint, p in list(st["positions"].items())[:6]:
         rows.append([InlineKeyboardButton(text=f"💸 Продать {p['symbol']}", callback_data=f"mt:s:{mint}")])
     if st["positions"]:
         rows.append([InlineKeyboardButton(text="🧯 Продать всё", callback_data="mt:sa")])
+    for mint, p in list(d["positions"].items())[:4]:
+        rows.append([InlineKeyboardButton(text=f"🧪 Продать {p['symbol']} (демо)", callback_data=f"mt:ds:{mint}")])
+    rows.append([InlineKeyboardButton(text="🧪 Демо: выключить" if mt.demo_on else "🧪 Демо: включить",
+                                      callback_data="mt:doff" if mt.demo_on else "mt:don"),
+                 InlineKeyboardButton(text="🔁 Демо заново", callback_data="mt:dr")])
+    if not mt.configured:
+        rows.append([InlineKeyboardButton(text="❔ Как подключить кошелёк", callback_data="mt:help"),
+                     InlineKeyboardButton(text="🐋 Копитрейдинг", callback_data="cp:show")])
     rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="mt:show"),
-                 InlineKeyboardButton(text="❔ Как это работает", callback_data="mt:help")])
+                 InlineKeyboardButton(text="🧠 Чему научился", callback_data="mt:learn")])
+    if mt.configured:
+        rows.append([InlineKeyboardButton(text="❔ Как это работает", callback_data="mt:help")])
     url = b.app_url()
     if url:
         from aiogram.types import WebAppInfo
@@ -72,6 +82,8 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
 HOW_TEXT = """\
 💸 <b>Как бот торгует мемкоинами</b>
 
+0. <b>🧪 Демо-счёт</b> торгует по тем же правилам виртуальными SOL с настоящими котировками Jupiter — пока
+   кошелёк не подключён или пуст, и дальше (молча), чтобы учиться. Подключать деньги — когда демо в плюсе.
 1. <b>Кого копирует.</b> Только кошельки, которые сначала заработали ⭐ в копитрейдинге без денег: от 5 копий
    и в среднем от +2% на копию с учётом опоздания и комиссий (/copy). Можно расширить до «👀 хороших» —
    кошельков в плюсе по своей истории, но ещё без ⭐ (рискованнее).
@@ -79,9 +91,11 @@ HOW_TEXT = """\
    «туда-обратно» через Jupiter: если токен нельзя продать — это ловушка, бот не покупает; если вход+выход
    дороже 6% — тоже нет.
 3. <b>Покупка</b> через Jupiter (лучший маршрут по всем DEX), на сумму из настроек.
-4. <b>Продажа</b>: кошелёк продал · стоп −40% по котировке Jupiter · пул слили · 48 часов. Пустой счёт
+4. <b>Продажа</b>: кошелёк продал · стоп и тейк-профит по котировке Jupiter · пул слили · 48 часов. Пустой счёт
    токена бот закрывает и возвращает залог ~0,002 SOL.
 5. <b>Тормоза</b>: до 2 позиций, запас SOL на комиссии, дневной лимит убытка, пауза 12 ч после 3 убытков подряд.
+6. <b>🧠 Учится сам</b> на сотнях копий: проверяет на прошлых сделках другие стоп и тейк-профит и переходит на
+   лучший, если он заметно (≥5%) выгоднее; замеряет реальную стоимость входа-выхода; решает, копировать ли 👀.
 
 Вручную: <code>/meme buy АДРЕС_ТОКЕНА 2</code> — купить на $2 (адрес — из DexScreener/GMGN), 
 <code>/meme sell СИМВОЛ</code> — продать, <code>/meme sell all</code> — продать всё.
@@ -106,9 +120,10 @@ def register(b: ArbitrageBot) -> None:
         await b.meme.balance(max_age=20)
         await b._send(chat_id, b.meme.text(), keyboard(b))
 
-    async def do_buy(chat_id: int, mint: str, usd: float) -> None:
+    async def do_buy(chat_id: int, mint: str, usd: float, demo: bool = False) -> None:
         mt = b.meme
-        await b._send(chat_id, f"⏳ Проверяю токен и покупаю на ${usd:g}… (до 30 секунд)")
+        demo = demo or not mt.configured
+        await b._send(chat_id, f"⏳ Проверяю токен и покупаю на ${usd:g}{' (демо)' if demo else ''}… (до 30 секунд)")
         symbol = ""
         try:
             pair = (await b.copy._pairs([mint])).get(mint)
@@ -116,14 +131,22 @@ def register(b: ArbitrageBot) -> None:
         except Exception:
             pass
         try:
-            e = await mt.buy(mint, usd, source="manual", symbol=symbol)
+            if demo:
+                e = await mt.demo_buy(mint, usd, source="manual", symbol=symbol)
+            else:
+                e = await mt.buy(mint, usd, source="manual", symbol=symbol)
         except (SwapError, WalletError) as err:
             await b._send(chat_id, f"⚠️ Не купил: {html.escape(str(err))[:300]}")
             return
         b.save_copy()
         await send_events(b, [e])
 
-    async def do_sell(chat_id: int, mint: str) -> None:
+    async def do_sell(chat_id: int, mint: str, demo: bool = False) -> None:
+        if demo:
+            e = await b.meme.demo_sell(mint, "вручную")
+            b.save_copy()
+            await send_events(b, [e] if e else [{"text": "Этой демо-позиции уже нет.", "buttons": []}])
+            return
         if mint not in b.meme.st["positions"]:
             await b._send(chat_id, "Этой позиции уже нет.", keyboard(b))
             return
@@ -165,10 +188,15 @@ def register(b: ArbitrageBot) -> None:
                 await send_events(b, events or [{"text": "Позиций нет.", "buttons": []}])
                 return
             mint = b.meme.find(args[1])
+            demo = False
+            if not mint:
+                mint, demo = b.meme.find(args[1], demo=True), True
             if not mint:
                 await message.answer("Такой позиции нет. Список: /meme")
                 return
-            await do_sell(message.chat.id, mint)
+            await do_sell(message.chat.id, mint, demo)
+        elif cmd in ("on", "off") and not b.meme.configured:
+            await b._send(message.chat.id, SETUP_TEXT, keyboard(b))
         elif cmd in ("on", "off"):
             if cmd == "on":
                 await b._send(message.chat.id, confirm_text(b), confirm_kb())
@@ -202,9 +230,44 @@ def register(b: ArbitrageBot) -> None:
         if action == "help":
             await b._send(chat_id, HOW_TEXT if mt.configured else SETUP_TEXT, keyboard(b))
             return
+        if action == "learn":
+            await b._send(chat_id, learn_text(b), keyboard(b))
+            return
         if not await owner_only(cb.from_user.id, chat_id):
             return
-        if not mt.configured:
+        if action in ("don", "doff"):
+            mt.demo["on"] = action == "don"
+            mt.demo["started"] = True
+            note = ""
+            if mt.demo["on"] and not b.copy.on:
+                b.copy.st["on"] = True
+                note = " Копитрейдинг (без денег) тоже включил — без него нет сигналов."
+            b.save_copy()
+            await b._send(chat_id, ("🧪 Демо-счёт торгует." + note) if mt.demo["on"] else
+                          "🧪 Демо-счёт на паузе: открытые демо-позиции бот доведёт до продажи.", keyboard(b))
+            return
+        if action == "dr":
+            if len(parts) > 2:
+                mt.demo_reset(float(parts[2]))
+                b.save_copy()
+                await b._send(chat_id, f"🔁 Демо-счёт начат заново: ${float(parts[2]):g}. Уроки и подобранные "
+                                       "правила сохранены.", keyboard(b))
+            else:
+                await b._send(chat_id, "🔁 Начать демо-счёт заново? Позиции и итоги демо обнулятся, а то, чему бот "
+                                       "научился (стоп, тейк, комиссии), останется. С какой суммы?",
+                              InlineKeyboardMarkup(inline_keyboard=[
+                                  [InlineKeyboardButton(text=f"${s:g}", callback_data=f"mt:dr:{s:g}") for s in DEMO_SIZES],
+                                  [InlineKeyboardButton(text="Отмена", callback_data="mt:show")]]))
+            return
+        if action == "ds" and len(parts) > 2:
+            await do_sell(chat_id, parts[2], demo=True)
+            return
+        if action == "db" and len(parts) > 2:
+            await do_buy(chat_id, parts[2], mt.st["size_usd"], demo=True)
+            return
+        if action in ("size", "maxopen", "scope"):
+            pass
+        elif not mt.configured:
             await b._send(chat_id, mt.text(), keyboard(b))
             return
         if action == "on":
@@ -234,9 +297,14 @@ def register(b: ArbitrageBot) -> None:
         elif action == "scope":
             mt.st["scope"] = "good" if mt.st["scope"] == "star" else "star"
             b.save_copy()
-            await b._send(chat_id, "Копирую только ⭐ (проверенные копиями без денег)." if mt.st["scope"] == "star" else
-                          "Копирую ⭐ и 👀 кошельки в плюсе по своей истории. ⚠️ Это рискованнее: их копии ещё не "
-                          "доказали прибыль.", keyboard(b))
+            ok = mt.st["learn"]["good_ok"]
+            proof = (" Копии уже показали плюс — это урок бота." if ok else
+                     " ⚠️ Копии таких кошельков пока в минусе." if ok is False else
+                     " ⚠️ Это рискованнее: их копии ещё не доказали прибыль.")
+            await b._send(chat_id, "Настоящий счёт копирует только ⭐ (проверенные копиями без денег)."
+                          if mt.st["scope"] == "star" else
+                          "Настоящий счёт копирует ⭐ и 👀 кошельки в плюсе по своей истории." + proof
+                          + "\n🧪 Демо копирует и 👀 в любом случае — чтобы учиться быстрее.", keyboard(b))
         elif action == "maxopen":
             mt.st["max_open"] = {1: 2, 2: 3, 3: 1}.get(mt.st["max_open"], 2)
             b.save_copy()
@@ -257,10 +325,35 @@ def register(b: ArbitrageBot) -> None:
             await do_buy(chat_id, parts[2], mt.st["size_usd"])
 
 
+def learn_text(b: ArbitrageBot) -> str:
+    mt, ct = b.meme, b.copy
+    lr = mt.st["learn"]
+    lessons = ct.st.get("lessons", [])
+    closed = [t for t in ct.st["closed"] if t.get("passed")]
+    lines = ["🧠 <b>Чему бот научился</b> (на копиях без денег и демо-сделках)", mt.rules_text(),
+             f"Копий с прошедшим фильтром: {len(closed)} — на них бот проверяет другие стоп и тейк-профит "
+             "(менять правило — от 15 копий и выигрыша ≥5%)."]
+    if lr["good_ok"] is None:
+        lines.append(f"👀 кошельки без ⭐: копий {lr['good_n']}, нужно от 12, чтобы решить")
+    else:
+        lines.append(f"👀 кошельки без ⭐: {'окупаются' if lr['good_ok'] else 'теряют'} ({lr['good_avg']:+.1f}% "
+                     f"на копию за {lr['good_n']})")
+    if lessons:
+        lines.append("\n<b>Последние уроки</b>:")
+        for x in lessons[-6:][::-1]:
+            lines.append("• " + html.escape(x["text"][:300]))
+    else:
+        lines.append("\nУроков пока нет — нужно больше закрытых копий (обычно 1–3 дня).")
+    lines.append("\nЧестно: правила подбираются по прошлому, будущее может отличаться — поэтому бот меняет их "
+                 "только по одному шагу и только при заметном выигрыше.")
+    return "\n".join(lines)
+
+
 def confirm_text(b: ArbitrageBot) -> str:
     st = b.meme.st
     return CONFIRM_TEXT.format(stop=st["stop_pct"], size=st["size_usd"], max_open=st["max_open"],
-                               reserve=st["reserve_sol"], loss=st["daily_loss_usd"])
+                               reserve=st["reserve_sol"], loss=st["daily_loss_usd"], tp=tp_text(st["tp_pct"]),
+                               demo=html.escape(b.meme.demo_verdict()["text"]))
 
 
 def confirm_kb() -> InlineKeyboardMarkup:

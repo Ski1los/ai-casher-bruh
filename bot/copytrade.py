@@ -44,6 +44,8 @@ PHANTOM_FEE = 0.0085  # комиссия обмена в Phantom
 SLIPPAGE = 0.01  # мемкоины: цена уходит, пока транзакция подтверждается
 NETWORK_USD = 0.01  # сеть Solana + приоритет, за одну транзакцию
 STOP_PCT = 0.40
+CALIB_MIN = 5          # после 5 замеров котировок Jupiter пересчитываем стоимость копий
+CALIB_BUFFER = 0.003   # запас на сторону: цена чуть уходит, пока транзакция подтверждается
 MAX_HOLD_SEC = 48 * 3600
 STALE_SEC = 15 * 60  # покупку старше 15 минут копировать поздно
 RUG_LIQ_DROP = 0.3  # ликвидность упала до 30% от входа — выходим (похоже на слив пула)
@@ -291,6 +293,68 @@ def learn_filter(closed: list[dict], filt: dict) -> tuple[dict, str | None]:
     return new, lesson
 
 
+# --- обучение выходов: стоп и тейк-профит по пути цены каждой копии -----------------------
+
+EXIT_STOPS = (0.2, 0.3, 0.4)        # стоп свободнее 40% проверить нельзя: копия сама закрывается на −40%
+EXIT_TPS = (None, 0.3, 0.5, 1.0)    # тейк-профит: продать всё при +30% / +50% / +100%
+EXIT_MIN = 15                       # судим не меньше чем по 15 копиям с записанным путём
+EXIT_GAIN = 5.0                     # меняем правило, только если сумма лучше хотя бы на 5%
+PATH_MAX = 60
+
+
+def add_path(path: list, pct: float) -> list:
+    """Путь цены копии в % от входа. Длиннее PATH_MAX — прореживаем через одну (первая и последняя остаются)."""
+    path.append(round(pct, 1))
+    if len(path) > PATH_MAX:
+        path[:] = path[:-1:2] + path[-1:]
+    return path
+
+
+def exit_net(p: float, cost: float) -> float:
+    """Чистый результат копии в %, если продать при движении цены на p% (с комиссиями туда и обратно)."""
+    return ((1 + p / 100) * (1 - cost) / (1 + cost) - 1 - 2 * NETWORK_USD / COPY_USD) * 100
+
+
+def simulate_exit(t: dict, stop: float, tp: float | None, cost: float) -> float:
+    for p in t["path"]:
+        if p <= -stop * 100:
+            return exit_net(p, cost)
+        if tp and p >= tp * 100:
+            return exit_net(p, cost)
+    return t["ret"]
+
+
+def tp_text(tp: float | None) -> str:
+    return f"+{tp:.0%}" if tp else "нет"
+
+
+def learn_exits(closed: list[dict], stop: float, tp: float | None, cost: float
+                ) -> tuple[float, float | None, str | None]:
+    """Какой стоп и тейк дали бы больше на настоящих путях цены копий. Сдвиг — на один шаг одного правила."""
+    trades = [t for t in closed if t.get("passed") and len(t.get("path") or []) >= 2]
+    if len(trades) < EXIT_MIN:
+        return stop, tp, None
+
+    def total(s, t):
+        return sum(simulate_exit(x, s, t, cost) for x in trades)
+
+    stop = min(EXIT_STOPS, key=lambda s: abs(s - stop))
+    tp = tp if tp in EXIT_TPS else None
+    cur = total(stop, tp)
+    si, ti = EXIT_STOPS.index(stop), EXIT_TPS.index(tp)
+    options = [(EXIT_STOPS[i], tp) for i in (si - 1, si + 1) if 0 <= i < len(EXIT_STOPS)]
+    options += [(stop, EXIT_TPS[i]) for i in (ti - 1, ti + 1) if 0 <= i < len(EXIT_TPS)]
+    best = max(options, key=lambda o: total(*o))
+    gain = total(*best) - cur
+    if gain < EXIT_GAIN:
+        return stop, tp, None
+    s, t = best
+    what = (f"стоп −{stop:.0%} → −{s:.0%}" if s != stop else f"тейк-профит {tp_text(tp)} → {tp_text(t)}")
+    lesson = (f"🧠 Урок по выходам: {what}. На {len(trades)} копиях с настоящим путём цены так было бы "
+              f"{cur + gain:+.1f}% вместо {cur:+.1f}%. Применяю к демо и реальным сделкам.")
+    return s, t, lesson
+
+
 def diagnose(pos: dict, ret: float, why: str) -> list[str]:
     """Почему копия ушла в минус — коды из MISTAKES."""
     if ret >= 0:
@@ -331,7 +395,8 @@ def buy_links(mint: str) -> dict[str, str]:
 def new_state() -> dict:
     return {"on": False, "signals": True, "wallets": {}, "open": {}, "closed": [], "filter": dict(FILTER_DEFAULT),
             "lessons": [], "mistakes": {}, "candidates": {}, "graveyard": [], "discovered_at": 0.0,
-            "signal_log": {}, "stats": {"copies": 0, "skipped_stale": 0, "no_pair": 0}, "real": {}}
+            "signal_log": {}, "stats": {"copies": 0, "skipped_stale": 0, "no_pair": 0}, "real": {},
+            "calib": {"rts": [], "cost": None}}
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +471,30 @@ class CopyTrader:
 
     def active(self) -> list[str]:
         return [a for a, w in self.st["wallets"].items() if w["status"] != "dropped" or w["source"] == "user"]
+
+    # --- калибровка комиссий по настоящим котировкам Jupiter -----------------------------
+
+    def cost_side(self) -> float:
+        """Потеря на одну сторону сделки (доля). Пока нет замеров — комиссия Phantom + проскальзывание."""
+        c = (self.st.get("calib") or {}).get("cost")
+        return c if c else SLIPPAGE + PHANTOM_FEE
+
+    def add_cost_sample(self, roundtrip: float, now: float | None = None) -> str | None:
+        """Замер «вход+выход» по котировкам Jupiter (доля). Пересчитывает стоимость копий; урок при заметной разнице."""
+        now = time.time() if now is None else now
+        calib = self.st.setdefault("calib", {"rts": [], "cost": None})
+        calib["rts"] = (calib["rts"] + [round(max(0.0, roundtrip), 4)])[-30:]
+        self.changes += 1
+        if len(calib["rts"]) < CALIB_MIN:
+            return None
+        new = round(min(0.05, max(0.004, statistics.median(calib["rts"]) / 2 + CALIB_BUFFER)), 4)
+        old = self.cost_side()
+        if calib["cost"] is not None and abs(new - old) < 0.002:
+            return None
+        calib["cost"] = new
+        return self._lesson(f"🧪 Калибровка: по настоящим котировкам Jupiter вход+выход стоит ≈ {2 * new:.1%} "
+                            f"(я считал {2 * old:.1%}). Копии без денег теперь считаются с этой стоимостью — "
+                            "оценки кошельков честнее.", now)
 
     def _lesson(self, text: str, now: float) -> str:
         self.st["lessons"].append({"at": now, "text": text})
@@ -567,7 +656,9 @@ class CopyTrader:
         passed, reasons, feats = risk_check(p, rug, chase, self.st["filter"], now)
         hard = any(r.startswith(("RugCheck:", "продаж нет")) for r in reasons)
         self.st["open"][key] = {"wallet": addr, "mint": sw["mint"], "symbol": p.symbol[:16], "opened": now,
-                                "raw": p.price_usd, "entry": p.price_usd * (1 + SLIPPAGE + PHANTOM_FEE),
+                                "raw": p.price_usd, "entry": p.price_usd * (1 + self.cost_side()),
+                                "cost": self.cost_side(), "path": [0.0], "wstatus": w["status"],
+                                "wgrade": (w.get("hist") or {}).get("grade"),
                                 "last": p.price_usd, "peak": p.price_usd, "liq0": p.liquidity_usd or 0,
                                 "w_amount": sw["amount"], "w_usd": round(sw["usd"] or sw["sol"] * sol_usd, 2),
                                 "feats": feats, "passed": passed, "reasons": reasons[:3], "hard_fail": hard}
@@ -614,6 +705,8 @@ class CopyTrader:
             if p and p.price_usd:
                 pos["last"] = p.price_usd
                 pos["peak"] = max(pos["peak"], p.price_usd)
+                if pos.get("path") is not None and pos["raw"]:
+                    add_path(pos["path"], (p.price_usd / pos["raw"] - 1) * 100)
             if pos["last"] <= pos["raw"] * (1 - STOP_PCT):
                 self._close(key, pos["last"], "стоп-лосс", now, events)
             elif p and pos["liq0"] and (p.liquidity_usd or 0) < pos["liq0"] * RUG_LIQ_DROP:
@@ -625,7 +718,7 @@ class CopyTrader:
         pos = self.st["open"].pop(key)
         pos["closed_at"] = now
         self.closed_now.append((key, pos, why))
-        exit_eff = price * (1 - SLIPPAGE - PHANTOM_FEE)
+        exit_eff = price * (1 - pos.get("cost", SLIPPAGE + PHANTOM_FEE))
         ret = (exit_eff / pos["entry"] - 1 - 2 * NETWORK_USD / COPY_USD) * 100
         if why == "ликвидность ушла":
             ret = min(ret, -90.0)  # продать в слитый пул почти невозможно
@@ -635,7 +728,10 @@ class CopyTrader:
             self.st["mistakes"][m] = self.st["mistakes"].get(m, 0) + 1
         rec = {"wallet": pos["wallet"], "mint": pos["mint"], "symbol": pos["symbol"], "ret": ret, "why": why,
                "opened": pos["opened"], "closed": now, "feats": pos["feats"], "passed": pos["passed"],
-               "hard_fail": pos.get("hard_fail", False), "mistakes": mistakes}
+               "hard_fail": pos.get("hard_fail", False), "mistakes": mistakes,
+               "wstatus": pos.get("wstatus"), "wgrade": pos.get("wgrade")}
+        if pos["passed"] and pos.get("path"):
+            rec["path"] = pos["path"] + ([round((price / pos["raw"] - 1) * 100, 1)] if pos["raw"] else [])
         self.st["closed"].append(rec)
         del self.st["closed"][:-200]
         self.changes += 1
@@ -814,7 +910,7 @@ class CopyTrader:
         return {"on": self.on, "signals": bool(st["signals"]), "summary": self.summary(),
                 "wallets": self.wallet_rows(),
                 "open": [{"symbol": p["symbol"], "mint": p["mint"], "wallet": st["wallets"].get(p["wallet"], {}).get("name", short(p["wallet"])),
-                          "ret": round((p["last"] * (1 - SLIPPAGE - PHANTOM_FEE) / p["entry"] - 1) * 100, 1),
+                          "ret": round((p["last"] * (1 - p.get("cost", SLIPPAGE + PHANTOM_FEE)) / p["entry"] - 1) * 100, 1),
                           "passed": p["passed"], "reasons": p["reasons"], "opened": p["opened"]}
                          for p in sorted(st["open"].values(), key=lambda p: -p["opened"])][:20],
                 "recent": [{k: t[k] for k in ("symbol", "ret", "why", "passed", "closed", "mistakes")}

@@ -95,10 +95,12 @@ async def send_events(b: ArbitrageBot, events: list[dict]) -> None:
     if b.owner_id is None:
         return
     for e in events:
-        if e.get("mint") and e.get("signal") is not False and b.meme.configured and not any(
+        held = b.meme.st["positions"] if b.meme.configured else b.meme.demo["positions"]
+        if e.get("mint") and e.get("signal") is not False and e["mint"] not in held and not any(
                 u.startswith("cb:") for _, u in e.get("buttons", [])):
-            e = {**e, "buttons": [(f"💸 Купить ботом ${b.meme.st['size_usd']:g}", f"cb:mt:b:{e['mint']}")]
-                 + list(e.get("buttons", []))}
+            btn = ((f"💸 Купить ботом ${b.meme.st['size_usd']:g}", f"cb:mt:b:{e['mint']}") if b.meme.configured
+                   else (f"🧪 Купить на демо ${b.meme.st['size_usd']:g}", f"cb:mt:db:{e['mint']}"))
+            e = {**e, "buttons": [btn] + list(e.get("buttons", []))}
         await b._send(b.owner_id, e["text"], event_markup(e))
 
 
@@ -197,19 +199,36 @@ def register(b: ArbitrageBot) -> None:
             await find_now(b, chat_id)
 
 
+DEMO_INTRO = """\
+🧪 <b>Запустил демо-счёт мемкоинов</b> — ${usd:g} виртуальных.
+Пока настоящий кошелёк не подключён и не пополнен, бот торгует ими по тем же правилам, что и реальными: \
+копирует лучшие кошельки (⭐), проверяет токен (ловушки, ликвидность, стоимость входа-выхода по настоящей котировке \
+Jupiter), ставит стоп и сам продаёт.
+🧠 На этих сделках и на всех копиях он учится: подбирает стоп и тейк-профит, замеряет реальные комиссии, решает, \
+каких кошельков копировать. Каждое изменение — сообщением «Урок».
+Честно: демо не платит за промах цены при реальном исполнении, поэтому живые сделки обычно хуже на 1–3%. \
+Первые ⭐ кошельки появятся через 1–3 дня наблюдения. Копитрейдинг (без денег) включил — без него нет сигналов."""
+
+
 async def copy_tick(b: ArbitrageBot) -> None:
     """Один шаг: копии, реальные сделки (если подключён кошелёк бота), поиск новых кошельков раз в 2 часа,
     сохранение. Открытые реальные позиции ведём, даже если копитрейдинг выключен."""
     ct, mt = b.copy, b.meme
-    if b.owner_id is None or (not ct.on and not mt.st["positions"]):
+    if b.owner_id is None:
         return
     events: list[dict] = []
+    if mt.start_demo_if_new():  # первый запуск: демо-счёт учится, пока не подключён настоящий кошелёк
+        events.append({"text": DEMO_INTRO.format(usd=mt.demo["start_usd"]),
+                       "buttons": [("🧪 Демо-счёт", "cb:mt:show"), ("🐋 Копитрейдинг", "cb:cp:show")]})
+    if not ct.on and not mt.st["positions"] and not mt.demo["positions"]:
+        await send_events(b, events)
+        return
     if ct.on:
         events += await ct.step()
         try:
             events += await mt.after_copy_step()
         except Exception as e:
-            log.exception("Реальные сделки после шага копитрейдинга")
+            log.exception("Сделки мемкоинов после шага копитрейдинга")
             mt.last_error = str(e)[:200]
     try:
         events += await mt.guard()

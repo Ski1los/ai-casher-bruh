@@ -1283,6 +1283,7 @@ function copyCard() {
       <label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
     <div class="small muted press" data-act="copy" style="margin-top:8px;white-space:normal">${c.wallets ? `Слежу за ${c.wallets} кошельками · ⭐ ${c.star_count}${c.stars.length ? ": " + c.stars.map(esc).join(", ") : ""}${c.open ? ` · открыто копий ${c.open}` : ""}` : "Сам найдёт кошельки, которые рано покупают растущие токены, проверит их копиями без денег и пришлёт сигналы лучших."}</div>
     ${s.taken ? `<div class="small" style="margin-top:6px">Копии без денег: ${s.taken} · в плюс ${s.taken_wins} · <b class="${cls(s.taken_sum)}">${pct(s.taken_sum, 1)}</b></div>` : ""}
+    ${c.demo && c.demo.on ? `<div class="small press" data-act="copy" style="margin-top:6px">🧪 Демо: <b>${money(c.demo.equity_usd, { d: 2 })}</b> <span class="${cls(c.demo.total_pct)}">${pct(c.demo.total_pct, 1)}</span></div>` : ""}
     ${c.real && c.real.configured ? `<div class="small press" data-act="copy" style="margin-top:6px">💸 Реально: ${c.real.on ? "🟢 автокопирование" : "⏸ выкл"}${c.real.positions ? ` · позиций ${c.real.positions}` : ""}${c.real.sells ? ` · <b class="${cls(c.real.pnl_usd)}">${money(c.real.pnl_usd, { sign: true, d: 2 })}</b>` : ""}</div>` : ""}
     ${c.lesson ? `<div class="tiny muted" style="margin-top:6px;white-space:normal">🧠 ${esc(c.lesson)}</div>` : ""}
   </div>`;
@@ -1294,7 +1295,7 @@ function realBlock(c) {
     if (!owner()) return "";
     return `<div class="card" style="margin-top:10px"><div class="b">💸 Торговать реально</div>
       ${r.error ? `<div class="banner" style="margin-top:8px">⚠️ ${esc(r.error)}</div>` : ""}
-      <div class="small muted" style="margin-top:6px;white-space:normal">Бот сам покупает и продаёт мемкоины вслед за ⭐-кошельками — с отдельного аккаунта «Бот» в твоём Phantom.</div>
+      <div class="small muted" style="margin-top:6px;white-space:normal">Пока кошелёк не подключён, бот торгует на 🧪 демо-счёте ниже и учится. Когда демо в плюсе — подключи отдельный аккаунт «Бот» в Phantom, и бот будет торговать реально.</div>
       <ol class="small" style="margin:8px 0 0 18px;padding:0;white-space:normal;line-height:1.5">
         <li>Phantom → «Добавить аккаунт» → «Создать новый», назови «Бот», переведи на него ~$5–10 в SOL.</li>
         <li>Настройки → «Управление аккаунтами» → «Бот» → «Показать приватный ключ» → скопируй.</li>
@@ -1316,13 +1317,45 @@ function realBlock(c) {
       <div class="chips" style="margin-top:6px">${(r.sizes || [1, 2, 3, 5]).map((v) => `<div class="chip ${r.size_usd === v ? "on" : ""}" data-act="meme-size" data-v="${v}">$${v}</div>`).join("")}</div>
       <div class="small muted" style="margin-top:10px">Кого копировать</div>
       <div class="chips" style="margin-top:6px"><div class="chip ${r.scope === "star" ? "on" : ""}" data-act="meme-scope" data-v="star">только ⭐</div><div class="chip ${r.scope === "good" ? "on" : ""}" data-act="meme-scope" data-v="good">⭐ + 👀 хорошие</div></div>` : ""}
-    <div class="tiny muted" style="margin-top:8px;white-space:normal">До ${r.max_open} позиций · стоп −${Math.round(r.stop_pct * 100)}% · лимит убытка ${money(r.daily_loss_usd, { d: 0 })}/день · сегодня ${money(r.day_pnl_usd, { sign: true, d: 2 })}</div>
+    <div class="tiny muted" style="margin-top:8px;white-space:normal">До ${r.max_open} позиций · стоп −${Math.round(r.stop_pct * 100)}%${r.tp_pct ? " · тейк +" + Math.round(r.tp_pct * 100) + "%" : ""} · лимит убытка ${money(r.daily_loss_usd, { d: 0 })}/день · сегодня ${money(r.day_pnl_usd, { sign: true, d: 2 })}</div>
     ${s.sells ? `<div class="small" style="margin-top:6px">Продаж ${s.sells} · в плюс ${s.wins} · <b class="${cls(s.pnl_usd)}">${money(s.pnl_usd, { sign: true, d: 2 })}</b></div>` : ""}
     ${pos ? `<div class="list" style="margin-top:10px">${pos}</div>${owner() && (r.positions || []).length > 1 ? `<button class="btn block ghost sm" style="margin-top:8px" data-act="meme-sellall">🧯 Продать всё</button>` : ""}` : ""}
     ${owner() ? `<div class="row" style="gap:8px;margin-top:10px"><input id="memeMint" class="grow" placeholder="Адрес токена — купить вручную" autocomplete="off"><button class="btn sm primary" data-act="meme-buy">$${r.size_usd}</button></div>` : ""}
     ${closed ? `<div class="small muted" style="margin-top:10px">Сделки</div><div class="list" style="margin-top:6px">${closed}</div>` : ""}
     ${dec ? `<div class="small muted" style="margin-top:10px">Решения бота</div>${dec}` : ""}
     ${r.last_error ? `<div class="tiny" style="margin-top:8px;color:var(--red);white-space:normal">⚠️ ${esc(r.last_error)}</div>` : ""}
+  </div>`;
+}
+
+function demoBlock(c) {
+  const r = c.real || {};
+  const d = r.demo;
+  if (!d) return "";
+  const s = d.stats || {};
+  const L = r.learned || {};
+  const v = d.ready || {};
+  const vcls = v.state === "ok" ? "ok" : v.state === "bad" ? "bad" : "gray";
+  const pos = (d.positions || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.symbol)}</div><div class="s">${p.source === "copy" ? (p.category === "star" ? "⭐ " : "👀 ") + esc(p.wallet) : "вручную"} · ${money(p.usd_in, { d: 2 })} · ${ago(p.opened)}</div></div>
+    <div class="r" style="display:flex;gap:8px;align-items:center"><div class="b num ${p.pct == null ? "muted" : cls(p.pct)}">${p.pct == null ? "—" : pct(p.pct, 1)}</div>${owner() ? `<button class="btn sm ghost" data-act="demo-sell" data-v="${esc(p.mint)}" data-s="${esc(p.symbol)}">Продать</button>` : ""}</div></div>`).join("");
+  const closed = (d.closed || []).slice(0, 6).map((t) => `<div class="item"><div class="grow"><div class="t">${esc(t.symbol)}</div><div class="s" style="white-space:normal">${esc(t.why)} · ${when(t.closed)}</div></div><div class="r"><div class="b num ${cls(t.pnl_usd)}">${money(t.pnl_usd, { sign: true, d: 2 })}</div>${t.pct != null ? `<div class="s">${pct(t.pct, 1)}</div>` : ""}</div></div>`).join("");
+  const dec = (d.decisions || []).slice(0, 4).map((x) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">${hm(x.at)} <b>${esc(x.symbol)}</b> — ${esc(x.text)}</div>`).join("");
+  const rules = `стоп −${Math.round(r.stop_pct * 100)}% · тейк ${r.tp_pct ? "+" + Math.round(r.tp_pct * 100) + "%" : "нет"} · вход+выход ≈ ${(L.cost_pct || 0).toFixed(1)}%${L.calibrated ? " (замерено)" : ""}`;
+  return `<div class="card pilot-card ${d.on ? "on" : ""}" style="margin-top:10px">
+    <div class="row between"><div><div class="b">🧪 Демо-счёт</div><div class="tiny muted">виртуальные SOL · настоящие котировки Jupiter</div></div>
+      ${owner() ? `<label class="switch"><input type="checkbox" data-act="demo-on" ${d.on ? "checked" : ""}><span></span></label>` : `<span class="pill ${d.on ? "ok" : "gray"}">${d.on ? "вкл" : "выкл"}</span>`}</div>
+    <div class="row" style="gap:10px;align-items:baseline;margin-top:8px"><div class="num" style="font-size:26px;font-weight:760;letter-spacing:-0.5px">${money(d.equity_usd, { d: 2 })}</div><div class="num ${cls(d.total_pct)}">${pct(d.total_pct, 1)}</div><div class="tiny muted">из ${money(d.start_usd, { d: 0 })}</div></div>
+    ${s.sells ? `<div class="small" style="margin-top:4px">Сделок ${s.sells} · в плюс ${s.wins} · <b class="${cls(s.pnl_usd)}">${money(s.pnl_usd, { sign: true, d: 2 })}</b></div>` : ""}
+    <div style="margin-top:8px"><span class="pill ${vcls}" style="white-space:normal">${esc(v.text || "")}</span></div>
+    ${d.paused_until ? `<div class="banner" style="margin-top:8px">⏸ Пауза после убытков до ${hm(d.paused_until)}</div>` : ""}
+    <div class="tiny muted" style="margin-top:8px;white-space:normal">🧠 Правила подбирает сам: ${rules}${L.good_ok === false ? " · 👀 не копирует (теряли)" : " · копирует ⭐ и 👀"}</div>
+    ${owner() && !r.configured ? `<div class="small muted" style="margin-top:10px">Сумма сделки</div>
+      <div class="chips" style="margin-top:6px">${(r.sizes || [1, 2, 3, 5]).map((x) => `<div class="chip ${r.size_usd === x ? "on" : ""}" data-act="meme-size" data-v="${x}">$${x}</div>`).join("")}</div>` : ""}
+    ${pos ? `<div class="list" style="margin-top:10px">${pos}</div>` : ""}
+    ${owner() && !r.configured ? `<div class="row" style="gap:8px;margin-top:10px"><input id="demoMint" class="grow" placeholder="Адрес токена — купить на демо" autocomplete="off"><button class="btn sm primary" data-act="demo-buy">$${r.size_usd}</button></div>` : ""}
+    ${closed ? `<div class="small muted" style="margin-top:10px">Демо-сделки</div><div class="list" style="margin-top:6px">${closed}</div>` : ""}
+    ${dec ? `<div class="small muted" style="margin-top:10px">Решения</div>${dec}` : ""}
+    ${owner() ? `<div class="small muted" style="margin-top:10px">Начать демо заново</div><div class="chips" style="margin-top:6px">${(d.sizes || [5, 10, 20]).map((x) => `<div class="chip" data-act="demo-reset" data-v="${x}">$${x}</div>`).join("")}</div>` : ""}
+    <div class="tiny dim" style="margin-top:8px;white-space:normal">Честно: на демо нет промаха цены при реальном исполнении — живые сделки обычно хуже на 1–3%.</div>
   </div>`;
 }
 
@@ -1362,6 +1395,7 @@ function copySheet() {
   Sheet.open("Копитрейдинг", `
     <div class="row between"><span class="pill ${c.on ? "ok" : "gray"}">${c.on ? "🟢 работает" : "⏸ выключен"}</span>${c.searching ? `<span class="pill test">🔎 ищу кошельки…</span>` : ""}</div>
     ${realBlock(c)}
+    ${demoBlock(c)}
     ${owner() ? `<div class="list" style="margin-top:10px">
       <div class="item"><div class="grow"><div class="t">🐋 Копитрейдинг</div><div class="s">проверяет кошельки каждые 1,5 мин, ищет новые раз в 2 ч</div></div><label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""}><span></span></label></div>
       <div class="item"><div class="grow"><div class="t">🔔 Сигналы ⭐</div><div class="s">покупки и продажи лучших кошельков — в чат с кнопкой Phantom</div></div><label class="switch"><input type="checkbox" data-act="copy-sig" ${c.signals ? "checked" : ""}><span></span></label></div>
@@ -1807,6 +1841,10 @@ document.addEventListener("click", async (e) => {
     case "pilot": haptic.tap(); pilotSheet(); break;
     case "copy": haptic.tap(); copySheet(); loadCopy(); break;
     case "copy-w": haptic.tap(); copyWalletSheet(d.v); break;
+    case "demo-sell": if (await popup("Продать " + (d.s || "") + " на демо?", "Демо-позиция закроется по текущей котировке.", "Продать")) memeAction({ demo_sell: d.v }, "Продано (демо)", el); break;
+    case "demo-reset": if (await popup("Начать демо заново с $" + d.v + "?", "Демо-сделки и итог обнулятся. То, чему бот научился (стоп, тейк, комиссии), останется.", "Начать")) memeAction({ demo_reset: Number(d.v) }, "Демо: $" + d.v); break;
+    case "demo-buy": { const m = ($("#demoMint").value || "").trim(); if (!m) { toast("Вставь адрес токена", true); break; }
+      memeAction({ demo_buy: m }, "Куплено на демо", el); break; }
     case "meme-size": haptic.sel(); memeAction({ size: Number(d.v) }, "Сумма $" + d.v); break;
     case "meme-scope": haptic.sel(); memeAction({ scope: d.v }, d.v === "star" ? "Только ⭐" : "⭐ + 👀"); break;
     case "meme-sell": if (await popup("Продать " + (d.s || "") + "?", "Бот продаст всю позицию за SOL через Jupiter.", "Продать")) memeAction({ sell: d.v }, "Продано", el); break;
@@ -1899,9 +1937,10 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.act === "copy-on") copyAction({ on: el.checked }, el.checked ? "Копитрейдинг включён" : "Выключен");
   else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
+  else if (el.dataset.act === "demo-on") memeAction({ demo_on: el.checked }, el.checked ? "Демо торгует" : "Демо на паузе");
   else if (el.dataset.act === "meme-on") {
     if (!el.checked) memeAction({ on: false }, "Автокопирование выключено");
-    else popup("Торговать реальными SOL?", "Бот сам будет покупать мемкоины за ⭐-кошельками с аккаунта «Бот» и сам продавать (вслед за кошельком, стоп −40%, 48 ч). Мемкоины часто падают до нуля — клади только то, что не жалко.", "Включить")
+    else popup("Торговать реальными SOL?", "Бот сам будет покупать мемкоины за ⭐-кошельками с аккаунта «Бот» и сам продавать (вслед за кошельком, по стопу и тейку, 48 ч). Демо: " + (((S.copy.real || {}).demo || {}).ready || {}).text + ". Мемкоины часто падают до нуля — клади только то, что не жалко.", "Включить")
       .then((ok) => { if (ok) memeAction({ on: true }, "Автокопирование включено"); else el.checked = false; });
   }
   else if (el.dataset.set) saveSetting(el);

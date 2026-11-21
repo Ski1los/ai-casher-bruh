@@ -480,7 +480,8 @@ class WebApp:
         return {"on": ct.on, "wallets": len(ct.active()), "stars": stars[:3], "star_count": len(stars),
                 "open": len(ct.st["open"]), "summary": ct.summary(), "lesson": last,
                 "real": {"configured": mt.configured, "on": mt.on, "positions": len(mt.st["positions"]),
-                         "pnl_usd": mt.st["stats"]["pnl_usd"], "sells": mt.st["stats"]["sells"]}}
+                         "pnl_usd": mt.st["stats"]["pnl_usd"], "sells": mt.st["stats"]["sells"]},
+                "demo": {k: v for k, v in mt.demo_dict().items() if k in ("on", "equity_usd", "start_usd", "total_pct")}}
 
     async def portfolio(self, request: web.Request) -> dict:
         if not self.b.trader.creds:
@@ -908,14 +909,27 @@ class WebApp:
         return d
 
     async def meme_set(self, request: web.Request) -> dict:
-        """💸 Реальные сделки: {on} / {size} / {scope} / {max_open} / {sell: mint} / {sell_all} / {buy: mint, usd}."""
+        """💸 Сделки: {on} / {size} / {scope} / {max_open} / {sell: mint} / {sell_all} / {buy: mint, usd};
+        🧪 демо: {demo_on} / {demo_reset: usd} / {demo_sell: mint} / {demo_buy: mint, usd}."""
         self._owner(request)
         body = await self._body(request)
         mt = self.b.meme
-        if not mt.configured:
+        real_keys = ("on", "sell", "sell_all", "buy")
+        if not mt.configured and any(body.get(k) for k in real_keys):
             raise ApiError(mt.key_error or "кошелёк бота не подключён: Render → Environment → SOLANA_TRADER_KEY")
         st = mt.st
         notify, events = None, []
+        if "demo_on" in body:
+            mt.demo["on"] = bool(body["demo_on"])
+            mt.demo["started"] = True
+            if mt.demo["on"] and not self.b.copy.on:
+                self.b.copy.st["on"] = True
+        if body.get("demo_reset"):
+            try:
+                usd = float(body["demo_reset"])
+            except (TypeError, ValueError):
+                raise ApiError("неверная сумма") from None
+            mt.demo_reset(max(1.0, min(usd, 1000.0)))
         if "size" in body:
             try:
                 st["size_usd"] = max(0.5, min(float(body["size"]), 50.0))
@@ -925,7 +939,7 @@ class WebApp:
             st["scope"] = body["scope"]
         if body.get("max_open") in (1, 2, 3):
             st["max_open"] = body["max_open"]
-        if "on" in body:
+        if "on" in body and mt.configured:
             st["on"] = bool(body["on"])
             if st["on"] and not self.b.copy.on:
                 self.b.copy.st["on"] = True
@@ -938,6 +952,10 @@ class WebApp:
                     events.append(e)
             if body.get("sell_all"):
                 events += await mt.sell_all("продать всё (приложение)")
+            if body.get("demo_sell"):
+                e = await mt.demo_sell(str(body["demo_sell"]), "вручную из приложения")
+                if e:
+                    events.append(e)
             if body.get("buy"):
                 mint = str(body["buy"]).strip()
                 if not is_address(mint):
@@ -949,6 +967,17 @@ class WebApp:
                 except Exception:
                     pass
                 events.append(await mt.buy(mint, float(body.get("usd") or st["size_usd"]), symbol=symbol))
+            if body.get("demo_buy"):
+                mint = str(body["demo_buy"]).strip()
+                if not is_address(mint):
+                    raise ApiError("нужен адрес токена (mint) из DexScreener или GMGN")
+                symbol = ""
+                try:
+                    pair = (await self.b.copy._pairs([mint])).get(mint)
+                    symbol = pair.symbol if pair else ""
+                except Exception:
+                    pass
+                events.append(await mt.demo_buy(mint, float(body.get("usd") or st["size_usd"]), symbol=symbol))
         except (SwapError, WalletError) as e:
             raise ApiError(str(e)) from None
         self.b.save_copy()

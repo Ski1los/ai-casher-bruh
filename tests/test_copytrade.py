@@ -344,8 +344,10 @@ def test_copy_commands_buttons_signals_report_and_backup(bot_env):
     rpc.push(W, buy_tx("b1", now - 20))
     run(copy_ui.copy_tick(b))
     assert "Сигнал копирования" in session.sent[-1][1]
-    btn = session.markups[-1].inline_keyboard[0][0]
-    assert btn.url.startswith("https://phantom.app/ul/browse/")
+    rows = session.markups[-1].inline_keyboard
+    assert rows[0][0].callback_data == f"mt:db:{MINT}"  # кошелёк не подключён — купить можно на демо
+    assert rows[1][0].url.startswith("https://phantom.app/ul/browse/")
+    assert any("Запустил демо-счёт" in t for _, t, *_ in session.sent)
     assert "Копитрейдинг" in b.report_text()
     assert b._state()["copy"]["wallets"][W]["name"] == "Кит"
     assert b.ai_context()["extras"]["copytrading_solana"]["wallets"][0]["name"] == "Кит"

@@ -153,7 +153,7 @@ HELP_TEXT = """\
 /autopilot — 🤖 <b>бот торгует сам</b>: одна кнопка, дальше без тебя
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
-/copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 бот сам торгует мемкоинами
+/copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 мемкоины (🧪 демо)
 /news — новости крипты
 
 <b>Сигналы</b>
@@ -802,12 +802,19 @@ class ArbitrageBot:
 
     def _meme_context(self) -> dict:
         mt = self.meme
+        dd = mt.demo_dict()
+        lrn = mt.status_dict()["learned"]
+        demo = {"on": dd["on"], "equity_usd": dd["equity_usd"], "start_usd": dd["start_usd"],
+                "total_pct": dd["total_pct"], "stats": dd["stats"], "verdict": dd["ready"]["text"],
+                "positions": [{k: p[k] for k in ("symbol", "usd_in", "pct")} for p in dd["positions"]],
+                "learned_rules": {"stop_pct": mt.st["stop_pct"], "tp_pct": mt.st["tp_pct"],
+                                  "roundtrip_cost_pct": lrn["cost_pct"], "copy_good_wallets": lrn["good_ok"]}}
         if not mt.configured:
             return {"connected": False, "how": "/meme: отдельный аккаунт «Бот» в Phantom, его приватный ключ — ТОЛЬКО в "
                                                "Render → Environment → SOLANA_TRADER_KEY; никогда не в чат и не ИИ",
-                    "error": mt.key_error}
+                    "error": mt.key_error, "demo_account": demo}
         d = mt.status_dict()
-        return {"connected": True, "auto_on": d["on"], "balance_sol": d["balance_sol"], "size_usd": d["size_usd"],
+        return {"connected": True, "demo_account": demo, "auto_on": d["on"], "balance_sol": d["balance_sol"], "size_usd": d["size_usd"],
                 "scope": d["scope"], "positions": [{k: p[k] for k in ("symbol", "usd_in", "pct", "source")}
                                                    for p in d["positions"]],
                 "stats": d["stats"], "today_usd": d["day_pnl_usd"],
