@@ -193,7 +193,11 @@ def build():
         return {"symbol": sym, "strategy": strat, "trades": trades, "wins": wins, "net_pct": net, "test_pct": test,
                 "worst_pct": -2.4, "tp": tp, "rsi_buy": 32.0, "open_pct": None, "days": 3.5, "ok": ok}
 
-    b.scalper.ranking["bybit"] = [_r("SOL/USDT", "bounce", 11, 10, 4.2, 1.1, 0.009),
+    b.scalper.ranking["bybit"] = [dict(_r("SOL/USDT", "bounce", 11, 10, 4.2, 1.1, 0.009),
+                                       alts=[{"strategy": "dip", "tp": 0.006, "rsi_buy": 25.0, "train_pct": 1.2,
+                                              "net_pct": 1.8, "trades": 7},
+                                             {"strategy": "trend", "tp": 0.006, "rsi_buy": 25.0, "train_pct": -0.4,
+                                              "net_pct": -0.3, "trades": 4}]),
                                   _r("SUI/USDT", "dip", 8, 7, 2.6, 0.4, 0.006),
                                   _r("ETH/USDT", "trend", 7, 6, 2.1, 0.0, 0.006),
                                   _r("DOGE/USDT", "dip", 9, 6, 1.4, -0.8, 0.013, ok=False),
@@ -205,7 +209,10 @@ def build():
     sc.lab["stats"].update({
         sc.lab_key("bybit", "SOL/USDT", "bounce"): {"rets": [0.7, 0.7, -0.2, 0.7], "sum": 1.9, "n": 4, "wins": 3, "since": 0},
         sc.lab_key("bybit", "SUI/USDT", "dip"): {"rets": [0.4, -6.2, 0.4], "sum": -5.4, "n": 3, "wins": 2, "since": 0},
-        sc.lab_key("bybit", "ETH/USDT", "trend"): {"rets": [0.4], "sum": 0.4, "n": 1, "wins": 1, "since": 0}})
+        sc.lab_key("bybit", "ETH/USDT", "trend"): {"rets": [0.4], "sum": 0.4, "n": 1, "wins": 1, "since": 0},
+        sc.lab_key("bybit", "SOL/USDT", "dip"): {"rets": [0.4, 0.4, 0.4, -0.1, 0.4, 0.4, 0.4], "sum": 2.3, "n": 7,
+                                                 "wins": 6, "since": 0},
+        sc.lab_key("bybit", "SOL/USDT", "trend"): {"rets": [0.4, -6.1], "sum": -5.7, "n": 2, "wins": 1, "since": 0}})
     sc.lab["open"][sc.lab_key("bybit", "ETH/USDT", "trend")] = {"entry": 3000, "tp": 3020, "be": 3005, "stop": 2820,
                                                                "fee": 0.001, "entry_ts": 0, "checked": 0, "opened": 0}
     sc.set_risk({"LOOM": (time.time() + 30 * 86400, "Bybit объявил делистинг: Delisting of LOOM/USDT")})
