@@ -69,6 +69,7 @@ TRAIN_SHARE = 0.65  # на этой доле истории выбираем в�
 # без порога шум проходит проверку в 41% случаев, с порогом «≥6 сделок и ≥+2%» — в 20%, а настоящие откаты
 # проходят всё равно. Строже (≥8 сделок, ≥+3%) шум проходит в 8%, но бот может сутками стоять без сделок.
 MIN_TRADES = 6
+MIN_TEST_TRADES = 3  # минимум закрытых сделок на отложенном участке; статистически этого всё равно мало
 MIN_NET_PCT = 2.0
 BB_LEN, BB_K = 20, 2.0  # полосы Боллинджера (стратегия «Отскок»)
 BOUNCE_RSI_MAX = 40.0
@@ -250,7 +251,8 @@ def backtest(candles: list[list[float]], p: Params, fee: float, start: int = 0,
             worst = min(worst, lows[j] / entry - 1)
             target = tp_price if j - (i + 1) < max_hold else min(tp_price, be_price)
             if lows[j] <= stop_price:
-                exit_ = stop_price * (1 - SLIPPAGE)
+                # При гэпе ниже стопа исполнение не может быть лучше открытия свечи.
+                exit_ = min(opens[j], stop_price) * (1 - SLIPPAGE)
                 break
             if highs[j] > target:
                 exit_ = target
@@ -310,6 +312,7 @@ def best_params(candles: list[list[float]], fee: float) -> dict | None:
                          "net_pct": afull["net_pct"], "trades": afull["trades"]})
     full["alts"] = alts
     full["ok"] = (train["net_pct"] > 0 and test["net_pct"] >= 0
+                  and test["trades"] >= MIN_TEST_TRADES
                   and full["trades"] >= MIN_TRADES and full["net_pct"] >= MIN_NET_PCT)
     return full
 
@@ -505,17 +508,20 @@ class Scalper:
             icon = "🟢" if is_good(r) else "🔴"
             open_part = f", открыта {r['open_pct']:+.2f}%" if r["open_pct"] is not None else ""
             strat = STRATEGIES.get(r.get("strategy", "dip"), ("?",))[0]
-            test = f" · новые {r['test_pct']:+.2f}%" if r.get("test_pct") is not None else ""
+            test = (f" · новые {r['test_pct']:+.2f}% ({r.get('test_trades', 0)} закрытых)"
+                    if r.get("test_pct") is not None else "")
             lines.append(f"{icon} {html.escape(r['symbol'].split('/')[0])} [{strat}]: {r['trades']} ({r['wins']}) · "
                          f"<b>{r['net_pct']:+.2f}%</b>{open_part}{test} · {r['worst_pct']:.1f}% · +{r['tp'] * 100:.1f}%")
         good = [r for r in rows if is_good(r)]
         lines.append("")
         if good:
-            lines.append(f"Бот торгует только 🟢 монеты (сейчас {len(good)}): от {MIN_TRADES} сделок и от "
-                         f"+{MIN_NET_PCT:g}% на всей истории и не в минусе на новых данных. Это прошлое, а не обещание: на другом рынке результат будет другим.")
+            lines.append(f"Основную проверку прошли 🟢 монеты (сейчас {len(good)}): от {MIN_TRADES} сделок и от "
+                         f"+{MIN_NET_PCT:g}% на всей истории и от {MIN_TEST_TRADES} закрытых сделок не в минусе на новых данных. "
+                         "Запасные стратегии могут отбираться отдельно в бумажной лаборатории. "
+                         "Малая выборка и симуляция не подтверждают прибыль в реальной торговле.")
         else:
-            lines.append("Сейчас ни одна монета не прошла проверку: бот ждёт и не покупает. Это правильно — "
-                         "лучше стоять, чем торговать в минус. Проверка повторяется каждые 6 часов.")
+            lines.append("Основную проверку не прошла ни одна монета. Запасные стратегии могут отбираться отдельно "
+                         "в бумажной лаборатории. Проверка истории повторяется каждые 6 часов.")
         return "\n".join(lines)
 
     # --- шаг -----------------------------------------------------------------
@@ -537,6 +543,8 @@ class Scalper:
         self.reasons.pop("_", None)
         out: list[str] = []
         for name in names:
+            if not self.on:
+                break
             out += await self._step_one(name, now)
         return out
 
@@ -573,6 +581,8 @@ class Scalper:
                 return await self._look_for_entry(name, now)
             except TradeError as e:
                 self.last_reason = str(e)
+                if self.pos and self.pos.get("reconcile_required"):
+                    return [f"⛔ Автопилот остановлен: {html.escape(str(e))}"]
             except Exception as e:
                 log.exception("Ошибка режима $5 (%s)", name)
                 self.last_reason = human_error(e)
@@ -773,7 +783,7 @@ class Scalper:
         return out
 
     def promoted(self, name: str, symbol: str, alt: dict) -> dict | None:
-        """Запасная стратегия доказала себя вживую — её статистика лаборатории, иначе None."""
+        """Запасная стратегия прошла бумажный порог лаборатории — её статистика, иначе None."""
         s = self.lab["stats"].get(self.lab_key(name, symbol, alt["strategy"]))
         if not s or len(s["rets"]) < LAB_PROMOTE_TRADES or alt.get("net_pct", -1) < 0:
             return None
@@ -835,7 +845,7 @@ class Scalper:
                 target = pos["tp"] if (ts - pos["entry_ts"]) / 1000 < MAX_HOLD_SEC else min(pos["tp"], pos["be"])
                 exit_ = None
                 if float(c[3]) <= pos["stop"]:
-                    exit_ = pos["stop"] * (1 - SLIPPAGE)
+                    exit_ = min(float(c[1]), pos["stop"]) * (1 - SLIPPAGE)
                 elif float(c[2]) > target:
                     exit_ = target
                 if exit_ is not None:
@@ -911,7 +921,7 @@ class Scalper:
             res = (f"{x['trades']} сделок ({x['wins']} в плюс), <b>{x['sum_pct']:+.2f}%</b>" if x["trades"]
                    else "сделок ещё не было")
             tail = ("" if x["passed"] else " · <i>проверку на истории не прошла</i>") if x["main"] else (
-                " · ⭐ <b>доказала себя вживую — торгую</b>" if x["promoted"] else " · <i>запасная</i>")
+                " · ⭐ <b>прошла бумажный порог лаборатории</b>" if x["promoted"] else " · <i>запасная</i>")
             lines.append(f"{icon[x['verdict']]} {html.escape(x['symbol'].split('/')[0])} [{strat}]: {res}"
                          + (" · сейчас в бумажной сделке" if x["open"] else "") + tail)
         lines.append("\n🟢 вживую не в минусе · ⚪️ мало данных (торговать можно, если прошла проверку на истории) · "
@@ -1075,19 +1085,39 @@ class Scalper:
         price = t._price(ex, pos["symbol"], pos["tp"])
         try:
             order = await ex.create_order(pos["symbol"], "limit", "sell", amount, price)
+            if not isinstance(order, dict) or not order.get("id"):
+                raise TradeError("биржа не вернула ID ордера")
         except Exception as e:
-            pos["order_id"] = None
-            self._event(f"не смог выставить продажу {coin}: {human_error(e)}")
-            raise TradeError(f"не смог выставить продажу {coin}: {human_error(e)}. Попробую снова") from e
-        pos["order_id"] = str(order.get("id"))
+            # Запрос мог дойти до биржи, даже если ответ потерялся: не выставляем повторно.
+            pos["reconcile_required"] = True
+            self.turn_off()
+            self._event(f"статус продажи {coin} неясен: {human_error(e)}")
+            raise TradeError(f"статус продажи {coin} неясен; автопилот остановлен: "
+                             "сверь открытые ордера и баланс на бирже") from e
+        pos["order_id"] = str(order["id"])
         pos["amount"] = amount
 
     async def _cancel_tp(self, pos: dict) -> None:
+        if pos.get("reconcile_required"):
+            raise TradeError("позиция требует ручной сверки ордера и баланса на бирже; повторная продажа заблокирована")
         if pos["live"] and pos.get("order_id"):
+            oid = pos["order_id"]
             try:
-                await self.trader._ex(pos["exchange"]).cancel_order(pos["order_id"], pos["symbol"])
+                ex = self.trader._ex(pos["exchange"])
+                result = await ex.cancel_order(oid, pos["symbol"])
+                # Ответ на отмену часто содержит только ID. Нужно подтвердить и статус, и объём исполнения.
+                if not isinstance(result, dict) or result.get("status") not in ("canceled", "cancelled") or result.get("filled") is None:
+                    result = await self.trader._fetch_order(ex, oid, pos["symbol"])
+                if (not isinstance(result, dict) or result.get("status") not in ("canceled", "cancelled")
+                        or result.get("filled") is None or float(result["filled"]) != 0):
+                    raise TradeError("отмена или отсутствие частичного исполнения не подтверждены")
             except Exception as e:
-                log.info("Отмена ордера %s: %s", pos["order_id"], e)
+                # Повторная продажа может задеть другие активы или продублировать исполнение.
+                pos["reconcile_required"] = True
+                self.turn_off()
+                log.info("Отмена ордера %s не подтверждена: %s", oid, e)
+                raise TradeError(f"не удалось подтвердить отмену ордера {oid} без исполнения; "
+                                 "автопилот остановлен: сверь ордер и баланс на бирже") from e
         pos["order_id"] = None
 
     async def _manage(self, now: float) -> list[str]:
@@ -1095,6 +1125,9 @@ class Scalper:
         t = self.trader
         name, symbol = pos["exchange"], pos["symbol"]
         coin = symbol.split("/")[0]
+        if pos.get("reconcile_required"):
+            self.turn_off()
+            raise TradeError("позиция требует ручной сверки ордера и баланса на бирже")
         if pos["live"] != t.state.live and not pos["live"]:
             # тестовую позицию в реальном режиме не продолжаем: закрываем её как тест
             self.pos = None
@@ -1112,7 +1145,16 @@ class Scalper:
                 got = cost - fee_usd if fees else cost * (1 - pos["fee"])
                 return self._closed(got, "цель", now)
             if status in ("canceled", "cancelled", "expired", "rejected"):
-                pos["order_id"] = None  # ордер сняли (например, вручную): выставим заново на следующем шаге
+                try:
+                    no_fill = o.get("filled") is not None and float(o["filled"]) == 0
+                except (TypeError, ValueError):
+                    no_fill = False
+                if not no_fill:
+                    pos["reconcile_required"] = True
+                    self.turn_off()
+                    raise TradeError("отменённая продажа могла частично исполниться: "
+                                     "сверь ордер и баланс на бирже; повторная продажа заблокирована")
+                pos["order_id"] = None  # подтверждена отмена без исполнения
                 self._event(f"продажа {coin} была отменена, выставляю заново")
                 return []
         ticker = await t.scanner.exchanges[name].fetch_ticker(symbol)

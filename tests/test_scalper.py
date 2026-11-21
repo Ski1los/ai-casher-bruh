@@ -2,10 +2,12 @@
 
 import asyncio
 
+import pytest
+
 from bot.config import Settings
 from bot.scalper import (MAX_HOLD_SEC, Params, Scalper, backtest, best_params, ema, indicators, rsi, signal_at,
                          target_price, trade_return)
-from bot.trading import Trader
+from bot.trading import TradeError, Trader
 from tests.fake_exchange import FakeTradingExchange, mk_market
 from tests.test_trading import KEYS, FakeScanner
 
@@ -311,3 +313,130 @@ def test_webapp_autopilot_start_and_coins(bot_env, monkeypatch):
         assert st == 200 and r["scalp"]["on"] and not r["scalp"]["use_coins"]
 
     tw.call(b, flow)
+
+
+def test_failed_tp_cancel_does_not_submit_market_sell():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    original_id = pos["order_id"]
+    before = list(ex.created)
+
+    async def cancel_uncertain(*args, **kwargs):
+        raise TimeoutError("timeout")
+
+    ex.cancel_order = cancel_uncertain
+    with pytest.raises(TradeError, match="не удалось подтвердить отмену"):
+        run(sc._stop(90.0, 1000))
+    assert pos["order_id"] == original_id
+    assert ex.created == before
+    assert ex.orders[original_id]["status"] == "open"
+
+
+def test_partial_cancel_pauses_and_blocks_repeat_sales():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    oid = pos["order_id"]
+    before = list(ex.created)
+
+    async def partial_cancel(*args, **kwargs):
+        return {"id": oid, "status": "canceled", "filled": 0.001}
+
+    ex.cancel_order = partial_cancel
+    with pytest.raises(TradeError, match="не удалось подтвердить отмену"):
+        run(sc._stop(90.0, 1000))
+    assert not sc.on and pos["reconcile_required"] and pos["order_id"] == oid
+    assert ex.created == before
+    sc.turn_on()  # без сверки включение не должно приводить к новому ордеру
+    events = run(sc._step_one("a", 1100))
+    assert events and "сверки" in events[0]
+    assert not sc.on and ex.created == before
+
+
+def test_cancel_without_confirmed_status_blocks_replacement():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    before = list(ex.created)
+
+    async def unknown_cancel(*args, **kwargs):
+        return {"id": pos["order_id"]}
+
+    async def unknown_fetch(*args, **kwargs):
+        return None
+
+    ex.cancel_order = unknown_cancel
+    trader._fetch_order = unknown_fetch
+    with pytest.raises(TradeError, match="не удалось подтвердить отмену"):
+        run(sc._cancel_tp(pos))
+    assert not sc.on and pos["reconcile_required"] and ex.created == before
+
+
+@pytest.mark.parametrize("test_trades,expected", [(0, False), (1, False), (2, False), (3, True)])
+def test_strategy_requires_closed_trades_in_holdout(monkeypatch, test_trades, expected):
+    import bot.scalper as module
+    candles = [[i, 100, 101, 99, 100, 1] for i in range(200)]
+    def fake_backtest(candles, params, fee, start=0, ind=None):
+        count = test_trades if start else 8
+        net = (1.0 if count else 0.0) if start else 3.0
+        return {"trades": count, "wins": count, "net_pct": net, "days": 1,
+                "tp": params.tp, "rsi_buy": params.rsi_buy, "strategy": params.strategy}
+    monkeypatch.setattr(module, "backtest", fake_backtest)
+    result = module.best_params(candles, 0.001)
+    assert result["test_trades"] == test_trades
+    assert result["ok"] is expected
+
+
+def test_backtest_stop_gap_uses_open_not_unreachable_stop(monkeypatch):
+    import bot.scalper as module
+    candles = [[i, 100, 100, 99, 100, 1] for i in range(55)]
+    candles[52] = [52, 80, 81, 79, 80, 1]
+    monkeypatch.setattr(module, "signal_at", lambda closes, ind, i, p: i == 50)
+    result = module.backtest(candles, module.Params(), fee=0)
+    entry = 100 * (1 + module.SLIPPAGE)
+    expected = (80 * (1 - module.SLIPPAGE) / entry - 1) * 100
+    assert result["trades"] == 1
+    assert result["net_pct"] == pytest.approx(expected, abs=0.001)
+
+
+def test_partial_external_cancel_pauses_and_prevents_replacement():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    oid = pos["order_id"]
+    ex.orders[oid].update(status="canceled", filled=0.001)
+    before = list(ex.created)
+    events = run(sc.step())
+    assert not sc.on and pos["reconcile_required"] and pos["order_id"] == oid
+    assert events and "частично" in events[0]
+    sc.turn_on()
+    run(sc.step())
+    assert not sc.on and ex.created == before
+
+
+def test_tp_creation_timeout_pauses_and_prevents_duplicate():
+    sc, trader, ex = make(balance=5.1)
+    original = ex.create_order
+    async def accepted_but_timed_out(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise TimeoutError("response lost")
+    ex.create_order = accepted_but_timed_out
+    events = run(sc.step())
+    pos = sc.positions["a"]
+    assert events and "статус продажи" in events[0]
+    assert not sc.on and pos["reconcile_required"]
+    before = list(ex.created)
+    sc.turn_on()
+    run(sc.step())
+    assert not sc.on and ex.created == before
+
+
+def test_tp_creation_without_id_pauses(monkeypatch):
+    sc, trader, ex = make(balance=5.1)
+    async def no_id(*args, **kwargs):
+        return {}
+    ex.create_order = no_id
+    events = run(sc.step())
+    assert events and "статус продажи" in events[0]
+    assert not sc.on and sc.positions["a"]["reconcile_required"]
