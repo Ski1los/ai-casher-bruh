@@ -398,3 +398,45 @@ def test_backtest_stop_gap_uses_open_not_unreachable_stop(monkeypatch):
     expected = (80 * (1 - module.SLIPPAGE) / entry - 1) * 100
     assert result["trades"] == 1
     assert result["net_pct"] == pytest.approx(expected, abs=0.001)
+
+
+def test_partial_external_cancel_pauses_and_prevents_replacement():
+    sc, trader, ex = make(balance=5.1)
+    run(sc.step())
+    pos = sc.positions["a"]
+    oid = pos["order_id"]
+    ex.orders[oid].update(status="canceled", filled=0.001)
+    before = list(ex.created)
+    events = run(sc.step())
+    assert not sc.on and pos["reconcile_required"] and pos["order_id"] == oid
+    assert events and "частично" in events[0]
+    sc.turn_on()
+    run(sc.step())
+    assert not sc.on and ex.created == before
+
+
+def test_tp_creation_timeout_pauses_and_prevents_duplicate():
+    sc, trader, ex = make(balance=5.1)
+    original = ex.create_order
+    async def accepted_but_timed_out(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise TimeoutError("response lost")
+    ex.create_order = accepted_but_timed_out
+    events = run(sc.step())
+    pos = sc.positions["a"]
+    assert events and "статус продажи" in events[0]
+    assert not sc.on and pos["reconcile_required"]
+    before = list(ex.created)
+    sc.turn_on()
+    run(sc.step())
+    assert not sc.on and ex.created == before
+
+
+def test_tp_creation_without_id_pauses(monkeypatch):
+    sc, trader, ex = make(balance=5.1)
+    async def no_id(*args, **kwargs):
+        return {}
+    ex.create_order = no_id
+    events = run(sc.step())
+    assert events and "статус продажи" in events[0]
+    assert not sc.on and sc.positions["a"]["reconcile_required"]
