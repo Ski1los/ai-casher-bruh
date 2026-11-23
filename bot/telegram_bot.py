@@ -43,7 +43,7 @@ from .cloud import (BOT_VERSION, STATUS, TelegramBackup, cloud_port, public_url,
 from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
-from .memory import free_memory, memory_line
+from .memory import free_memory, freeze_startup, memory_line
 from .opportunities import OpportunityHub, for_ai
 from .dex import DexClient
 from .report import ScanStats, seconds_until, split_message
@@ -546,14 +546,14 @@ class ArbitrageBot:
     def save_copy(self) -> None:
         try:
             self.copy_file.parent.mkdir(parents=True, exist_ok=True)
-            self.copy_file.write_text(json.dumps(self.copy.export(), ensure_ascii=False), "utf-8")
+            self.copy_file.write_text(json.dumps(self.copy.export(), ensure_ascii=False, separators=(",", ":")), "utf-8")
         except OSError as e:
             log.warning("Не смог сохранить копитрейдинг: %s", e)
 
     def save_trading(self) -> None:
         try:
             self.trading_file.parent.mkdir(parents=True, exist_ok=True)
-            self.trading_file.write_text(json.dumps(self.trader.export(), ensure_ascii=False), "utf-8")
+            self.trading_file.write_text(json.dumps(self.trader.export(), ensure_ascii=False, separators=(",", ":")), "utf-8")
         except OSError as e:
             log.warning("Не смог сохранить состояние торговли: %s", e)
 
@@ -1891,6 +1891,7 @@ class ArbitrageBot:
             tasks.append(asyncio.create_task(self._daily_report_loop()))
             if cloud_port() or os.getenv("RENDER"):
                 tasks.append(asyncio.create_task(self._update_loop()))
+            log.info("Память после запуска: %s · заморожено объектов старта: %d", memory_line(), freeze_startup())
             await self.dp.start_polling(self.bot)
         finally:
             aiogram_log.removeHandler(self.conflicts)

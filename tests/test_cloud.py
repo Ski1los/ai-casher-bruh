@@ -73,6 +73,8 @@ def test_backup_roundtrip_survives_restart():
         await b1.save({"demo": {"balance": 5}})
         await b1.save({"demo": {"balance": 5.2}})
         assert tg.edits == 1 and len(tg.files) == 1
+        await b1.save({"demo": {"balance": 5.2}})  # то же самое — повторно в Telegram не грузим
+        assert tg.edits == 1
 
         # «Перезапуск сервера»: новый объект, данные берутся из закреплённого сообщения
         b2 = TelegramBackup(tg, chat_id=42)

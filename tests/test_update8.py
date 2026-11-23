@@ -446,12 +446,14 @@ def test_webapp_new_endpoints(market_env, monkeypatch):
             assert st == 200 and r["configured"] and len(r["accounts"]) == 2
             st, _ = await get("/api/tinvest", uid=friend)
             assert st == 403
+            await b.tinvest.close()
             b.tinvest = TInvestClient("")
             st, r = await get("/api/tinvest")
             assert r == {"configured": False}
         finally:
             await client.close()
             await b.dex.close()
+            await b.tinvest.close()
             await fake.close()
 
     asyncio.run(main())

@@ -161,5 +161,18 @@ def wire(b, base_url: str, token: str = "good-token") -> None:
     from bot.dex import DexClient
     from bot.tinvest import TInvestClient
 
+    import asyncio
+
+    _TASKS = getattr(wire, "_tasks", None) or set()
+    wire._tasks = _TASKS
+    for old in (getattr(b, "dex", None), getattr(b, "tinvest", None)):  # старые клиенты закрываем, а не бросаем
+        sess = getattr(old, "_session", None)
+        if sess is not None and not sess.closed:
+            try:
+                t = asyncio.get_running_loop().create_task(sess.close())
+                _TASKS.add(t)
+                t.add_done_callback(_TASKS.discard)
+            except RuntimeError:
+                pass
     b.dex = DexClient(base_url, base_url + "/rug/v1")
     b.tinvest = TInvestClient(token, base_url + "/ti/tinkoff.public.invest.api.contract.v1.", ssl_ctx=False)

@@ -514,6 +514,7 @@ class MemeTrader:
                 st["closed"].append({"symbol": pos["symbol"], "mint": mint, "pnl_sol": None, "pnl_usd": None,
                                      "why": "токенов на кошельке нет", "opened": pos["opened"],
                                      "closed": now, "source": pos["source"]})
+                del st["closed"][:-50]
                 self._changed()
                 return {"text": f"💸 {html.escape(pos['symbol'])}: токенов на кошельке бота уже нет (прошлая продажа "
                                 "всё-таки прошла или продал вручную в Phantom). Убрал из позиций.", "buttons": []}
