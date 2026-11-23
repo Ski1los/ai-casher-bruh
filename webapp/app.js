@@ -1573,6 +1573,37 @@ function scoutBlock(m) {
   </div>`;
 }
 
+function liveBlock(m) {
+  const l = m.live;
+  if (!l) return "";
+  const NOTE = { actions: "о действиях и ошибках", all: "о каждом взгляде", summary: "только итог эфира", off: "не писать" };
+  const live = (l.live || []).map((x) => `<div class="item" style="align-items:flex-start"><div class="grow">
+      <div class="t">${x.watching ? "👁" : "⏳"} ${esc(x.name)} <span class="pill ok" style="margin-left:4px">в эфире</span></div>
+      <div class="s" style="white-space:normal">в эфире ${(() => { const m = Math.max(0, Math.round((Date.now() / 1000 - x.since) / 60)); return m >= 60 ? `${Math.floor(m / 60)} ч ${m % 60} мин` : `${m} мин`; })()} · смотрел ${x.n} раз${x.disc != null ? ` · дисциплина ${x.disc.toFixed(1)}/10` : ""}</div>
+      ${x.last ? `<div class="s" style="white-space:normal;color:var(--text)">${esc(x.last)}</div>` : ""}
+      ${(x.actions || []).length ? `<div class="tiny muted" style="white-space:normal">${x.actions.slice(-3).map((a) => `${hm(a.at)} ${esc(a.text)}`).join(" · ")}</div>` : ""}
+      ${(x.plus || []).length ? `<div class="tiny" style="white-space:normal">✅ ${x.plus.map(esc).join(", ")}</div>` : ""}
+      ${(x.miss || []).length ? `<div class="tiny" style="white-space:normal">❌ ${x.miss.map(esc).join(", ")}</div>` : ""}</div>
+      ${m.owner ? `<button class="btn sm ghost" data-act="lv-now" data-v="${esc(x.login)}">📸</button>` : ""}</div>`).join("");
+  const cards = (l.cards || []).slice(0, 5).map((c) => `<div class="tiny" style="margin-top:6px;white-space:normal"><b>${esc(c.name)}</b> — эфиров ${c.sessions}, взглядов ${c.obs}, входов ${c.entries}${c.disc != null ? `, дисциплина <b>${c.disc.toFixed(1)}</b>/10` : ""}${c.plus.length ? `<div>✅ ${c.plus.map((p) => `${esc(p[0])} ×${p[1]}`).join(", ")}</div>` : ""}${c.miss.length ? `<div>❌ ${c.miss.map((p) => `${esc(p[0])} ×${p[1]}`).join(", ")}</div>` : ""}</div>`).join("");
+  const lessons = (l.lessons || []).slice(0, 6).map((x) => `<div class="item"><div class="grow"><div class="t">${x.kind === "miss" ? "❌" : "✅"} ${esc(x.label)}</div><div class="s">${x.n} проверенных входов${x.sure ? "" : " · мало данных"}</div></div><div class="r"><div class="b num ${cls(x.avg)}">${pct(x.avg, 1)}</div></div></div>`).join("");
+  const hist = (l.history || []).slice(0, 3).map((h) => `<div class="tiny muted" style="margin-top:4px;white-space:normal">${when(h.at)} · <b>${esc(h.name)}</b>: ${h.minutes} мин, входов ${h.entries}${h.disc != null ? `, дисциплина ${h.disc.toFixed(1)}/10` : ""}</div>`).join("");
+  return `<div class="card pilot-card ${l.on ? "on" : ""}" style="margin-top:10px">
+    <div class="row between"><div><div class="b">🎥 Стримы вживую</div><div class="tiny muted">видит, что стример делает на экране: входы, стопы, ошибки</div></div>
+      ${m.owner ? `<label class="switch"><input type="checkbox" data-act="lv-on" ${l.on ? "checked" : ""}><span></span></label>` : ""}</div>
+    ${l.gemini ? `<div class="small muted" style="margin-top:6px;white-space:normal">Раз в ${l.every_min} мин · ${l.video ? "видео со звуком" : "кадр (нет ffmpeg)"} · сегодня осталось ${l.budget_left} из ${l.per_day} · стримеров ${l.channels}</div>`
+      : `<div class="banner info" style="margin-top:8px;white-space:normal">Нужен ключ Gemini (GEMINI_API_KEY) — без него смотреть эфиры нечем.</div>`}
+    ${live ? `<div class="list" style="margin-top:8px">${live}</div>` : `<div class="tiny muted" style="margin-top:6px">Сейчас никто не в эфире — проверяю каждые 2 минуты</div>`}
+    ${cards ? `<div class="small b" style="margin-top:10px">Привычки стримеров</div>${cards}` : ""}
+    ${lessons ? `<div class="small b" style="margin-top:10px">Сколько стоит ошибка <span class="muted">(проверено ценой)</span></div><div class="list" style="margin-top:6px">${lessons}</div>` : ""}
+    ${hist ? `<div class="small b" style="margin-top:10px">Итоги эфиров</div>${hist}` : ""}
+    ${l.error ? `<div class="tiny" style="margin-top:6px;white-space:normal">⚠️ ${esc(l.error)}</div>` : ""}
+    ${m.owner ? `<div class="small muted" style="margin-top:10px">Смотреть раз в</div><div class="chips" style="margin-top:6px">${[3, 5, 10, 20].map((x) => `<div class="chip ${l.every_min === x ? "on" : ""}" data-act="lv-int" data-v="${x}">${x} мин</div>`).join("")}</div>
+      <div class="small muted" style="margin-top:10px">Сообщать в чат</div><div class="chips" style="margin-top:6px">${Object.keys(NOTE).map((k) => `<div class="chip ${l.notify === k ? "on" : ""}" data-act="lv-notify" data-v="${k}">${NOTE[k]}</div>`).join("")}</div>` : ""}
+    <div class="tiny dim" style="margin-top:8px;white-space:normal">Бот смотрит 16 с эфира раз в несколько минут (лимит бесплатного Gemini) и сразу, когда стример кидает токен в чат. В счёт трейдера идёт только проверка входов ценой.</div>
+  </div>`;
+}
+
 function trainBlock(m) {
   const t = m.train;
   if (!t) return "";
@@ -1618,6 +1649,7 @@ function mentorsSheet() {
   Sheet.open("Учусь у трейдеров", `
     <div class="row between"><span class="pill ${m.on ? "ok" : "gray"}">${m.on ? "🟢 учусь" : "⏸ выключено"}</span><span class="pill ${m.gemini ? "ok" : "test"}">${m.gemini ? `Gemini: ${Math.max(0, m.budget_left)} из ${m.videos_per_day} роликов сегодня` : "без Gemini"}</span></div>
     ${m.gemini ? "" : `<div class="banner info" style="margin-top:10px;white-space:normal">Без ключа Gemini бот читает только название и описание ролика. Ключ бесплатный: aistudio.google.com/apikey → Create API key → Render → Environment → <b>GEMINI_API_KEY</b>.</div>`}
+    ${liveBlock(m)}
     ${trainBlock(m)}
     ${scoutBlock(m)}
     ${m.owner ? `<div class="list" style="margin-top:10px">
@@ -2037,6 +2069,9 @@ document.addEventListener("click", async (e) => {
     case "mn-del": if (await popup("Не следить за " + (d.s || "") + "?", "Счёт трейдера сохранится в истории.", "Убрать")) mentorsAction({ remove: d.v }, "Убрал"); break;
     case "mn-run": haptic.tap(); mentorsAction({ run: true }); break;
     case "sc-find": haptic.tap(); mentorsAction({ scout: { find: true } }); break;
+    case "lv-now": haptic.tap(); mentorsAction({ live: { now: el.dataset.v } }); break;
+    case "lv-int": haptic.tap(); mentorsAction({ live: { every_min: Number(el.dataset.v) } }, `Смотрю раз в ${el.dataset.v} мин`); break;
+    case "lv-notify": haptic.tap(); mentorsAction({ live: { notify: el.dataset.v } }, "Сохранил"); break;
     case "sc-hist": haptic.tap(); mentorsAction({ scout: { history: true } }); break;
     case "tr-reset": if (await popup("Тренировка заново с $" + d.v + "?", "Демо-деньги и сделки стратегий обнулятся. Выученные стоп, тейк и лучшая стратегия останутся.", "Начать")) mentorsAction({ train: { reset: Number(d.v) } }, "Заново: $" + d.v); break;
     case "demo-sell": if (await popup("Продать " + (d.s || "") + " на демо?", "Демо-позиция закроется по текущей котировке.", "Продать")) memeAction({ demo_sell: d.v }, "Продано (демо)", el); break;
@@ -2137,6 +2172,7 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
   else if (el.dataset.act === "mn-on") mentorsAction({ on: el.checked }, el.checked ? "Учусь" : "Выключено");
   else if (el.dataset.act === "mn-notify") mentorsAction({ notify: el.checked });
+  else if (el.dataset.act === "lv-on") mentorsAction({ live: { on: el.checked } }, el.checked ? "Смотрю эфиры" : "Эфиры не смотрю");
   else if (el.dataset.act === "sc-on") mentorsAction({ scout: { on: el.checked } }, el.checked ? "Разведчик ищет сам" : "Разведчик выключен");
   else if (el.dataset.act === "pf-guard") profitAction({ guard: el.checked });
   else if (el.dataset.act === "tr-on") mentorsAction({ train: { on: el.checked } }, el.checked ? "Тренируюсь" : "Пауза");

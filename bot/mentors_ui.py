@@ -12,6 +12,8 @@ from aiogram import F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from .livewatch import CLIP_SEC, INTERVALS, LIVE_PER_DAY, LOGIN_RE, NOTIFY_MODES, NOTIFY_TEXT
+from .livewatch import TICK_SEC as LIVE_TICK
 from .mentors import TICK_SEC, VIDEOS_PER_DAY, VIEWS, MentorError, parse_link
 from .scout import fit
 
@@ -54,6 +56,7 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
     st = b.mentors.st
     rows = [[InlineKeyboardButton(text="🔄 Проверить сейчас", callback_data="mn:run"),
              InlineKeyboardButton(text="🔄 Обновить", callback_data="mn:show")],
+            [InlineKeyboardButton(text="🎥 Стримы вживую: действия и ошибки", callback_data="mn:live")],
             [InlineKeyboardButton(text="🏋️ Тренировка на демо", callback_data="tn:show"),
              InlineKeyboardButton(text="🔭 Разведчик", callback_data="mn:scout")],
             [InlineKeyboardButton(text="🧠 Советы", callback_data="mn:tips"),
@@ -75,6 +78,93 @@ def scout_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="📜 Проверить историю", callback_data="mn:shist")],
         [InlineKeyboardButton(text="⏸ Не искать самому" if on else "🟢 Искать самому", callback_data="mn:stoggle"),
          InlineKeyboardButton(text="🎓 Трейдеры", callback_data="mn:show")]])
+
+
+LIVE_HOW = f"""\
+🎥 <b>Как бот смотрит стримы</b>
+
+1) Раз в 2 минуты бот узнаёт, кто из Twitch-стримеров в 🎓 сейчас в эфире (без логина и ключей).
+2) Раз в несколько минут (и сразу, когда стример кидает адрес токена в чат) бот берёт последние {CLIP_SEC} \
+секунд эфира — видео со звуком, как в плеере Twitch, рекламные вставки пропускает.
+3) Ролик смотрит Gemini и записывает, что стример <b>делает</b>: вход или выход, монета, цена входа, стоп, \
+тейк, плечо, размер, что сказал. Бот помнит прошлый взгляд, поэтому видит действия во времени: передвинул стоп, \
+усреднил убыток, закрыл в минус.
+4) Каждое действие получает оценку: ✅ сильные стороны (ставит стоп, фиксирует прибыль, режет убыток, ждёт \
+сетап…) и ❌ ошибки (нет стопа, усреднение убытка, большое плечо, FOMO, отыгрыш…), плюс дисциплина 0–10 и урок.
+5) <b>Главное — проверка ценой.</b> Каждый увиденный вход бот проверяет по ценам Bybit/BingX/DexScreener и \
+запоминает, с какими ошибками он сделан. Со временем видно на цифрах, сколько стоит каждая ошибка.
+6) Когда эфир закончился — итог: сделки, сильные стороны, ошибки, дисциплина, уроки.
+
+<b>Честно об ограничениях.</b> Это не непрерывный просмотр: бесплатный Gemini Flash-Lite даёт ~500 запросов в \
+день, бот тратит до {LIVE_PER_DAY} — например, 2 эфира раз в 5 минут ≈ 12 часов. От действия до сообщения \
+проходит ~30–60 секунд. Цифры с экрана ИИ может прочитать неточно, поэтому в счёт трейдера идёт только проверка \
+ценой. За настоящие деньги бот по стримам не торгует: только сигналы и 🏋️ демо.
+
+<b>Команды:</b> <code>/stream</code> — кто в эфире и привычки стримеров; <code>/stream ник</code> — посмотреть эфир \
+сразу (если ника нет в списке — добавлю); <code>/stream off</code> / <code>/stream on</code>."""
+
+
+def live_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
+    lw = b.mentors.live
+    st = lw.st
+    rows = [[InlineKeyboardButton(text=f"📸 Посмотреть {sess['name'][:20]} сейчас", callback_data=f"mn:lnow:{login}")]
+            for login, sess in list(st["sessions"].items())[:3]]
+    rows.append([InlineKeyboardButton(text=("✅ " if st["every_min"] == m else "") + f"{m} мин",
+                                      callback_data=f"mn:lint:{m}") for m in INTERVALS])
+    rows.append([InlineKeyboardButton(text=f"🔔 Сообщать: {NOTIFY_TEXT[st['notify']]}", callback_data="mn:lnotify")])
+    rows.append([InlineKeyboardButton(text="⏸ Не смотреть" if st["on"] else "🟢 Смотреть эфиры", callback_data="mn:ltoggle"),
+                 InlineKeyboardButton(text="🔄 Обновить", callback_data="mn:live")])
+    rows.append([InlineKeyboardButton(text="❔ Как это работает", callback_data="mn:lhelp"),
+                 InlineKeyboardButton(text="🎓 Трейдеры", callback_data="mn:show")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def live_now(b: ArbitrageBot, chat_id: int, login: str) -> None:
+    """Посмотреть эфир сразу: кусочек видео → Gemini → разбор действий в чат."""
+    lw = b.mentors.live
+    if lw.lock.locked():
+        await b._send(chat_id, "⏳ Уже смотрю эфир, подожди минуту.")
+        return
+    await b._send(chat_id, f"🎥 Смотрю эфир <b>{html.escape(login)}</b>: беру последние {CLIP_SEC} с видео и "
+                           "показываю Gemini — до минуты…")
+    try:
+        events = await lw.observe(login, force_event=True)
+    except Exception as e:
+        log.info("Эфир %s: %s", login, e)
+        await b._send(chat_id, f"⚠️ Не посмотрел эфир {html.escape(login)}: {html.escape(str(e))[:300]}", live_kb(b))
+        return
+    events += b.mentors.take_pending()
+    b.save_copy()
+    await send_events(b, events)
+
+
+async def live_tick(b: ArbitrageBot) -> None:
+    mt = b.mentors
+    if b.owner_id is None:
+        return
+    before = mt.copy.changes
+    try:
+        events = await mt.live.step()
+    except Exception as e:
+        log.exception("Стримы вживую")
+        mt.live.st["last_error"] = str(e)[:200]
+        events = []
+    events += mt.take_pending()
+    await send_events(b, events)
+    if mt.copy.changes != before:
+        b.save_copy()
+        if events:
+            await b._backup_now()
+
+
+async def live_loop(b: ArbitrageBot) -> None:
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await live_tick(b)
+        except Exception:
+            log.exception("Ошибка просмотра стримов")
+        await asyncio.sleep(LIVE_TICK)
 
 
 async def scout_find(b: ArbitrageBot, chat_id: int) -> None:
@@ -369,6 +459,46 @@ def register(b: ArbitrageBot) -> None:
             return
         await b._send(message.chat.id, b.mentors.scout.text(), scout_kb(b))
 
+    @dp.message(Command("stream", "streams", "стрим", "эфир", "стримы"))
+    async def cmd_live(message: Message, command: CommandObject) -> None:
+        if not b._allowed(message):
+            return
+        lw = b.mentors.live
+        arg = (command.args or "").strip()
+        if not arg:
+            await b._send(message.chat.id, lw.text(), live_kb(b))
+            return
+        uid = message.from_user.id if message.from_user else None
+        if not await owner_only(uid, message.chat.id):
+            return
+        low = arg.lower()
+        if low in ("on", "off", "вкл", "выкл"):
+            lw.st["on"] = low in ("on", "вкл")
+            b.mentors._changed()
+            b.save_copy()
+            await b._send(message.chat.id, lw.text(), live_kb(b))
+            return
+        if low in ("help", "как", "?"):
+            await b._send(message.chat.id, LIVE_HOW, live_kb(b))
+            return
+        p = parse_link(arg)
+        login = p[1] if p and p[0] == "twitch" else low.lstrip("@")
+        src = b.mentors.find(login)
+        if src and src["kind"] == "twitch":
+            login = src["ident"].lower()
+        elif LOGIN_RE.match(login):
+            src = b.mentors._add("twitch", login, login)
+            await b.mentors.twitch.set_channels({s["ident"] for s in b.mentors.active("twitch")})
+            await b._send(message.chat.id, f"📺 Добавил стримера <b>{html.escape(login)}</b> в 🎓: буду слушать чат и "
+                                           "смотреть его эфиры.")
+        else:
+            await b._send(message.chat.id, "Не понял ник. Пример: <code>/stream decu</code> или "
+                                           "<code>/stream twitch.tv/decu</code>", live_kb(b))
+            return
+        lw.st["focus"] = login
+        b.save_copy()
+        await live_now(b, message.chat.id, login)
+
     @dp.message(Command("train", "training", "тренировка"))
     async def cmd_train(message: Message, command: CommandObject) -> None:
         if not b._allowed(message):
@@ -444,6 +574,10 @@ def register(b: ArbitrageBot) -> None:
             await b._send(chat_id, mt.scout.text(), scout_kb(b))
         elif action == "srank":
             await b._send(chat_id, mt.scout.rank_text(), scout_kb(b))
+        elif action == "live":
+            await b._send(chat_id, mt.live.text(), live_kb(b))
+        elif action == "lhelp":
+            await b._send(chat_id, LIVE_HOW, live_kb(b))
         elif action == "gcheck":
             await b._send(chat_id, "⏳ Проверяю ключ Gemini…")
             await b._send(chat_id, await gemini_check_text(b), keyboard(b))
@@ -460,6 +594,21 @@ def register(b: ArbitrageBot) -> None:
             await show(chat_id)
         elif action == "sfind":
             await scout_find(b, chat_id)
+        elif action == "lnow" and len(parts) > 2:
+            mt.live.st["focus"] = parts[2]
+            await live_now(b, chat_id, parts[2])
+        elif action in ("lint", "lnotify", "ltoggle"):
+            lst = mt.live.st
+            if action == "lint" and len(parts) > 2 and parts[2].isdigit() and int(parts[2]) in INTERVALS:
+                lst["every_min"] = int(parts[2])
+            elif action == "lnotify":
+                lst["notify"] = NOTIFY_MODES[(NOTIFY_MODES.index(lst["notify"]) + 1) % len(NOTIFY_MODES)] \
+                    if lst["notify"] in NOTIFY_MODES else "actions"
+            elif action == "ltoggle":
+                lst["on"] = not lst["on"]
+            mt._changed()
+            b.save_copy()
+            await b._send(chat_id, mt.live.text(), live_kb(b))
         elif action == "shist":
             await scout_history(b, chat_id)
         elif action == "stoggle":
@@ -527,6 +676,7 @@ async def mentors_tick(b: ArbitrageBot) -> None:
 async def mentors_loop(b: ArbitrageBot) -> None:
     await asyncio.sleep(40)
     twitch_task = asyncio.create_task(b.mentors.twitch.run())
+    live_task = asyncio.create_task(live_loop(b))
     try:
         while True:
             try:
@@ -536,6 +686,7 @@ async def mentors_loop(b: ArbitrageBot) -> None:
             await asyncio.sleep(TICK_SEC if not b.mentors.twitch.queue.qsize() else 60)
     finally:
         twitch_task.cancel()
+        live_task.cancel()
 
 
-__all__ = ["register", "mentors_loop", "mentors_tick", "link_offer", "VIEWS"]
+__all__ = ["register", "mentors_loop", "mentors_tick", "link_offer", "VIEWS", "live_tick", "live_now", "live_kb"]

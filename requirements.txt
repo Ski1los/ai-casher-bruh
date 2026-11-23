@@ -3,3 +3,4 @@ aiogram>=3.20,<3.33  # 3.33 падает при импорте (TypeError: unhas
 python-dotenv>=1.0
 aiohttp>=3.9,<4
 cryptography>=42  # подпись сделок Solana (кошелёк бота для /meme)
+imageio-ffmpeg>=0.5,<1  # готовый ffmpeg: 🎥 перекладывает кусочки эфира Twitch в MP4 для Gemini (без перекодирования)

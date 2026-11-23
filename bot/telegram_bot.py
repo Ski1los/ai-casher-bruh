@@ -157,7 +157,7 @@ HELP_TEXT = """\
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
 /copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 мемкоины (🧪 демо)
-/mentors — 🎓 трейдеры · /scout — 🔭 сам ищу их · /train — 🏋️ демо · /news
+/mentors 🎓 трейдеры · /stream 🎥 эфиры · /scout 🔭 поиск · /train 🏋️ демо · /news
 
 <b>Сигналы</b>
 /scan — просканировать прямо сейчас
@@ -799,7 +799,7 @@ class ArbitrageBot:
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
             "api_keys": keys,
             "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
-                                "/hot", "/radar", "/tinvest", "/mentors", "/train", "/profit"],
+                                "/hot", "/radar", "/tinvest", "/mentors", "/stream", "/train", "/profit"],
             "tinvest": self._tinvest_context(),
             "memecoin_radar_on": bool(self.radar_chats),
             "copytrading_solana": self._copy_context(),
@@ -1843,6 +1843,7 @@ class ArbitrageBot:
                     BotCommand(command="copy", description="🐋 Копитрейдинг: умные кошельки"),
                     BotCommand(command="meme", description="💸 Мемкоины: бот торгует сам"),
                     BotCommand(command="mentors", description="🎓 Учусь у трейдеров YouTube и Twitch"),
+                    BotCommand(command="stream", description="🎥 Смотрю стримы: действия, ошибки и плюсы"),
                     BotCommand(command="train", description="🏋️ Тренировка: сам торгую выученным на демо"),
                     BotCommand(command="scout", description="🔭 Разведчик: сам ищу прибыльных трейдеров"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),

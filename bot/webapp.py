@@ -1089,10 +1089,11 @@ class WebApp:
         d["owner"] = bool(request[OWNER])
         d["videos_per_day"] = VIDEOS_PER_DAY
         d["train"] = mt.train.status_dict()
+        d["live"] = mt.live.status_dict()
         return d
 
     async def mentors_set(self, request: web.Request) -> dict:
-        """{on} / {notify} / {add: ссылка} / {remove: id} / {run: true} — только владелец."""
+        """{on} / {notify} / {add: ссылка} / {remove: id} / {run: true} / {scout} / {train} / {live} — только владелец."""
         self._owner(request)
         body = await self._body(request)
         mt = self.b.mentors
@@ -1119,6 +1120,33 @@ class WebApp:
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 done.append("Считаю историю прогнозов — рейтинг придёт в чат")
+        lv = body.get("live")
+        if isinstance(lv, dict):  # 🎥 стримы вживую: {on} / {every_min} / {notify} / {now: ник}
+            from .livewatch import INTERVALS, NOTIFY_MODES
+            lst = mt.live.st
+            if "on" in lv:
+                lst["on"] = bool(lv["on"])
+            if lv.get("every_min") is not None:
+                try:
+                    m = int(lv["every_min"])
+                except (TypeError, ValueError):
+                    raise ApiError("интервал — число минут") from None
+                if m not in INTERVALS:
+                    raise ApiError(f"интервал: {', '.join(map(str, INTERVALS))} мин")
+                lst["every_min"] = m
+            if "notify" in lv:
+                if lv["notify"] not in NOTIFY_MODES:
+                    raise ApiError("неизвестный режим сообщений")
+                lst["notify"] = lv["notify"]
+            login = str(lv.get("now") or "").lower()[:25]
+            if login and login in lst["sessions"] and self.b.owner_id and not mt.live.lock.locked():
+                from . import mentors_ui
+                lst["focus"] = login
+                task = asyncio.get_running_loop().create_task(mentors_ui.live_now(self.b, self.b.owner_id, login))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+                done.append("Смотрю эфир — разбор придёт в чат через минуту")
+            mt._changed()
         tr = body.get("train")
         if isinstance(tr, dict):  # 🏋️ тренировка: {on} / {signals} / {notify} / {reset: $}
             for k in ("on", "signals", "notify"):
