@@ -33,7 +33,8 @@ from typing import Awaitable, Callable
 
 import aiohttp
 
-from .ai import GEMINI_ENV_ALIASES, THINK_ROOM, clean_key, is_gemini_key
+from .ai import (BUSY_RETRY_SEC, BUSY_TEXT, GEMINI_ENV_ALIASES, THINK_ROOM, BusyModels, clean_key, is_busy,
+                 is_gemini_key, short_api_error, tidy_error)
 from .copytrade import (EXIT_GAIN, EXIT_MIN, EXIT_STOPS, EXIT_TPS, FILTER_GRID, LEARN_GAIN, LEARN_SUBSET, _passes,
                         add_path, exit_net, simulate_exit, tp_text)
 from .dex import fmt_usd
@@ -291,7 +292,10 @@ class GeminiVideo:
         self.key = key
         self._session = session_factory
         self.model = model or (os.environ.get("GEMINI_VIDEO_MODEL") or "").strip() or None
+        self.pinned = self.model  # модель из настроек: после перегрузки возвращаемся к ней
         self.dead: set[str] = set()
+        self.busy = BusyModels()  # перегруженные модели (503 «high demand») — 10 минут берём другую
+        self._stopgap = False
         self.disabled_until = 0.0
         self.last_error: str | None = None
 
@@ -300,14 +304,19 @@ class GeminiVideo:
         return bool(self.key)
 
     async def _pick_model(self) -> str:
-        if self.model and self.model not in self.dead:
+        busy = self.busy.now()
+        skip = self.dead | busy
+        if self.pinned and self.pinned not in skip:
+            self.model, self._stopgap = self.pinned, False
+            return self.model
+        if self.model and self.model not in skip and (busy or not self._stopgap):
             return self.model
         http = await self._session()
         names: list[str] = []
         try:
             async with http.get(f"{GEMINI_BASE}/models?pageSize=200", headers={"x-goog-api-key": self.key}) as r:
                 if r.status in (400, 401, 403):
-                    body = (await r.text())[:160]
+                    body = short_api_error(await r.text())
                     raise MentorError(f"ключ Gemini не подходит (ошибка {r.status}): {body}")
                 if r.status == 200:
                     data = await r.json(content_type=None)
@@ -317,12 +326,24 @@ class GeminiVideo:
             raise
         except Exception as e:
             log.info("Gemini: список моделей: %s", e)
-        model = pick_video_model(names, self.dead) or next(
-            (m for m in ("gemini-flash-latest", "gemini-2.5-flash") if m not in self.dead), None)
+        model = pick_video_model(names, skip) or next(
+            (m for m in ("gemini-flash-latest", "gemini-2.5-flash") if m not in skip), None)
+        if not model and busy:
+            raise MentorError("Gemini: " + BUSY_TEXT.format(status=503) + " — продолжу сам позже")
         if not model:
             raise MentorError("Gemini: нет подходящей модели. Задай GEMINI_VIDEO_MODEL")
         self.model = model
+        self._stopgap = bool(busy)  # временная замена: перегрузка пройдёт — вернёмся к лучшей модели
         return model
+
+    async def on_busy(self, model: str, status: int, tries: int) -> None:
+        """Google перегружен: 1-й раз — повтор через 3 с, дальше — другая модель (эта отдыхает 10 минут)."""
+        log.info("Gemini: %s перегружена (%s)", model, status)
+        if tries == 1:
+            await asyncio.sleep(BUSY_RETRY_SEC)
+        else:
+            self.busy.mark(model)
+            self.model = None
 
     async def check(self) -> str:
         """Проверка ключа: короткий запрос к Gemini. Возвращает понятный итог (для кнопки «🔌 Проверить Gemini»)."""
@@ -339,24 +360,30 @@ class GeminiVideo:
             if r.status == 200:
                 self.last_error = None
                 return model
+            if is_busy(r.status, text):
+                raise MentorError("ключ рабочий ✅, но " + BUSY_TEXT.format(status=r.status) + " — проверь через минуту")
             if r.status == 429:
                 raise MentorError("ключ рабочий, но сейчас исчерпан бесплатный лимит — подожди минуту")
             if r.status in (400, 401, 403):
-                raise MentorError(f"Google отклонил ключ (ошибка {r.status}): {text[:180]}")
-            raise MentorError(f"Gemini: ошибка {r.status}: {text[:180]}")
+                raise MentorError(f"Google отклонил ключ (ошибка {r.status}): {short_api_error(text)}")
+            raise MentorError(f"Gemini: ошибка {r.status}: {short_api_error(text)}")
 
     async def analyze(self, url: str, title: str = "") -> dict:
         if time.time() < self.disabled_until:
             raise MentorError("Gemini: лимит, жду")
         http = await self._session()
-        for _ in range(3):
+        busy = 0
+        low_res = True  # параметр «низкое разрешение» (старые модели его не знают — тогда без него)
+        for _ in range(6):
             model = await self._pick_model()
             body = {"contents": [{"parts": [
                 {"file_data": {"file_uri": url}, "video_metadata": {"start_offset": "0s",
                                                                     "end_offset": f"{VIDEO_MAX_SEC}s"}},
                 {"text": PROMPT + (f"\nНазвание ролика: {title}" if title else "")}]}],
                 "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2,
-                                     "maxOutputTokens": 3000 + THINK_ROOM, "mediaResolution": "MEDIA_RESOLUTION_LOW"}}
+                                     "maxOutputTokens": 3000 + THINK_ROOM}}
+            if low_res:
+                body["generationConfig"]["mediaResolution"] = "MEDIA_RESOLUTION_LOW"
             async with http.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=body,
                                  headers={"x-goog-api-key": self.key},
                                  timeout=aiohttp.ClientTimeout(total=240)) as r:
@@ -370,6 +397,10 @@ class GeminiVideo:
                     self.last_error = None
                     return clean_analysis(parse_json(out))
                 low = text.lower()
+                if is_busy(r.status, text):
+                    busy += 1
+                    await self.on_busy(model, r.status, busy)
+                    continue
                 if r.status == 429:
                     self.disabled_until = time.time() + 15 * 60
                     raise MentorError("Gemini: лимит бесплатного тарифа, продолжу через 15 минут")
@@ -379,11 +410,19 @@ class GeminiVideo:
                     self.dead.add(model)
                     self.model = None
                     continue
-                if r.status == 400 and ("mediaresolution" in low or "media_resolution" in low or "video_metadata" in low):
-                    body["generationConfig"].pop("mediaResolution", None)  # старые модели не знают параметр
+                if r.status == 400 and low_res and ("mediaresolution" in low or "media_resolution" in low):
+                    low_res = False  # старые модели не знают параметр — дальше без него
                     continue
-                raise MentorError(f"Gemini: ошибка {r.status}: {text[:160]}")
+                raise MentorError(f"Gemini: ошибка {r.status}: {short_api_error(text)}")
+        if busy:
+            raise MentorError("Gemini: " + BUSY_TEXT.format(status=503) + " — разберу ролик позже сам")
         raise MentorError("Gemini: не удалось разобрать ролик")
+
+
+def temporary_error(e: BaseException) -> bool:
+    """Лимит, перегрузка Google или сеть — пройдёт само: ролик не выбрасываем, разберём позже."""
+    msg = str(e)
+    return isinstance(e, (aiohttp.ClientError, asyncio.TimeoutError)) or "лимит" in msg or "перегружен" in msg
 
 
 def pick_video_model(names: list[str], dead: set) -> str | None:
@@ -661,10 +700,10 @@ class Mentors:
                 self.st["budget"]["videos"] += 1
             except MentorError as e:
                 self.last_error = str(e)
-                if "лимит" not in str(e):
+                if not temporary_error(e):
                     self.gemini.last_error = str(e)
                 text_ok = self.ai_client is not None and getattr(self.ai_client, "configured", True)
-                if not text_ok or (wait_on_limit and "лимит" in str(e)) or not (video.get("title") or video.get("description")):
+                if not text_ok or (wait_on_limit and temporary_error(e)) or not (video.get("title") or video.get("description")):
                     raise
                 method = "text"
                 res = await analyze_by_text(self.ai_client, video.get("title", ""), video.get("description", ""))
@@ -728,8 +767,8 @@ class Mentors:
                     rec = await self.analyze_video(src, v, now, wait_on_limit=True)
                 except Exception as e:
                     self.last_error = f"{src['name']}: {e}"[:200]
-                    if "лимит" in str(e):
-                        break  # попробуем этот ролик позже
+                    if temporary_error(e):
+                        break  # лимит, перегрузка Google или сеть — попробуем этот ролик позже
                     src["seen"] = (src["seen"] + [v["id"]])[-40:]
                     continue
                 src["seen"] = (src["seen"] + [v["id"]])[-40:]
@@ -1054,7 +1093,7 @@ class Mentors:
                 "tips": [{k: t[k] for k in ("text", "author", "at")} | {"verdict": (t["verdict"] or {}).get("text"),
                                                                        "state": (t["verdict"] or {}).get("state")}
                          for t in reversed(st["tips"][-10:])],
-                "consensus": self.consensus(), "log": list(reversed(st["log"][-8:])), "last_error": self.last_error,
+                "consensus": self.consensus(), "log": list(reversed(st["log"][-8:])), "last_error": tidy_error(self.last_error),
                 "scout": self.scout.status_dict()}
 
     def ai_context(self) -> dict:
@@ -1086,7 +1125,7 @@ class Mentors:
         if d["gemini"]:
             mode = f"✅ Gemini смотрит ролики (осталось сегодня {max(0, d['budget_left'])} из {VIDEOS_PER_DAY})"
             if self.gemini.last_error:
-                mode += f"\n⚠️ {html.escape(self.gemini.last_error[:200])} — нажми «🔌 Проверить Gemini»"
+                mode += f"\n⚠️ {html.escape((tidy_error(self.gemini.last_error) or '')[:200])} — нажми «🔌 Проверить Gemini»"
         elif self.gemini_hint:
             mode = f"⚠️ Gemini не подключён: {html.escape(self.gemini_hint)}"
         elif d["text_ai"]:
