@@ -1469,6 +1469,7 @@ function mentorsCard() {
   return `<div class="card pilot-card ${m.on ? "on" : ""} press" data-act="mentors" style="margin-top:10px">
     <div class="row between"><div><div class="b">🎓 Учусь у трейдеров</div><div class="tiny muted">YouTube и Twitch · каждый совет проверяю ценой</div></div><span class="pill ${m.on ? "ok" : "gray"}">${m.on ? "вкл" : "выкл"}</span></div>
     <div class="small muted" style="margin-top:8px;white-space:normal">${m.sources ? `Слежу за ${m.sources} · ⭐ ${m.stars.length}${m.stars.length ? ": " + m.stars.map(esc).join(", ") : ""} · прогнозов проверено ${m.calls_done}, ждут ${m.calls_open}` : "Смотрю ролики трейдеров и чаты стримеров, проверяю их прогнозы ценой."}${m.gemini ? "" : " · ⚠️ без Gemini — только по описанию"}</div>
+    ${m.train && m.train.ideas ? `<div class="small" style="margin-top:6px">🏋️ Тренировка: ${m.train.best ? `лучшая «${esc(m.train.best)}» <b>${money(m.train.equity, { d: 2 })}</b> <span class="${cls(m.train.pct)}">${pct(m.train.pct, 1)}</span>` : `идей ${m.train.ideas}, стратегию выбираю`}</div>` : ""}
     ${m.last ? `<div class="tiny muted" style="margin-top:6px;white-space:normal">▶️ <b>${esc(m.last.author)}</b>: ${esc(MN_VIEW[m.last.view] || "")} — ${esc(m.last.summary)}</div>` : ""}
   </div>`;
 }
@@ -1486,6 +1487,31 @@ async function mentorsAction(body, okText) {
     mentorsSheet();
     refresh();
   } catch (e) { fail(e); loadMentors(); }
+}
+
+function trainBlock(m) {
+  const t = m.train;
+  if (!t) return "";
+  const rule = (k) => { const r = t.rules[k]; return `стоп −${Math.round(r.stop * 100)}% · тейк ${r.tp ? "+" + Math.round(r.tp * 100) + "%" : "нет"}`; };
+  const rows = t.variants.map((v) => `<div class="item"><div class="grow"><div class="t">${v.active ? "🏆 " : ""}${esc(v.name)}</div><div class="s" style="white-space:normal">${esc(v.about)} · ${v.n ? `${v.n} сд., в плюс ${v.wins}, ${pct(v.avg, 1)}/сд.` : "сделок пока нет"}${v.open ? ` · открыто ${v.open}` : ""}</div></div>
+      <div class="r"><div class="b num">${money(v.equity, { d: 2 })}</div><div class="s num ${cls(v.pct)}">${pct(v.pct, 1)}</div></div></div>`).join("");
+  const pos = (t.positions || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.asset)}</div><div class="s">${esc(p.author)} · ${money(p.usd, { d: 2 })} · ${ago(p.at)}</div></div><div class="r"><div class="b num ${cls(p.pct)}">${pct(p.pct, 1)}</div></div></div>`).join("");
+  const closed = (t.closed || []).slice(0, 6).map((c) => `<div class="item"><div class="grow"><div class="t">${esc(c.asset)}</div><div class="s">${esc(c.author || "—")} · ${{ stop: "стоп", tp: "тейк", time: "срок" }[c.why]} · ${when(c.closed)}</div></div><div class="r"><div class="b num ${cls(c.pct)}">${pct(c.pct, 1)}</div><div class="s num">${money(c.usd, { sign: true, d: 2 })}</div></div></div>`).join("");
+  const lessons = (t.lessons || []).slice(0, 3).map((l) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">${hm(l.at)} ${esc(l.text)}</div>`).join("");
+  return `<div class="card pilot-card ${t.on ? "on" : ""}" style="margin-top:12px">
+    <div class="row between"><div><div class="b">🏋️ Тренировка на демо</div><div class="tiny muted">сам торгует идеями трейдеров · 5 стратегий по ${money(t.start_usd, { d: 0 })}</div></div>
+      ${m.owner ? `<label class="switch"><input type="checkbox" data-act="tr-on" ${t.on ? "checked" : ""}><span></span></label>` : ""}</div>
+    <div class="small" style="margin-top:8px;white-space:normal">${t.active ? `Лучшая: <b>${esc(t.active_name)}</b> — её идеи приходят сигналом` : `Лучшую выберу от ${t.best_min} сделок, если она в плюсе`} · идей ${t.ideas}</div>
+    <div class="list" style="margin-top:8px">${rows}</div>
+    <div class="tiny muted" style="margin-top:8px;white-space:normal">🧠 Подбирает сам: монеты — ${rule("cex")}; мемкоины — ${rule("sol")}</div>
+    ${pos ? `<div class="small muted" style="margin-top:10px">Открыто у лучшей</div><div class="list" style="margin-top:6px">${pos}</div>` : ""}
+    ${closed ? `<div class="small muted" style="margin-top:10px">Последние сделки</div><div class="list" style="margin-top:6px">${closed}</div>` : ""}
+    ${lessons ? `<div class="small muted" style="margin-top:10px">Чему научился</div>${lessons}` : ""}
+    ${m.owner ? `<div class="list" style="margin-top:10px"><div class="item"><div class="grow"><div class="t">🔔 Сигналы лучшей стратегии</div></div><label class="switch"><input type="checkbox" data-act="tr-signals" ${t.signals ? "checked" : ""}><span></span></label></div>
+      <div class="item"><div class="grow"><div class="t">📨 Писать о каждой сделке</div></div><label class="switch"><input type="checkbox" data-act="tr-notify" ${t.notify ? "checked" : ""}><span></span></label></div></div>
+      <div class="small muted" style="margin-top:10px">Начать заново (выученное останется)</div><div class="chips" style="margin-top:6px">${[5, 10, 20].map((x) => `<div class="chip" data-act="tr-reset" data-v="${x}">$${x}</div>`).join("")}</div>` : ""}
+    <div class="tiny dim" style="margin-top:8px;white-space:normal">Виртуальные деньги, настоящие цены, комиссии и проскальзывание. Живые сделки обычно хуже на 1–3%.</div>
+  </div>`;
 }
 
 function mentorsSheet() {
@@ -1508,6 +1534,7 @@ function mentorsSheet() {
   Sheet.open("Учусь у трейдеров", `
     <div class="row between"><span class="pill ${m.on ? "ok" : "gray"}">${m.on ? "🟢 учусь" : "⏸ выключено"}</span><span class="pill ${m.gemini ? "ok" : "test"}">${m.gemini ? `Gemini: ${Math.max(0, m.budget_left)} из ${m.videos_per_day} роликов сегодня` : "без Gemini"}</span></div>
     ${m.gemini ? "" : `<div class="banner info" style="margin-top:10px;white-space:normal">Без ключа Gemini бот читает только название и описание ролика. Ключ бесплатный: aistudio.google.com/apikey → Create API key → Render → Environment → <b>GEMINI_API_KEY</b>.</div>`}
+    ${trainBlock(m)}
     ${m.owner ? `<div class="list" style="margin-top:10px">
       <div class="item"><div class="grow"><div class="t">🎓 Учиться</div><div class="s">новые ролики каждые 45 мин, чаты Twitch — всё время</div></div><label class="switch"><input type="checkbox" data-act="mn-on" ${m.on ? "checked" : ""}><span></span></label></div>
       <div class="item"><div class="grow"><div class="t">🔔 Разборы роликов в чат</div><div class="s">суть, прогнозы, советы, реклама</div></div><label class="switch"><input type="checkbox" data-act="mn-notify" ${m.notify ? "checked" : ""}><span></span></label></div>
@@ -1919,6 +1946,7 @@ document.addEventListener("click", async (e) => {
     case "mn-add": { const a = ($("#mnLink").value || "").trim(); if (a) mentorsAction({ add: a }, "Добавил"); else toast("Вставь ссылку", true); break; }
     case "mn-del": if (await popup("Не следить за " + (d.s || "") + "?", "Счёт трейдера сохранится в истории.", "Убрать")) mentorsAction({ remove: d.v }, "Убрал"); break;
     case "mn-run": haptic.tap(); mentorsAction({ run: true }); break;
+    case "tr-reset": if (await popup("Тренировка заново с $" + d.v + "?", "Демо-деньги и сделки стратегий обнулятся. Выученные стоп, тейк и лучшая стратегия останутся.", "Начать")) mentorsAction({ train: { reset: Number(d.v) } }, "Заново: $" + d.v); break;
     case "demo-sell": if (await popup("Продать " + (d.s || "") + " на демо?", "Демо-позиция закроется по текущей котировке.", "Продать")) memeAction({ demo_sell: d.v }, "Продано (демо)", el); break;
     case "demo-reset": if (await popup("Начать демо заново с $" + d.v + "?", "Демо-сделки и итог обнулятся. То, чему бот научился (стоп, тейк, комиссии), останется.", "Начать")) memeAction({ demo_reset: Number(d.v) }, "Демо: $" + d.v); break;
     case "demo-buy": { const m = ($("#demoMint").value || "").trim(); if (!m) { toast("Вставь адрес токена", true); break; }
@@ -2017,6 +2045,9 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
   else if (el.dataset.act === "mn-on") mentorsAction({ on: el.checked }, el.checked ? "Учусь" : "Выключено");
   else if (el.dataset.act === "mn-notify") mentorsAction({ notify: el.checked });
+  else if (el.dataset.act === "tr-on") mentorsAction({ train: { on: el.checked } }, el.checked ? "Тренируюсь" : "Пауза");
+  else if (el.dataset.act === "tr-signals") mentorsAction({ train: { signals: el.checked } });
+  else if (el.dataset.act === "tr-notify") mentorsAction({ train: { notify: el.checked } });
   else if (el.dataset.act === "demo-on") memeAction({ demo_on: el.checked }, el.checked ? "Демо торгует" : "Демо на паузе");
   else if (el.dataset.act === "meme-on") {
     if (!el.checked) memeAction({ on: false }, "Автокопирование выключено");
@@ -2049,7 +2080,7 @@ go(S.tab);                         // мгновенно рисуем по кэ�
 refresh().then(() => {
   if (S.tab === "home" && tr().keys && tr().keys.length) loadPortfolio();
   if (new URLSearchParams(location.search).get("open") === "copy") { copySheet(); loadCopy(); }
-  if (new URLSearchParams(location.search).get("open") === "mentors") { mentorsSheet(); loadMentors(); }
+  if (["mentors", "train"].includes(new URLSearchParams(location.search).get("open"))) { mentorsSheet(); loadMentors(); }
 });
 
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 7000);

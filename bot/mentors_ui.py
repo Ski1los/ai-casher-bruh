@@ -53,6 +53,7 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
     st = b.mentors.st
     rows = [[InlineKeyboardButton(text="🔄 Проверить сейчас", callback_data="mn:run"),
              InlineKeyboardButton(text="🔄 Обновить", callback_data="mn:show")],
+            [InlineKeyboardButton(text="🏋️ Тренировка на демо", callback_data="tn:show")],
             [InlineKeyboardButton(text="🧠 Советы", callback_data="mn:tips"),
              InlineKeyboardButton(text="📈 Прогнозы", callback_data="mn:calls"),
              InlineKeyboardButton(text="👥 Трейдеры", callback_data="mn:list")],
@@ -144,12 +145,61 @@ async def analyze_link(b: ArbitrageBot, chat_id: int, video_id: str) -> None:
     if src:
         src["seen"] = (src["seen"] + [video_id])[-40:]
     b.save_copy()
+    pending = mt.take_pending()  # сигналы тренировки по прогнозам из этого ролика
     e = mt.video_event(rec, src)
     if rec["tips"][1:]:
         e["text"] += "\nЕщё советы: " + "; ".join(html.escape(t["text"]) for t in rec["tips"][1:4])
     if src:
         e["text"] += f"\n\n▶️ Канал «{html.escape(src['name'])}» добавил в список — новые ролики разберу сам."
-    await send_events(b, [e])
+    await send_events(b, [e] + pending)
+
+
+TRAIN_HOW = """\
+🏋️ <b>Как бот тренируется</b>
+
+Всё, чему бот научился у трейдеров, он сам проверяет сделками на <b>виртуальных деньгах</b>:
+• каждый прогноз «вырастет» (монета с Bybit/BingX) и каждый токен, который стример показал в чате, — идея для сделки;
+• одновременно торгуют 5 стратегий, у каждой своё демо. Они по-разному отбирают идеи: все подряд; только \
+проверенные авторы; только если согласны 2+ трейдера; без рекламы и хайпа; только уверенные прогнозы;
+• сделка — 25% счёта стратегии, со стопом, тейк-профитом, комиссиями и проскальзыванием; держит не дольше срока \
+прогноза (мемкоин — сутки, монета — до недели).
+
+<b>Чему учится сам:</b>
+1) выбирает лучшую стратегию (от 8 сделок, средний результат с поправкой на везение) — только её идеи приходят \
+тебе сигналом 🏋️. Ни одна не в плюсе — сигналов нет;
+2) подбирает стоп и тейк-профит: цену бот отслеживает весь срок идеи, даже после выхода, поэтому видно, что было \
+бы при другом стопе. Меняет по одному шагу и только если выгода от 5%.
+
+Настоящие деньги тренировка не трогает. Честно: на демо нет реального проскальзывания и очередей, живые сделки \
+обычно хуже на 1–3%."""
+
+
+def train_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
+    st = b.mentors.train.st
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="tn:show"),
+         InlineKeyboardButton(text="📜 Сделки", callback_data="tn:trades")],
+        [InlineKeyboardButton(text="🔕 Без сигналов" if st["signals"] else "🔔 Сигналы лучшей стратегии",
+                              callback_data="tn:signals"),
+         InlineKeyboardButton(text="🔕 Не писать о сделках" if st["notify"] else "📨 Писать о каждой сделке",
+                              callback_data="tn:notify")],
+        [InlineKeyboardButton(text="⏸ Пауза" if st["on"] else "🟢 Тренироваться", callback_data="tn:toggle"),
+         InlineKeyboardButton(text="❔ Как это работает", callback_data="tn:help")],
+        [InlineKeyboardButton(text=f"♻️ Заново ${x}", callback_data=f"tn:reset:{x}") for x in (5, 10, 20)],
+        [InlineKeyboardButton(text="🎓 Трейдеры", callback_data="mn:show")]])
+
+
+def train_trades_text(b: ArbitrageBot) -> str:
+    d = b.mentors.train.status_dict()
+    if not d["closed"]:
+        return "📜 Закрытых демо-сделок пока нет. Первые закроются по стопу, тейку или когда выйдет срок прогноза."
+    why = {"stop": "стоп", "tp": "тейк", "time": "срок"}
+    who = f"«{html.escape(d['active_name'])}»" if d["active"] else "«Все прогнозы»"
+    lines = [f"📜 <b>Последние демо-сделки</b> стратегии {who}"]
+    for c in d["closed"]:
+        lines.append(f"{'✅' if c['pct'] > 0 else '❌'} {html.escape(c['asset'])} ({html.escape(c['author'] or '—')}) — "
+                     f"{why[c['why']]}, <b>{c['pct']:+.1f}%</b> (${c['usd']:+.2f})")
+    return "\n".join(lines)
 
 
 def register(b: ArbitrageBot) -> None:
@@ -205,6 +255,57 @@ def register(b: ArbitrageBot) -> None:
             await add(message.chat.id, command.args.strip())
         else:
             await b._send(message.chat.id, HOW_TEXT, keyboard(b))
+
+    @dp.message(Command("train", "training", "тренировка"))
+    async def cmd_train(message: Message, command: CommandObject) -> None:
+        if not b._allowed(message):
+            return
+        arg = (command.args or "").strip().lower()
+        if arg.startswith("reset") or arg.startswith("заново"):
+            uid = message.from_user.id if message.from_user else None
+            if not await owner_only(uid, message.chat.id):
+                return
+            try:
+                usd = float(arg.split()[1]) if len(arg.split()) > 1 else 10.0
+            except ValueError:
+                usd = 10.0
+            b.mentors.train.reset(max(1.0, min(usd, 1000.0)))
+            b.save_copy()
+        if b.mentors.seed():
+            b.save_copy()
+        await b._send(message.chat.id, b.mentors.train.text(), train_kb(b))
+
+    @dp.callback_query(F.data.startswith("tn:"))
+    async def cb_train(cb: CallbackQuery) -> None:
+        if not b._allowed_user(cb.from_user.id):
+            await cb.answer()
+            return
+        parts = cb.data.split(":")
+        action = parts[1]
+        chat_id = cb.message.chat.id if cb.message else cb.from_user.id
+        await cb.answer()
+        tr = b.mentors.train
+        if action == "show":
+            await b._send(chat_id, tr.text(), train_kb(b))
+            return
+        if action == "help":
+            await b._send(chat_id, TRAIN_HOW, train_kb(b))
+            return
+        if action == "trades":
+            await b._send(chat_id, train_trades_text(b), train_kb(b))
+            return
+        if not await owner_only(cb.from_user.id, chat_id):
+            return
+        if action in ("signals", "notify", "toggle"):
+            key = {"signals": "signals", "notify": "notify", "toggle": "on"}[action]
+            tr.st[key] = not tr.st[key]
+        elif action == "reset" and len(parts) > 2:
+            tr.reset(float(parts[2]))
+            await b._send(chat_id, f"♻️ Тренировка заново: у каждой стратегии ${float(parts[2]):g}. Выученные правила "
+                                   "(стоп, тейк, лучшая стратегия) остались.")
+        b.mentors._changed()
+        b.save_copy()
+        await b._send(chat_id, tr.text(), train_kb(b))
 
     @dp.callback_query(F.data.startswith("mn:"))
     async def cb_mentors(cb: CallbackQuery) -> None:
