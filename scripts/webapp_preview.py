@@ -318,6 +318,48 @@ def build():
                         {"at": now - 7000, "symbol": "RETARDIO", "text": "не купил: риск-фильтр: ликвидность $9.0K < $20K"},
                         {"at": now - 2400, "symbol": "GOAT", "text": "купил за ⭐ 7xKX…gAsU (MOODENG, PNUT)"}]
 
+    # 🎓 трейдеры: стартовый список, пара разобранных роликов, прогнозы и советы (без сети)
+    mn = b.mentors
+    mn.meme = b.meme
+    mn.gemini.key = "AIzaPREVIEW"
+    mn.gemini.model = "gemini-flash-latest"
+    mn.seed()
+    ms = mn.st
+    srcs = ms["sources"]
+    cow, ban, decu = srcs["yt:UCRvqjQPSeaWn-uEx-w0XOIg"], srcs["yt:UCN9Nj4tjXbVTLYWN0EKly_Q"], srcs["tw:decu"]
+    cow.update(status="star", videos=11, calls=14, rets=[6.1, 3.2, -2.0, 8.4, 4.4, -1.1, 5.0, 2.7, 7.3, 1.9], hype=[2, 1, 3])
+    ban.update(status="muted", videos=9, calls=17, sponsored=7, rets=[-8.0, 3.1, -12.4, -6.6, 2.0, -9.9, -4.1, -7.5],
+               hype=[8, 9, 7])
+    decu.update(calls=6, rets=[41.0, -31.2, 12.5])
+    mn.twitch.connected = True
+    mn.twitch.channels = {s["ident"] for s in mn.active("twitch")}
+    ms["videos"] += [
+        {"id": "v1", "source": ban["id"], "author": "Crypto Banter", "title": "ALTSEASON IS HERE!!!", "url": "https://youtu.be/x",
+         "published": now - 9000, "at": now - 8000, "method": "gemini", "summary": "Ведущий уверен в скором альтсезоне и "
+         "советует докупать альткоины; аргументов почти нет, много эмоций.", "market_view": "bullish", "calls": [{}],
+         "tips": [], "sponsored": True, "sponsor_note": "биржа с бонусом за депозит", "hype": 9, "call_ids": []},
+        {"id": "v2", "source": cow["id"], "author": "Benjamin Cowen", "title": "Bitcoin: The Liquidity Problem",
+         "url": "https://youtu.be/y", "published": now - 5000, "at": now - 4000, "method": "gemini",
+         "summary": "BTC упирается в снижение ликвидности: автор ждёт боковик и откат альтов к BTC, советует не "
+         "входить на всё сразу и держать стоп.", "market_view": "bearish", "calls": [{}, {}], "tips": [],
+         "sponsored": False, "sponsor_note": "", "hype": 2, "call_ids": []}]
+    ms["calls"] += [
+        {"id": "c1", "source": cow["id"], "asset": "ETH", "mint": "", "key": "ETH", "direction": "short", "at": now - 4000,
+         "horizon_h": 72, "path": [0.0, -1.2, -2.4], "done": False, "ret": None, "price0": 3100.0, "kind": "cex"},
+        {"id": "c2", "source": ban["id"], "asset": "SOL", "mint": "", "key": "SOL", "direction": "long", "at": now - 200000,
+         "horizon_h": 48, "path": [0.0, -3.0, -5.1], "done": True, "ret": -5.5, "price0": 160.0, "kind": "cex"},
+        {"id": "c3", "source": decu["id"], "asset": "GOAT", "mint": "d1", "key": "d1", "direction": "long", "at": now - 3000,
+         "horizon_h": 24, "path": [0.0, 18.0, 12.4], "done": False, "ret": None, "price0": 0.01, "kind": "sol"}]
+    ms["tips"] += [
+        {"text": "Не входить в токен, если он уже вырос на 30% за час", "rule": {"param": "max_chase_pct", "value": 30},
+         "source": cow["id"], "author": "Benjamin Cowen", "at": now - 4000,
+         "verdict": {"state": "rejected", "text": "не подтвердился: 30% дал бы +12.0% (22 сделки) против +21.0% (19)"}},
+        {"text": "Стоп −20% на мемкоинах", "rule": {"param": "stop_pct", "value": 20}, "source": decu["id"],
+         "author": "decu", "at": now - 2000,
+         "verdict": {"state": "accepted", "text": "принят: стоп −20% дал бы +71.0% вместо +58.2% на 31 копиях"}}]
+    ms["budget"].update(day=time.strftime("%Y-%m-%d", time.gmtime(now)), videos=4)
+    mn._log("✅ Принял совет decu: стоп −20%. На 31 копиях было бы +71.0% вместо +58.2%.", now - 2000)
+
     b.opps._get_json = opps_json
     b.opps.news = opps_news
 

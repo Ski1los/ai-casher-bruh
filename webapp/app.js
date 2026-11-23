@@ -538,6 +538,7 @@ function renderHome() {
     <div class="banner info press" data-act="opps" style="margin-top:10px"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
     ${scalpCard()}
     ${copyCard()}
+    ${mentorsCard()}
     ${autoCard()}
     <div class="grid4" style="margin-top:10px">
       <div class="action" data-act="scan"><div class="ic">${ICON.scan}</div>Скан</div>
@@ -1335,7 +1336,7 @@ function demoBlock(c) {
   const L = r.learned || {};
   const v = d.ready || {};
   const vcls = v.state === "ok" ? "ok" : v.state === "bad" ? "bad" : "gray";
-  const pos = (d.positions || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.symbol)}</div><div class="s">${p.source === "copy" ? (p.category === "star" ? "⭐ " : "👀 ") + esc(p.wallet) : "вручную"} · ${money(p.usd_in, { d: 2 })} · ${ago(p.opened)}</div></div>
+  const pos = (d.positions || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.symbol)}</div><div class="s">${p.source === "copy" || p.source === "mentor" ? ({ star: "⭐ ", mentor: "🎓 " }[p.category] || "👀 ") + esc(p.wallet) : "вручную"} · ${money(p.usd_in, { d: 2 })} · ${ago(p.opened)}</div></div>
     <div class="r" style="display:flex;gap:8px;align-items:center"><div class="b num ${p.pct == null ? "muted" : cls(p.pct)}">${p.pct == null ? "—" : pct(p.pct, 1)}</div>${owner() ? `<button class="btn sm ghost" data-act="demo-sell" data-v="${esc(p.mint)}" data-s="${esc(p.symbol)}">Продать</button>` : ""}</div></div>`).join("");
   const closed = (d.closed || []).slice(0, 6).map((t) => `<div class="item"><div class="grow"><div class="t">${esc(t.symbol)}</div><div class="s" style="white-space:normal">${esc(t.why)} · ${when(t.closed)}</div></div><div class="r"><div class="b num ${cls(t.pnl_usd)}">${money(t.pnl_usd, { sign: true, d: 2 })}</div>${t.pct != null ? `<div class="s">${pct(t.pct, 1)}</div>` : ""}</div></div>`).join("");
   const dec = (d.decisions || []).slice(0, 4).map((x) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">${hm(x.at)} <b>${esc(x.symbol)}</b> — ${esc(x.text)}</div>`).join("");
@@ -1451,6 +1452,79 @@ async function copyAction(body, okText) {
     copySheet();
     refresh();
   } catch (e) { fail(e); loadCopy(); }
+}
+
+// ---------------------------------------------------------------------------
+// 🎓 Учусь у трейдеров (YouTube и Twitch)
+// ---------------------------------------------------------------------------
+
+const MN_ICON = { star: "⭐", watch: "👀", muted: "🔇" };
+const MN_VIEW = { bullish: "🟢 рост", bearish: "🔴 падение", neutral: "⚪ нейтрально", mixed: "🟡 по-разному" };
+const MN_DIR = { long: "📈 рост", short: "📉 падение", avoid: "🚫 не покупать" };
+const MN_TIP = { accepted: "✅", rejected: "❌", same: "➖", wait: "⏳" };
+
+function mentorsCard() {
+  const m = (S.ov && S.ov.mentors) || null;
+  if (!m) return "";
+  return `<div class="card pilot-card ${m.on ? "on" : ""} press" data-act="mentors" style="margin-top:10px">
+    <div class="row between"><div><div class="b">🎓 Учусь у трейдеров</div><div class="tiny muted">YouTube и Twitch · каждый совет проверяю ценой</div></div><span class="pill ${m.on ? "ok" : "gray"}">${m.on ? "вкл" : "выкл"}</span></div>
+    <div class="small muted" style="margin-top:8px;white-space:normal">${m.sources ? `Слежу за ${m.sources} · ⭐ ${m.stars.length}${m.stars.length ? ": " + m.stars.map(esc).join(", ") : ""} · прогнозов проверено ${m.calls_done}, ждут ${m.calls_open}` : "Смотрю ролики трейдеров и чаты стримеров, проверяю их прогнозы ценой."}${m.gemini ? "" : " · ⚠️ без Gemini — только по описанию"}</div>
+    ${m.last ? `<div class="tiny muted" style="margin-top:6px;white-space:normal">▶️ <b>${esc(m.last.author)}</b>: ${esc(MN_VIEW[m.last.view] || "")} — ${esc(m.last.summary)}</div>` : ""}
+  </div>`;
+}
+
+async function loadMentors() {
+  try { S.mentors = await api("/api/mentors"); if (Sheet.isOpen() && $("#sheetTitle").textContent === "Учусь у трейдеров") mentorsSheet(); }
+  catch (e) { fail(e); }
+}
+
+async function mentorsAction(body, okText) {
+  try {
+    S.mentors = await api("/api/mentors", body);
+    toast((S.mentors.done && S.mentors.done[0]) || okText || "Готово");
+    haptic.ok();
+    mentorsSheet();
+    refresh();
+  } catch (e) { fail(e); loadMentors(); }
+}
+
+function mentorsSheet() {
+  const m = S.mentors;
+  if (!m) { Sheet.open("Учусь у трейдеров", `<div class="card empty">Загружаю…</div>`, { full: true }); loadMentors(); return; }
+  const srcs = (m.sources || []).map((s) => `<div class="item"><div class="grow"><div class="t">${MN_ICON[s.status] || "•"} ${s.kind === "youtube" ? "▶️" : "📺"} ${esc(s.name)}${s.live_chat ? ` <span class="pill ok" style="margin-left:4px">чат</span>` : ""}</div>
+      <div class="s" style="white-space:normal">${s.checked ? `проверено ${s.checked}, сбылось ${s.wins}` : s.kind === "youtube" ? `роликов ${s.videos}, прогнозов ${s.calls}` : `токенов ${s.calls}`}${s.sponsored ? ` · 🎟 реклама в ${s.sponsored}` : ""}${s.hype != null && s.hype >= 6 ? ` · 🎪 хайп ${s.hype}` : ""}${s.error ? ` · ⚠️ ${esc(s.error)}` : ""}</div></div>
+      <div class="r" style="display:flex;gap:8px;align-items:center"><div class="b num ${s.checked ? cls(s.avg) : "muted"}">${s.checked ? pct(s.avg, 1) : "—"}</div>${m.owner ? `<button class="btn sm ghost" data-act="mn-del" data-v="${esc(s.id)}" data-s="${esc(s.name)}">×</button>` : ""}</div></div>`).join("");
+  const vids = (m.videos || []).slice(0, 6).map((v) => `<div class="item press" data-act="open" data-url="${esc(v.url)}" style="align-items:flex-start"><div class="grow"><div class="t" style="white-space:normal">${esc(v.author)} · <span class="muted small">${esc(MN_VIEW[v.market_view] || "")}</span></div>
+      <div class="s" style="white-space:normal;color:var(--text)">${esc(v.summary)}</div>
+      <div class="tiny dim">${when(v.at)}${v.calls ? ` · прогнозов ${v.calls}` : ""}${v.sponsored ? " · 🎟 реклама" : ""}${v.hype >= 7 ? ` · 🎪 хайп ${v.hype}/10` : ""}${v.method === "text" ? " · по описанию" : ""}</div></div></div>`).join("");
+  const calls = (m.recent_calls || []).map((c) => {
+    const left = Math.max(0, (c.at + c.horizon_h * 3600 - Date.now() / 1000) / 3600);
+    return `<div class="item"><div class="grow"><div class="t">${esc(c.asset)} <span class="muted small">${esc(MN_DIR[c.direction] || "")}</span></div><div class="s">${esc(c.author)} · ${c.done ? "проверено" : `итог через ${Math.round(left)} ч`}</div></div>
+      <div class="r"><div class="b num ${c.done ? cls(c.ret) : c.now ? cls(c.now) : "muted"}">${c.done ? pct(c.ret, 1) + (c.ret > 0 ? " ✅" : " ❌") : c.now ? pct(c.now, 1) : "—"}</div></div></div>`;
+  }).join("");
+  const tips = (m.tips || []).map((t) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="s" style="white-space:normal;color:var(--text)">${MN_TIP[t.state] || "💬"} <b>${esc(t.author || "—")}</b>: ${esc(t.text)}</div>${t.verdict ? `<div class="tiny muted" style="white-space:normal">→ ${esc(t.verdict)}</div>` : ""}</div></div>`).join("");
+  const cons = (m.consensus || []).map((c) => `<span class="chip">${esc(c.asset)} ${"📈".repeat(Math.min(3, c.long))}${"📉".repeat(Math.min(3, c.short))}</span>`).join("");
+  const log = (m.log || []).slice(0, 4).map((l) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">${hm(l.at)} ${esc(l.text)}</div>`).join("");
+  Sheet.open("Учусь у трейдеров", `
+    <div class="row between"><span class="pill ${m.on ? "ok" : "gray"}">${m.on ? "🟢 учусь" : "⏸ выключено"}</span><span class="pill ${m.gemini ? "ok" : "test"}">${m.gemini ? `Gemini: ${Math.max(0, m.budget_left)} из ${m.videos_per_day} роликов сегодня` : "без Gemini"}</span></div>
+    ${m.gemini ? "" : `<div class="banner info" style="margin-top:10px;white-space:normal">Без ключа Gemini бот читает только название и описание ролика. Ключ бесплатный: aistudio.google.com/apikey → Create API key → Render → Environment → <b>GEMINI_API_KEY</b>.</div>`}
+    ${m.owner ? `<div class="list" style="margin-top:10px">
+      <div class="item"><div class="grow"><div class="t">🎓 Учиться</div><div class="s">новые ролики каждые 45 мин, чаты Twitch — всё время</div></div><label class="switch"><input type="checkbox" data-act="mn-on" ${m.on ? "checked" : ""}><span></span></label></div>
+      <div class="item"><div class="grow"><div class="t">🔔 Разборы роликов в чат</div><div class="s">суть, прогнозы, советы, реклама</div></div><label class="switch"><input type="checkbox" data-act="mn-notify" ${m.notify ? "checked" : ""}><span></span></label></div>
+    </div>` : ""}
+    <div class="section-title">Трейдеры</div>
+    <div class="tiny muted" style="margin:-4px 0 6px">⭐ советы окупаются · 👀 проверяю · 🔇 теряют деньги</div>
+    ${srcs ? `<div class="list">${srcs}</div>` : `<div class="card empty">Список пуст</div>`}
+    ${m.owner ? `<div class="row" style="gap:8px;margin-top:10px"><input id="mnLink" class="grow" placeholder="Ссылка: YouTube-канал, ролик или twitch.tv/…" autocomplete="off"><button class="btn sm primary" data-act="mn-add">Добавить</button></div>
+      <button class="btn block ghost" style="margin-top:8px" data-act="mn-run">🔄 Проверить каналы сейчас</button>` : ""}
+    ${cons ? `<div class="section-title">О чём говорят за неделю</div><div class="chips">${cons}</div><div class="tiny muted" style="margin-top:4px">Это настроение блогеров, а не прогноз: ⭐ весит вдвое, 🔇 не считается.</div>` : ""}
+    ${vids ? `<div class="section-title">Разобранные ролики</div><div class="list">${vids}</div>` : ""}
+    <div class="section-title">Прогнозы на проверке <span class="muted small">ждут ${m.calls_open} · проверено ${m.calls_done}</span></div>
+    ${calls ? `<div class="list">${calls}</div>` : `<div class="card empty">Появятся после первых роликов и коллов в чатах</div>`}
+    ${tips ? `<div class="section-title">🧠 Советы</div><div class="list">${tips}</div>` : ""}
+    ${log ? `<div class="section-title">Решения</div>${log}` : ""}
+    ${m.last_error ? `<div class="banner" style="margin-top:10px">⚠️ ${esc(m.last_error)}</div>` : ""}
+    <div class="tiny muted" style="margin-top:12px;white-space:normal">Каждый прогноз бот проверяет ценой: мемкоин — как настоящая копия со стопом, тейком и комиссиями; монета с Bybit/BingX — по цене через срок прогноза минус комиссии. ⭐ — от 8 проверок и в среднем от +2% с поправкой на везение, без рекламы в каждом втором ролике. Советы с цифрами принимаются, только если на истории копий были бы выгоднее. За настоящие деньги «потому что сказал блогер» бот не покупает.</div>`, { full: true });
 }
 
 async function panic() {
@@ -1841,6 +1915,10 @@ document.addEventListener("click", async (e) => {
     case "pilot": haptic.tap(); pilotSheet(); break;
     case "copy": haptic.tap(); copySheet(); loadCopy(); break;
     case "copy-w": haptic.tap(); copyWalletSheet(d.v); break;
+    case "mentors": haptic.tap(); mentorsSheet(); loadMentors(); break;
+    case "mn-add": { const a = ($("#mnLink").value || "").trim(); if (a) mentorsAction({ add: a }, "Добавил"); else toast("Вставь ссылку", true); break; }
+    case "mn-del": if (await popup("Не следить за " + (d.s || "") + "?", "Счёт трейдера сохранится в истории.", "Убрать")) mentorsAction({ remove: d.v }, "Убрал"); break;
+    case "mn-run": haptic.tap(); mentorsAction({ run: true }); break;
     case "demo-sell": if (await popup("Продать " + (d.s || "") + " на демо?", "Демо-позиция закроется по текущей котировке.", "Продать")) memeAction({ demo_sell: d.v }, "Продано (демо)", el); break;
     case "demo-reset": if (await popup("Начать демо заново с $" + d.v + "?", "Демо-сделки и итог обнулятся. То, чему бот научился (стоп, тейк, комиссии), останется.", "Начать")) memeAction({ demo_reset: Number(d.v) }, "Демо: $" + d.v); break;
     case "demo-buy": { const m = ($("#demoMint").value || "").trim(); if (!m) { toast("Вставь адрес токена", true); break; }
@@ -1937,6 +2015,8 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.act === "copy-on") copyAction({ on: el.checked }, el.checked ? "Копитрейдинг включён" : "Выключен");
   else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
+  else if (el.dataset.act === "mn-on") mentorsAction({ on: el.checked }, el.checked ? "Учусь" : "Выключено");
+  else if (el.dataset.act === "mn-notify") mentorsAction({ notify: el.checked });
   else if (el.dataset.act === "demo-on") memeAction({ demo_on: el.checked }, el.checked ? "Демо торгует" : "Демо на паузе");
   else if (el.dataset.act === "meme-on") {
     if (!el.checked) memeAction({ on: false }, "Автокопирование выключено");
@@ -1969,6 +2049,7 @@ go(S.tab);                         // мгновенно рисуем по кэ�
 refresh().then(() => {
   if (S.tab === "home" && tr().keys && tr().keys.length) loadPortfolio();
   if (new URLSearchParams(location.search).get("open") === "copy") { copySheet(); loadCopy(); }
+  if (new URLSearchParams(location.search).get("open") === "mentors") { mentorsSheet(); loadMentors(); }
 });
 
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 7000);

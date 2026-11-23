@@ -396,7 +396,7 @@ def new_state() -> dict:
     return {"on": False, "signals": True, "wallets": {}, "open": {}, "closed": [], "filter": dict(FILTER_DEFAULT),
             "lessons": [], "mistakes": {}, "candidates": {}, "graveyard": [], "discovered_at": 0.0,
             "signal_log": {}, "stats": {"copies": 0, "skipped_stale": 0, "no_pair": 0}, "real": {},
-            "calib": {"rts": [], "cost": None}}
+            "mentors": {}, "calib": {"rts": [], "cost": None}}
 
 
 # ---------------------------------------------------------------------------

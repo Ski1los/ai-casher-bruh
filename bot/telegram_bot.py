@@ -29,9 +29,10 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import copy_ui, extras_ui, meme_ui, market_ui, opps_ui, trading_ui, updater
+from . import copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, trading_ui, updater
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
+from .mentors import Mentors
 from .solkey import looks_like_secret
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
@@ -154,7 +155,7 @@ HELP_TEXT = """\
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
 /copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 мемкоины (🧪 демо)
-/news — новости крипты
+/mentors — 🎓 учусь у трейдеров YouTube/Twitch · /news — новости
 
 <b>Сигналы</b>
 /scan — просканировать прямо сейчас
@@ -163,7 +164,7 @@ HELP_TEXT = """\
 
 <b>Демо-счета</b> (виртуальные деньги, реальные стаканы и комиссии)
 /demo_start — запустить демо на $5, $50 и $500 по обеим стратегиям
-/demo_start 5 — только на $5 (можно перечислить суммы: <code>/demo_start 5 20</code>)
+/demo_start 5 — только на $5 (или <code>/demo_start 5 20</code>)
 /demo — сводка по всем счетам
 /demo 5 — подробно по счетам на $5: сделки и почему связки отклонены
 /demo_history — последние сделки
@@ -203,7 +204,7 @@ HELP_TEXT = """\
 <code>/alert TON &lt; 5</code> — сообщить, когда цена дойдёт до уровня (или <code>/alert SOL +5%</code>)
 /alerts — мои алерты (удаление кнопками)
 <code>/phantom АДРЕС</code> — 👻 баланс кошелька Phantom (только просмотр, сид-фразу не нужно!)
-/clean — 🧹 освободить память бота (кэши), показать, сколько занято
+/clean — 🧹 освободить память бота (кэши)
 
 <b>Мемкоины и брокер</b> 🦎
 <code>/dex BONK</code> или <code>/dex АДРЕС</code> — токен с DexScreener: цена, ликвидность, риски, ссылки GMGN/Axiom
@@ -510,6 +511,8 @@ class ArbitrageBot:
             log.warning("%s", self.meme.key_error)
         elif self.meme.configured:
             log.info("Кошелёк бота для мемкоинов: %s", self.meme.address)
+        # 🎓 учёба у трейдеров YouTube/Twitch (bot/mentors.py); состояние — в copy.st["mentors"]
+        self.mentors = Mentors(self.copy, self.meme, self.ai.client, price_of=self._public_prices)
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.webapp = WebApp(self, token)  # Telegram Mini App: /app на том же сервере, что и /health
@@ -593,6 +596,10 @@ class ArbitrageBot:
             await self._backup_now()
         except Exception as e:
             log.warning("Бэкап не удался: %s", e)
+
+    async def _public_prices(self, coins: list[str]) -> dict[str, float]:
+        """Цены монет в $ с Bybit/BingX (для проверки прогнозов трейдеров)."""
+        return await extras_ui.public_prices(self, coins)
 
     async def phantom_snapshot(self, force: bool = False) -> dict | None:
         return await self.phantom.get(lambda coins: extras_ui.public_prices(self, coins), force=force,
@@ -785,10 +792,11 @@ class ArbitrageBot:
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
             "api_keys": keys,
             "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
-                                "/hot", "/radar", "/tinvest"],
+                                "/hot", "/radar", "/tinvest", "/mentors"],
             "tinvest": self._tinvest_context(),
             "memecoin_radar_on": bool(self.radar_chats),
             "copytrading_solana": self._copy_context(),
+            "traders_youtube_twitch": self.mentors.ai_context(),
         }
 
     def _copy_context(self) -> dict:
@@ -972,6 +980,9 @@ class ArbitrageBot:
         copy_line = copy_ui.short_line(self)
         if copy_line:
             parts.append(copy_line)
+        mentors_line = self.mentors.short_line()
+        if mentors_line:
+            parts.append(mentors_line)
         parts.append("Комиссии, узкие места и рекомендации: /analysis" + (" · мнение ИИ: /ai" if self.ai.configured else ""))
         return "\n\n".join(parts)
 
@@ -1404,6 +1415,7 @@ class ArbitrageBot:
         opps_ui.register(self)
         copy_ui.register(self)
         meme_ui.register(self)
+        mentors_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1417,6 +1429,10 @@ class ArbitrageBot:
                 return
             if text.startswith("/"):
                 await message.answer("Не знаю такой команды. Список: /help")
+                return
+            offer = mentors_ui.link_offer(self, text)
+            if offer:  # ссылка на YouTube/Twitch: предложить разобрать ролик или следить за каналом
+                await message.answer(offer[0], reply_markup=offer[1])
                 return
             if WITHDRAW_Q.search(text):  # частый опасный вопрос: отвечаем без ИИ, твёрдо и одинаково
                 await self._answer(message, WITHDRAW_ANSWER)
@@ -1800,6 +1816,7 @@ class ArbitrageBot:
                     BotCommand(command="lab", description="🧪 Лаборатория: стратегии вживую"),
                     BotCommand(command="copy", description="🐋 Копитрейдинг: умные кошельки"),
                     BotCommand(command="meme", description="💸 Мемкоины: бот торгует сам"),
+                    BotCommand(command="mentors", description="🎓 Учусь у трейдеров YouTube и Twitch"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости крипты"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
@@ -1830,6 +1847,7 @@ class ArbitrageBot:
             tasks.append(asyncio.create_task(market_ui.radar_loop(self)))
             tasks.append(asyncio.create_task(opps_ui.opps_loop(self)))
             tasks.append(asyncio.create_task(copy_ui.copy_loop(self)))
+            tasks.append(asyncio.create_task(mentors_ui.mentors_loop(self)))
             tasks.append(asyncio.create_task(self._auto_loop()))
             tasks.append(asyncio.create_task(self._scalp_loop()))
             tasks.append(asyncio.create_task(self._equity_loop()))
@@ -1858,5 +1876,6 @@ class ArbitrageBot:
             await self.dex.close()
             await self.copy.rpc.close()
             await self.meme.jup.close()
+            await self.mentors.close()
             await self.tinvest.close()
             await self.bot.session.close()

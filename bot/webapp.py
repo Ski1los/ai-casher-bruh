@@ -35,6 +35,7 @@ from .opportunities import PLAN_QUESTION
 from .dex import SOL_ADDRESS_RE, DexError, best_pairs, is_address
 from .doctor import doctor_dict, run_doctor
 from .memetrade import SwapError
+from .mentors import VIDEOS_PER_DAY
 from .solana import WalletError
 from .trading import STABLES, OrderPlan, TradeError, human_error
 
@@ -259,6 +260,8 @@ class WebApp:
             ("GET", "/api/copy"): self.copy,
             ("POST", "/api/copy"): self.copy_set,
             ("POST", "/api/meme"): self.meme_set,
+            ("GET", "/api/mentors"): self.mentors,
+            ("POST", "/api/mentors"): self.mentors_set,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -468,7 +471,18 @@ class WebApp:
             "auto_signals": request[USER]["id"] in self.b.subscribers.chats,
             "interval": self.b.settings.scan_interval_sec,
             "copy": self._copy_brief(),
+            "mentors": self._mentors_brief(),
         }
+
+    def _mentors_brief(self) -> dict:
+        mt = self.b.mentors
+        d = mt.status_dict()
+        stars = [s["name"] for s in d["sources"] if s["status"] == "star"]
+        last = d["videos"][0] if d["videos"] else None
+        return {"on": d["on"], "sources": len(d["sources"]), "stars": stars[:3], "gemini": d["gemini"],
+                "calls_done": d["calls_done"], "calls_open": d["calls_open"],
+                "last": {"author": last["author"], "summary": last["summary"][:160], "view": last["market_view"]}
+                if last else None}
 
     def _copy_brief(self) -> dict:
         """Коротко для главного экрана: полный список — в /api/copy."""
@@ -1046,6 +1060,60 @@ class WebApp:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return await self.copy(request)
+
+    async def mentors(self, request: web.Request) -> dict:
+        """🎓 Трейдеры YouTube/Twitch: счёт каждого, разобранные ролики, прогнозы на проверке, советы."""
+        mt = self.b.mentors
+        if mt.seed():
+            self.b.save_copy()
+        d = mt.status_dict()
+        d["owner"] = bool(request[OWNER])
+        d["videos_per_day"] = VIDEOS_PER_DAY
+        return d
+
+    async def mentors_set(self, request: web.Request) -> dict:
+        """{on} / {notify} / {add: ссылка} / {remove: id} / {run: true} — только владелец."""
+        self._owner(request)
+        body = await self._body(request)
+        mt = self.b.mentors
+        done = []
+        if "on" in body:
+            mt.st["on"] = bool(body["on"])
+        if "notify" in body:
+            mt.st["notify"] = bool(body["notify"])
+        if "remove" in body:
+            src = mt.st["sources"].get(str(body["remove"]))
+            if src:
+                mt.remove(src)
+        if body.get("add"):
+            link = str(body["add"]).strip()[:200]
+            try:
+                src, text = await mt.add_link(link)
+            except Exception as e:
+                raise ApiError(str(e)[:200]) from None
+            if text.startswith("video:"):  # ролик разбирается 30–90 с — в фоне, итог придёт в чат
+                from . import mentors_ui
+                task = asyncio.get_running_loop().create_task(
+                    mentors_ui.analyze_link(self.b, self.b.owner_id, text[6:]) if self.b.owner_id else asyncio.sleep(0))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+                done.append("Смотрю ролик — разбор придёт в чат через 1–2 минуты")
+            elif src is None:
+                raise ApiError(html.unescape(re.sub(r"<[^>]+>", "", text)))
+            else:
+                done.append(html.unescape(re.sub(r"<[^>]+>", "", text)))
+        if body.get("run") and not mt.busy:
+            from . import mentors_ui
+            for s in mt.active("youtube"):
+                s["checked_at"] = 0.0
+            task = asyncio.get_running_loop().create_task(mentors_ui.mentors_tick(self.b))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            done.append("Проверяю каналы — новые разборы придут в чат")
+        self.b.save_copy()
+        out = await self.mentors(request)
+        out["done"] = done
+        return out
 
     async def opps_notify(self, request: web.Request) -> dict:
         self._owner(request)
