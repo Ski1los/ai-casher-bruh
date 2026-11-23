@@ -44,6 +44,7 @@ MAX_SIZE_USD = 50.0
 NET_FEE = 100_000            # лампорты: сеть + приоритет за одну транзакцию (для демо; ≈ $0,015)
 DEMO_SIZES = (5.0, 10.0, 20.0)
 DEMO_READY_TRADES = 10      # после стольких демо-сделок можно судить, работает ли
+CAT_ICON = {"star": "⭐", "good": "👀", "mentor": "🎓"}
 GOOD_MIN = 12               # судить о 👀-кошельках не раньше чем по 12 копиям
 
 ACCOUNT_DEFAULT = {"positions": {}, "closed": [], "decisions": [], "day": "", "day_pnl_usd": 0.0, "day_trades": 0,
@@ -623,7 +624,8 @@ class MemeTrader:
         self._roll_day(now, d)
         d["day_trades"] += 1
         self._changed()
-        who = f"за {'⭐' if category == 'star' else '👀'} {html.escape(wallet_name)}" if source == "copy" else "вручную"
+        who = (f"за {CAT_ICON.get(category, '👀')} {html.escape(wallet_name)}" if source in ("copy", "mentor")
+               else "вручную")
         return {"text": f"🧪 Демо: купил <b>{html.escape(symbol)}</b> на ${usd:g} {who} (вход+выход ≈ {-rt:.1%}).",
                 "buttons": [("📈 DexScreener", buy_links(mint)["dexscreener"]), ("💸 Продать (демо)", f"cb:mt:ds:{mint}")],
                 "mint": mint, "signal": False, "demo": True}
@@ -776,7 +778,7 @@ class MemeTrader:
             return pos["sell_why"]
         if pos["source"] == "copy" and pos.get("key") and pos["key"] not in self.copy.st["open"]:
             return "копия уже закрыта"
-        if pos["source"] == "copy" and now - pos["opened"] > MAX_HOLD_SEC:
+        if pos["source"] in ("copy", "mentor") and now - pos["opened"] > MAX_HOLD_SEC:
             return "48 часов"
         return None
 
@@ -959,7 +961,8 @@ class MemeTrader:
             lines.append(f"⏸ Пауза после убытков до {_hm(d['paused_until'])}")
         for p in d["positions"]:
             now_ = f" ({p['pct']:+.1f}%)" if p["pct"] is not None else ""
-            src = f"{'⭐' if p['category'] == 'star' else '👀'} {html.escape(p['wallet'])}" if p["source"] == "copy" else "вручную"
+            src = (f"{CAT_ICON.get(p['category'], '👀')} {html.escape(p['wallet'])}" if p["source"] in ("copy", "mentor")
+                   else "вручную")
             lines.append(f"• <b>{html.escape(p['symbol'])}</b> ${p['usd_in']:g}{now_} · {src} · "
                          f"{int((time.time() - p['opened']) // 60)} мин")
         s = d["stats"]
@@ -1002,8 +1005,8 @@ class MemeTrader:
             lines.append("\n<b>Позиции</b>:")
             for p in d["positions"]:
                 now_ = f" → ${p['usd_now']:.2f} ({p['pct']:+.1f}%)" if p["pct"] is not None and p["usd_now"] else ""
-                src = (f"копия {'⭐' if p['category'] == 'star' else '👀'} {html.escape(p['wallet'])}"
-                       if p["source"] == "copy" else "вручную")
+                src = (f"копия {CAT_ICON.get(p['category'], '👀')} {html.escape(p['wallet'])}"
+                       if p["source"] in ("copy", "mentor") else "вручную")
                 lines.append(f"• <b>{html.escape(p['symbol'])}</b> ${p['usd_in']:.2f}{now_} · {src} · "
                              f"{int((time.time() - p['opened']) // 60)} мин" + (" · ⏳ продаю" if p["selling"] else ""))
         s = d["stats"]
