@@ -112,6 +112,7 @@ def bot_env(tmp_path, monkeypatch):
     b.subscribers = tb.SubscriberStore(tmp_path / "subs.json")
     b.demo = DemoManager(b.scanner, settings, tmp_path / "demo.json")
     b.backup = None
+    b.mentors.scout.st["on"] = False  # 🔭 разведчик ходит в сеть; его тесты — в test_scout.py
     return b, session
 
 
