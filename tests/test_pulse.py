@@ -199,9 +199,10 @@ def test_update_stops_takes_rug_and_learning():
         g.rank.append(tok(m, bundler=0.5 if bad else 0.05, smart=0 if bad else 3))
         c.dex.pairs[m] = pair(m)
     t = NOW
-    for chunk in range(0, 30, 10):
+    from bot.pulse import MAX_NEW
+    for chunk in range(0, 30, MAX_NEW):
         g.rank_all = g.rank
-        g.rank = [x for x in g.rank_all if x["mint"] in ms[chunk:chunk + 10]]
+        g.rank = [x for x in g.rank_all if x["mint"] in ms[chunk:chunk + MAX_NEW]]
         run(p.scan(t))
         g.rank = g.rank_all
         t += 600

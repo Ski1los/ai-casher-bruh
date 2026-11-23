@@ -1399,7 +1399,7 @@ function copySheet() {
     ${realBlock(c)}
     ${demoBlock(c)}
     ${owner() ? `<div class="list" style="margin-top:10px">
-      <div class="item"><div class="grow"><div class="t">🐋 Копитрейдинг</div><div class="s">проверяет кошельки каждые 1,5 мин, ищет новые раз в 2 ч</div></div><label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""}><span></span></label></div>
+      <div class="item"><div class="grow"><div class="t">🐋 Копитрейдинг</div><div class="s">проверяет кошельки каждые 30 с, ищет новые раз в 2 ч</div></div><label class="switch"><input type="checkbox" data-act="copy-on" ${c.on ? "checked" : ""}><span></span></label></div>
       <div class="item"><div class="grow"><div class="t">🔔 Сигналы ⭐</div><div class="s">покупки и продажи лучших кошельков — в чат с кнопкой Phantom</div></div><label class="switch"><input type="checkbox" data-act="copy-sig" ${c.signals ? "checked" : ""}><span></span></label></div>
     </div>` : ""}
     ${s.closed ? `<div class="grid2" style="margin-top:10px"><div class="stat center"><div class="v num">${s.taken} / ${s.taken_wins}</div><div class="k">копий / в плюс</div></div><div class="stat center"><div class="v num ${cls(s.taken_sum)}">${pct(s.taken_sum, 1)}</div><div class="k">≈ ${money(s.taken_usd, { sign: true, d: 2 })} по $${c.copy_usd}</div></div></div>

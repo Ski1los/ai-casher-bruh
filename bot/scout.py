@@ -45,6 +45,8 @@ import urllib.parse
 
 import aiohttp
 
+from .ai import THINK_ROOM
+
 log = logging.getLogger(__name__)
 
 DISCOVER_EVERY = 24 * 3600
@@ -531,7 +533,7 @@ class Scout:
         model = await g._pick_model()
         for tools in (([{"google_search": {}}], None) if search else (None,)):
             body = {"contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens}}
+                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens + THINK_ROOM}}
             if tools:
                 body["tools"] = tools
             async with http.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",

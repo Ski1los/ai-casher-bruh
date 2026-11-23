@@ -23,7 +23,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, write_atomic
 from .scanner import Opportunity, Scanner, ScanResult, fmt_price, short_error, simulate_buy, simulate_sell
 
 log = logging.getLogger(__name__)
@@ -121,8 +121,7 @@ def load_account(path: Path | None = DEMO_FILE) -> DemoAccount:
 def save_account(acc: DemoAccount, path: Path | None = DEMO_FILE) -> None:
     if path is None:  # счётом управляет DemoManager и сохраняет сам
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(acc), ensure_ascii=False, indent=1), "utf-8")
+    write_atomic(path, json.dumps(asdict(acc), ensure_ascii=False, indent=1))
 
 
 # ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@ from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
 from .cloud import (BOT_VERSION, STATUS, TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
                     instance_text, version_text)
-from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings
+from .config import BOUNDS, EDITABLE, RISK_KEYS, Settings, write_atomic
 from .demo import DEMO_FILE
 from .demo_manager import DemoManager
 from .memory import free_memory, freeze_startup, memory_line
@@ -239,8 +239,7 @@ class SubscriberStore:
                 log.warning("Не удалось прочитать %s, начинаю с пустого списка", path)
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(sorted(self.chats)), "utf-8")
+        write_atomic(self.path, json.dumps(sorted(self.chats)))
 
     def add(self, chat_id: int) -> None:
         self.chats.add(chat_id)
@@ -558,15 +557,13 @@ class ArbitrageBot:
 
     def save_copy(self) -> None:
         try:
-            self.copy_file.parent.mkdir(parents=True, exist_ok=True)
-            self.copy_file.write_text(json.dumps(self.copy.export(), ensure_ascii=False, separators=(",", ":")), "utf-8")
+            write_atomic(self.copy_file, json.dumps(self.copy.export(), ensure_ascii=False, separators=(",", ":")))
         except OSError as e:
             log.warning("Не смог сохранить копитрейдинг: %s", e)
 
     def save_trading(self) -> None:
         try:
-            self.trading_file.parent.mkdir(parents=True, exist_ok=True)
-            self.trading_file.write_text(json.dumps(self.trader.export(), ensure_ascii=False, separators=(",", ":")), "utf-8")
+            write_atomic(self.trading_file, json.dumps(self.trader.export(), ensure_ascii=False, separators=(",", ":")))
         except OSError as e:
             log.warning("Не смог сохранить состояние торговли: %s", e)
 
@@ -626,8 +623,7 @@ class ArbitrageBot:
 
     def _save_settings(self) -> None:
         try:
-            self.settings_file.parent.mkdir(parents=True, exist_ok=True)
-            self.settings_file.write_text(json.dumps(self._settings_state()), "utf-8")
+            write_atomic(self.settings_file, json.dumps(self._settings_state()))
         except OSError as e:
             log.warning("Не смог сохранить настройки: %s", e)
 
@@ -947,13 +943,18 @@ class ArbitrageBot:
         if not self.ai.configured:
             await self._send(chat_id, NO_AI_TEXT)
             return
-        if wait is None:
-            wait = await self.bot.send_message(chat_id, "🤖 Анализирую данные, обычно 5–20 секунд…")
-        try:
-            await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
-        except Exception:
-            pass
-        await self._refresh_balances()
+        # «Анализирую…», «печатает» и свежие балансы — параллельно: ответ ИИ начинается раньше (до ~1 с)
+        async def typing() -> None:
+            try:
+                await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
+            except Exception:
+                pass
+
+        async def notice() -> Message:
+            return wait if wait is not None else await self.bot.send_message(
+                chat_id, "🤖 Анализирую данные, обычно 5–20 секунд…")
+
+        wait, *_ = await asyncio.gather(notice(), typing(), self._refresh_balances())
         try:
             answer: Answer = await make_answer()
         except AIError as e:
@@ -995,7 +996,7 @@ class ArbitrageBot:
     def report_text(self) -> str:
         parts = [
             "📊 <b>Отчёт</b>",
-            self.stats.text(len(self.scanner.exchanges), self.settings.trade_amount_usd),
+            self.stats.text(self.settings.trade_amount_usd),
         ]
         if self.demo.accounts:
             parts.append(self.demo.summary_text())

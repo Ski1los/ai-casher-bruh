@@ -405,7 +405,7 @@ def test_text_fallback_when_no_gemini():
     class FakeAI:
         configured = True
 
-        async def chat(self, messages, max_tokens=0):
+        async def chat(self, messages, max_tokens=0, **kw):
             assert "Название: BTC breakout" in messages[1]["content"]
             return json.dumps({"summary": "по описанию", "market_view": "bullish",
                                "calls": [{"asset": "BTC", "direction": "long", "horizon_days": 7}]})

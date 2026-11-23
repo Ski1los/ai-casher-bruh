@@ -41,7 +41,7 @@ def test_scan_stats_tracks_best_confirmed_only():
     stats.record(ScanResult(duration_sec=4))
     assert stats.scans == 2
     assert stats.best_tri[0] == 0.2 or abs(stats.best_tri[0] - 0.2) < 1e-9  # неглубокий не считаем
-    text = stats.text(7, 100)
+    text = stats.text(100)
     assert "сканов 2" in text and "htx 50%" in text
     stats.reset_period()
     assert stats.scans == 0 and stats.best_tri is None
