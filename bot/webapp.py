@@ -1101,6 +1101,18 @@ class WebApp:
             mt.st["on"] = bool(body["on"])
         if "notify" in body:
             mt.st["notify"] = bool(body["notify"])
+        sc = body.get("scout")
+        if isinstance(sc, dict):  # 🔭 разведчик: {on} / {find: true}
+            if "on" in sc:
+                mt.scout.st["on"] = bool(sc["on"])
+                mt._changed()
+            if sc.get("find") and not mt.scout.busy:
+                from . import mentors_ui
+                task = asyncio.get_running_loop().create_task(
+                    mentors_ui.scout_find(self.b, self.b.owner_id) if self.b.owner_id else asyncio.sleep(0))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+                done.append("Ищу трейдеров — итог придёт в чат через 1–2 минуты")
         tr = body.get("train")
         if isinstance(tr, dict):  # 🏋️ тренировка: {on} / {signals} / {notify} / {reset: $}
             for k in ("on", "signals", "notify"):

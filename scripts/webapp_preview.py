@@ -359,6 +359,19 @@ def build():
          "verdict": {"state": "accepted", "text": "принят: стоп −20% дал бы +71.0% вместо +58.2% на 31 копиях"}}]
     ms["budget"].update(day=time.strftime("%Y-%m-%d", time.gmtime(now)), videos=4)
     mn._log("✅ Принял совет decu: стоп −20%. На 31 копиях было бы +71.0% вместо +58.2%.", now - 2000)
+    # 🔭 разведчик: двое на испытании, один отсеян фейк-фильтром
+    sco = mn.scout
+    sco.st["on"] = False  # превью без сети
+    for kind, ident, name, via, upd in (
+            ("youtube", "UCxxxxxxxxxxxxxxxxxxxx01", "DataDash", "Gemini + Google", dict(videos=3, calls=4, rets=[3.1, -1.2, 4.0])),
+            ("twitch", "trencher", "Trencher", "Twitch · Crypto", dict(calls=2))):
+        s = mn._add(kind, ident, name, note="🔭 " + via, user=False)
+        sco._mark(s, via, 1, now - 3 * 86400, kind)
+        s.update(upd)
+    sco.st.update(found=7, kept=1, dropped=3)
+    sco._reject("yt:UCbad", "Crypto Millionaire 100x", "фейк-фильтр: 1.2M подписчиков, а смотрят ~800 — похоже на накрутку",
+                now - 86400)
+    sco._reject("tw:slots", "SlotsKing", "гемблинг/раздачи в названии стрима", now - 80000)
     # 🏋️ тренировка: 5 стратегий с демо-сделками
     tst = mn.train.st
     demo_rets = {"all": [4.1, -7.9, 2.2, -8.1, 9.6, -3.0, 1.2, -8.0, 5.5, -2.4, 0.8],

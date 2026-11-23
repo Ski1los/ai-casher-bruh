@@ -38,6 +38,7 @@ from .copytrade import (EXIT_GAIN, EXIT_MIN, EXIT_STOPS, EXIT_TPS, FILTER_GRID, 
                         add_path, exit_net, simulate_exit, tp_text)
 from .dex import fmt_usd
 from .solana import valid_address
+from .scout import Scout
 from .training import Training
 
 log = logging.getLogger(__name__)
@@ -215,8 +216,13 @@ def parse_feed(xml_text: str) -> tuple[str, list[dict]]:
             ts = time.mktime(time.strptime(published[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
         except ValueError:
             ts = 0.0
+        stat = e.find("media:group/media:community/media:statistics", ns)
+        try:
+            views = int(stat.get("views")) if stat is not None and stat.get("views") is not None else None
+        except ValueError:
+            views = None
         out.append({"id": vid, "title": (e.findtext("a:title", "", ns) or "").strip(), "published": ts,
-                    "url": url, "short": "/shorts/" in (url or ""),
+                    "url": url, "short": "/shorts/" in (url or ""), "views": views,
                     "description": (e.findtext("media:group/media:description", "", ns) or "")[:1500]})
     return name, out
 
@@ -529,6 +535,7 @@ class Mentors:
         self.last_error: str | None = None
         self.busy = False
         self.train = Training(self)  # 🏋️ сам торгует выученным на демо (bot/training.py)
+        self.scout = Scout(self)  # 🔭 сам ищет трейдеров и отсеивает фейки (bot/scout.py)
         self.pending: list[dict] = []  # сигналы тренировки, появившиеся при разборе ролика
 
     def take_pending(self) -> list[dict]:
@@ -694,7 +701,7 @@ class Mentors:
         for src in sorted(self.active("youtube"), key=lambda s: s["checked_at"]):
             if done >= VIDEOS_PER_TICK:
                 break
-            if now - src["checked_at"] < RSS_EVERY:
+            if now - src["checked_at"] < RSS_EVERY or not self.scout.can_watch(src, now, self._budget_left(now)):
                 continue
             src["checked_at"] = now
             try:
@@ -987,6 +994,7 @@ class Mentors:
             events += self.take_pending()
             events += await self.update_calls(now)
             events += await self.train.update(now)
+            events += await self.scout.step(now)
             await self.twitch.set_channels({s["ident"] for s in self.active("twitch")})
             return events
         finally:
@@ -1021,7 +1029,8 @@ class Mentors:
                          "status": s["status"], "videos": s["videos"], "calls": s["calls"], "checked": len(s["rets"]),
                          "wins": sum(x > 0 for x in s["rets"]), "avg": round(shrunk_avg(s["rets"]), 2),
                          "sponsored": s["sponsored"], "hype": round(statistics.mean(s["hype"]), 1) if s["hype"] else None,
-                         "error": s.get("error"), "user": s["user"],
+                         "error": s.get("error"), "user": s["user"], "auto": bool(s.get("auto")),
+                         "trial": bool(s.get("auto") and s.get("trial_until")),
                          "live_chat": s["kind"] == "twitch" and s["ident"] in self.twitch.channels and self.twitch.connected})
         open_calls = [c for c in st["calls"] if not c["done"]]
         done = [c for c in st["calls"] if c["done"]]
@@ -1039,7 +1048,8 @@ class Mentors:
                 "tips": [{k: t[k] for k in ("text", "author", "at")} | {"verdict": (t["verdict"] or {}).get("text"),
                                                                        "state": (t["verdict"] or {}).get("state")}
                          for t in reversed(st["tips"][-10:])],
-                "consensus": self.consensus(), "log": list(reversed(st["log"][-8:])), "last_error": self.last_error}
+                "consensus": self.consensus(), "log": list(reversed(st["log"][-8:])), "last_error": self.last_error,
+                "scout": self.scout.status_dict()}
 
     def ai_context(self) -> dict:
         """Коротко для ИИ: кому верить, что говорят, какие советы проверены."""
@@ -1054,6 +1064,10 @@ class Mentors:
             "tips_checked": [{"tip": t["text"][:120], "by": t["author"], "verdict": t["verdict"]}
                              for t in d["tips"][:4] if t["verdict"]],
             "training_demo": self.train.ai_context(),
+            "scout": {"how": "🔭 бот сам ищет трейдеров (Gemini+Google, поиск YouTube, Twitch Crypto), фейк-фильтр, "
+                             "испытательный срок, убирает убыточных и рекламщиков",
+                      "on_trial": [t["name"] for t in d["scout"]["trial"]], "kept": d["scout"]["kept"],
+                      "rejected": [f"{r['name']}: {r['why']}" for r in d["scout"]["rejected"][:4]]},
         }
 
     def text(self) -> str:
@@ -1075,9 +1089,9 @@ class Mentors:
                  f"Twitch: {'🟢 слушаю чаты' if d['twitch_connected'] else '⏳ подключаюсь' if tw else 'каналов нет'}"
                  + (f" ({tw})" if tw else "")]
         if d["sources"]:
-            lines.append("\n<b>Трейдеры</b> (⭐ советы окупаются · 👀 проверяю · 🔇 теряют):")
+            lines.append("\n<b>Трейдеры</b> (⭐ советы окупаются · 👀 проверяю · 🔭 нашёл сам, на испытании · 🔇 теряют):")
             for s in d["sources"][:12]:
-                icon = {"star": "⭐", "watch": "👀", "muted": "🔇"}[s["status"]]
+                icon = "🔭" if s["trial"] and s["status"] == "watch" else {"star": "⭐", "watch": "👀", "muted": "🔇"}[s["status"]]
                 where = "▶️" if s["kind"] == "youtube" else "📺"
                 score = (f"{s['checked']} пров., сбылось {s['wins']}, {s['avg']:+.1f}%" if s["checked"]
                          else f"роликов {s['videos']}, прогнозов {s['calls']}" if s["kind"] == "youtube"
@@ -1095,6 +1109,9 @@ class Mentors:
         lines.append(f"\nПрогнозов на проверке: {d['calls_open']}, проверено: {d['calls_done']}.")
         tl = self.train.short_line()
         lines.append(tl or "🏋️ Тренировка: идеи трейдеров бот сам торгует на демо — /train")
+        sc = d["scout"]
+        lines.append(f"🔭 Разведчик: {'ищет сам' if sc['on'] else 'выключен'} · на испытании {len(sc['trial'])}, "
+                     f"оставил ⭐ {sc['stars']}, отсеял {sc['rejected_total']} — кнопка «🔭 Разведчик»")
         if st["log"]:
             lines.append("🧠 " + html.escape(st["log"][-1]["text"][:240]))
         if d["last_error"]:

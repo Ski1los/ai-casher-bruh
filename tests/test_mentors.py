@@ -71,6 +71,7 @@ def make(now=None, gemini=None, prices=None, meme=None):
     yt = FakeYouTube()
     mt = Mentors(ct, meme, None, price_of=prices or Prices(SOL=100.0), env={}, youtube=yt,
                  gemini=gemini or FakeGemini(), twitch=TwitchChat(None))
+    mt.scout.st["on"] = False  # разведчик ходит в сеть — в этих тестах он не нужен (свои тесты — test_scout.py)
     return mt, ct, yt, dex
 
 

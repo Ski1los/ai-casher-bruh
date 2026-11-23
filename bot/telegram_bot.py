@@ -157,7 +157,7 @@ HELP_TEXT = """\
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
 /copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 мемкоины (🧪 демо)
-/mentors — 🎓 учусь у трейдеров · /train — 🏋️ тренировка на демо · /news
+/mentors — 🎓 трейдеры · /scout — 🔭 сам ищу их · /train — 🏋️ демо · /news
 
 <b>Сигналы</b>
 /scan — просканировать прямо сейчас
@@ -1843,6 +1843,7 @@ class ArbitrageBot:
                     BotCommand(command="meme", description="💸 Мемкоины: бот торгует сам"),
                     BotCommand(command="mentors", description="🎓 Учусь у трейдеров YouTube и Twitch"),
                     BotCommand(command="train", description="🏋️ Тренировка: сам торгую выученным на демо"),
+                    BotCommand(command="scout", description="🔭 Разведчик: сам ищу прибыльных трейдеров"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости крипты"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),

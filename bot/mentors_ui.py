@@ -53,7 +53,8 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
     st = b.mentors.st
     rows = [[InlineKeyboardButton(text="🔄 Проверить сейчас", callback_data="mn:run"),
              InlineKeyboardButton(text="🔄 Обновить", callback_data="mn:show")],
-            [InlineKeyboardButton(text="🏋️ Тренировка на демо", callback_data="tn:show")],
+            [InlineKeyboardButton(text="🏋️ Тренировка на демо", callback_data="tn:show"),
+             InlineKeyboardButton(text="🔭 Разведчик", callback_data="mn:scout")],
             [InlineKeyboardButton(text="🧠 Советы", callback_data="mn:tips"),
              InlineKeyboardButton(text="📈 Прогнозы", callback_data="mn:calls"),
              InlineKeyboardButton(text="👥 Трейдеры", callback_data="mn:list")],
@@ -63,6 +64,39 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔌 Проверить Gemini", callback_data="mn:gcheck"),
              InlineKeyboardButton(text="❔ Как это работает", callback_data="mn:help")]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def scout_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
+    on = b.mentors.scout.st["on"]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔎 Найти трейдеров сейчас", callback_data="mn:sfind")],
+        [InlineKeyboardButton(text="⏸ Не искать самому" if on else "🟢 Искать самому", callback_data="mn:stoggle"),
+         InlineKeyboardButton(text="🎓 Трейдеры", callback_data="mn:show")]])
+
+
+async def scout_find(b: ArbitrageBot, chat_id: int) -> None:
+    sc = b.mentors.scout
+    if sc.busy:
+        await b._send(chat_id, "⏳ Уже ищу, подожди пару минут.")
+        return
+    await b._send(chat_id, "🔭 Ищу трейдеров: Gemini + поиск Google, поиск YouTube, Twitch Crypto. Каждого проверяю "
+                           "фейк-фильтром — это до 2 минут…")
+    try:
+        events = await sc.discover(force=True)
+    except Exception as e:
+        log.exception("Разведчик")
+        await b._send(chat_id, f"⚠️ Поиск не удался: {html.escape(str(e))[:300]}", scout_kb(b))
+        return
+    b.mentors._changed()
+    b.save_copy()
+    if events:
+        await send_events(b, events)
+    else:
+        why = sc.st["last_error"]
+        await b._send(chat_id, "🔭 Новых подходящих трейдеров не нашёл" + (
+            "" if not why else f" ({html.escape(why)[:200]})") + ". Все кандидаты отсеяны фейк-фильтром или уже "
+            "знакомы, либо на испытании нет свободных мест. Попробую сам через сутки.", scout_kb(b))
+    await b._send(chat_id, sc.text(), scout_kb(b))
 
 
 async def gemini_check_text(b: ArbitrageBot) -> str:
@@ -267,7 +301,13 @@ def register(b: ArbitrageBot) -> None:
         if not await owner_only(uid, message.chat.id):
             return
         cmd, rest = args[0].lower(), (args[1] if len(args) > 1 else "")
-        if cmd in ("gemini", "check", "проверка"):
+        if cmd in ("scout", "разведчик", "find", "найти"):
+            if rest in ("now", "сейчас") or cmd in ("find", "найти"):
+                if b.owner_id is not None and message.from_user and message.from_user.id == b.owner_id:
+                    await scout_find(b, message.chat.id)
+                    return
+            await b._send(message.chat.id, b.mentors.scout.text(), scout_kb(b))
+        elif cmd in ("gemini", "check", "проверка"):
             await b._send(message.chat.id, await gemini_check_text(b), keyboard(b))
         elif cmd in ("add", "добавить", "video", "видео", "ролик") and rest:
             await add(message.chat.id, rest.strip())
@@ -283,6 +323,16 @@ def register(b: ArbitrageBot) -> None:
             await add(message.chat.id, command.args.strip())
         else:
             await b._send(message.chat.id, HOW_TEXT, keyboard(b))
+
+    @dp.message(Command("scout", "разведчик"))
+    async def cmd_scout(message: Message, command: CommandObject) -> None:
+        if not b._allowed(message):
+            return
+        uid = message.from_user.id if message.from_user else None
+        if (command.args or "").strip().lower() in ("now", "сейчас", "find", "найти") and uid == b.owner_id:
+            await scout_find(b, message.chat.id)
+            return
+        await b._send(message.chat.id, b.mentors.scout.text(), scout_kb(b))
 
     @dp.message(Command("train", "training", "тренировка"))
     async def cmd_train(message: Message, command: CommandObject) -> None:
@@ -355,6 +405,8 @@ def register(b: ArbitrageBot) -> None:
             await b._send(chat_id, calls_text(b), keyboard(b))
         elif action == "list":
             await b._send(chat_id, list_text(b), list_kb(b))
+        elif action == "scout":
+            await b._send(chat_id, mt.scout.text(), scout_kb(b))
         elif action == "gcheck":
             await b._send(chat_id, "⏳ Проверяю ключ Gemini…")
             await b._send(chat_id, await gemini_check_text(b), keyboard(b))
@@ -369,6 +421,13 @@ def register(b: ArbitrageBot) -> None:
                 s["checked_at"] = 0.0
             await mentors_tick(b)
             await show(chat_id)
+        elif action == "sfind":
+            await scout_find(b, chat_id)
+        elif action == "stoggle":
+            mt.scout.st["on"] = not mt.scout.st["on"]
+            mt._changed()
+            b.save_copy()
+            await b._send(chat_id, mt.scout.text(), scout_kb(b))
         elif action == "notify":
             mt.st["notify"] = not mt.st["notify"]
             b.save_copy()
