@@ -76,6 +76,23 @@ async def public_prices(b: ArbitrageBot, coins: list[str]) -> dict[str, float]:
     return out
 
 
+async def public_candles(b: ArbitrageBot, coin: str, since_ms: int) -> list[list[float]]:
+    """Дневные свечи [ts_ms, open, high, low, close, vol] с первой биржи, где есть монета (для 📜 истории прогнозов)."""
+    symbol = f"{coin}/{b.settings.quote}"
+    for name in list(b.scanner.exchanges)[:3]:
+        ex = b.scanner.exchanges[name]
+        try:
+            await asyncio.wait_for(b.scanner._ensure_markets(name, ex), PRICE_TIMEOUT)
+            if symbol not in (ex.markets or {}):
+                continue
+            rows = await asyncio.wait_for(ex.fetch_ohlcv(symbol, "1d", since=int(since_ms), limit=200), PRICE_TIMEOUT)
+            if rows:
+                return [list(map(float, r[:6])) for r in rows if r and r[1] and r[4]]
+        except Exception as e:
+            log.debug("Свечи %s на %s: %s", symbol, name, e)
+    return []
+
+
 async def first_exchange_with(b: ArbitrageBot, coin: str, preferred: str | None = None) -> tuple[str, float] | None:
     names = [preferred] if preferred else list(b.scanner.exchanges)
     for name in names:

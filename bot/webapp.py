@@ -1113,6 +1113,12 @@ class WebApp:
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 done.append("Ищу трейдеров — итог придёт в чат через 1–2 минуты")
+            if sc.get("history") and not mt.scout.busy and self.b.owner_id:
+                from . import mentors_ui
+                task = asyncio.get_running_loop().create_task(mentors_ui.scout_history(self.b, self.b.owner_id))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+                done.append("Считаю историю прогнозов — рейтинг придёт в чат")
         tr = body.get("train")
         if isinstance(tr, dict):  # 🏋️ тренировка: {on} / {signals} / {notify} / {reset: $}
             for k in ("on", "signals", "notify"):

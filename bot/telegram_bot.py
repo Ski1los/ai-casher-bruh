@@ -514,7 +514,8 @@ class ArbitrageBot:
         elif self.meme.configured:
             log.info("Кошелёк бота для мемкоинов: %s", self.meme.address)
         # 🎓 учёба у трейдеров YouTube/Twitch (bot/mentors.py); состояние — в copy.st["mentors"]
-        self.mentors = Mentors(self.copy, self.meme, self.ai.client, price_of=self._public_prices)
+        self.mentors = Mentors(self.copy, self.meme, self.ai.client, price_of=self._public_prices,
+                               candles_of=lambda coin, since: extras_ui.public_candles(self, coin, since))
         # 💰 Профит-центр: результаты всех способов по фактам, план денег, Страж прибыли (bot/profit.py);
         # состояние — в copy.st["profit"]
         self.profit = ProfitCenter(self)

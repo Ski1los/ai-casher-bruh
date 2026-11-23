@@ -38,7 +38,7 @@ from .copytrade import (EXIT_GAIN, EXIT_MIN, EXIT_STOPS, EXIT_TPS, FILTER_GRID, 
                         add_path, exit_net, simulate_exit, tp_text)
 from .dex import fmt_usd
 from .solana import valid_address
-from .scout import Scout
+from .scout import Scout, history_text
 from .training import Training
 
 log = logging.getLogger(__name__)
@@ -522,11 +522,12 @@ def new_state() -> dict:
 class Mentors:
     def __init__(self, copy, meme=None, ai_client=None, price_of=None, env: dict | None = None,
                  youtube: YouTube | None = None, gemini: GeminiVideo | None = None,
-                 twitch: TwitchChat | None = None) -> None:
+                 twitch: TwitchChat | None = None, candles_of=None) -> None:
         self.copy = copy
         self.meme = meme
         self.ai_client = ai_client
         self.price_of = price_of  # async (coins) -> {COIN: цена в $} с бирж Bybit/BingX
+        self.candles_of = candles_of  # async (coin, since_ms) -> дневные свечи (📜 история прогнозов в разведчике)
         self._http: aiohttp.ClientSession | None = None
         self.youtube = youtube or YouTube(self._session)
         key, self.gemini_env, self.gemini_hint = gemini_key_info(env)
@@ -1031,6 +1032,7 @@ class Mentors:
                          "sponsored": s["sponsored"], "hype": round(statistics.mean(s["hype"]), 1) if s["hype"] else None,
                          "error": s.get("error"), "user": s["user"], "auto": bool(s.get("auto")),
                          "trial": bool(s.get("auto") and s.get("trial_until")),
+                         "history": history_text(s.get("history")),
                          "live_chat": s["kind"] == "twitch" and s["ident"] in self.twitch.channels and self.twitch.connected})
         open_calls = [c for c in st["calls"] if not c["done"]]
         done = [c for c in st["calls"] if c["done"]]
@@ -1067,7 +1069,10 @@ class Mentors:
             "scout": {"how": "🔭 бот сам ищет трейдеров (Gemini+Google, поиск YouTube, Twitch Crypto), фейк-фильтр, "
                              "испытательный срок, убирает убыточных и рекламщиков",
                       "on_trial": [t["name"] for t in d["scout"]["trial"]], "kept": d["scout"]["kept"],
-                      "rejected": [f"{r['name']}: {r['why']}" for r in d["scout"]["rejected"][:4]]},
+                      "rejected": [f"{r['name']}: {r['why']}" for r in d["scout"]["rejected"][:4]],
+                      "leaderboard_proven_profit": [
+                          {"name": x["name"], "live_checked": x["n"], "live_avg_pct": x["avg"],
+                           "past_calls": x["hist_n"], "past_avg_pct": x["hist_avg"]} for x in d["scout"]["leaderboard"][:6]]},
         }
 
     def text(self) -> str:
