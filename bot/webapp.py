@@ -262,6 +262,8 @@ class WebApp:
             ("POST", "/api/meme"): self.meme_set,
             ("GET", "/api/mentors"): self.mentors,
             ("POST", "/api/mentors"): self.mentors_set,
+            ("GET", "/api/profit"): self.profit,
+            ("POST", "/api/profit"): self.profit_set,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -472,7 +474,19 @@ class WebApp:
             "interval": self.b.settings.scan_interval_sec,
             "copy": self._copy_brief(),
             "mentors": self._mentors_brief(),
+            "profit": self._profit_brief(),
         }
+
+    def _profit_brief(self) -> dict | None:
+        try:
+            d = self.b.profit.status_dict()
+        except Exception as e:
+            log.warning("Профит-центр: %s", e)
+            return None
+        top = [{k: e[k] for k in ("icon", "title", "verdict", "n", "mean", "day_pct", "kind")} for e in d["engines"][:3]]
+        p = d["plan"]
+        return {"top": top, "count": len(d["engines"]), "guard": d["guard"], "paused": list(d["paused"]),
+                "proven": p["proven"], "amount": p["amount"], "d30": p["d30"]}
 
     def _mentors_brief(self) -> dict:
         mt = self.b.mentors
@@ -1131,6 +1145,43 @@ class WebApp:
             done.append("Проверяю каналы — новые разборы придут в чат")
         self.b.save_copy()
         out = await self.mentors(request)
+        out["done"] = done
+        return out
+
+    async def profit(self, request: web.Request) -> dict:
+        try:
+            amount = float(request.query.get("amount") or 0) or None
+        except ValueError:
+            amount = None
+        if amount is not None:
+            amount = max(1.0, min(amount, 1_000_000.0))
+        d = self.b.profit.status_dict(amount)
+        d["owner"] = bool(request[OWNER])
+        return d
+
+    async def profit_set(self, request: web.Request) -> dict:
+        """{guard} / {amount} / {resume: pilot|meme} / {unmute: copy} — только владелец."""
+        self._owner(request)
+        body = await self._body(request)
+        p = self.b.profit
+        done = []
+        if "guard" in body:
+            p.st["guard"] = bool(body["guard"])
+            done.append("Страж прибыли " + ("включён" if p.st["guard"] else "выключен"))
+        if body.get("amount"):
+            try:
+                p.st["amount"] = max(1.0, min(float(body["amount"]), 1_000_000.0))
+            except (TypeError, ValueError):
+                raise ApiError("сумма — число") from None
+        from .profit import ROUTES
+        if body.get("resume") in ROUTES:
+            done.append(p.resume(body["resume"]))
+            self.b.save_trading()
+        if body.get("unmute"):
+            done.append(p.unmute(str(body["unmute"])))
+        p._changed()
+        self.b.save_copy()
+        out = await self.profit(request)
         out["done"] = done
         return out
 

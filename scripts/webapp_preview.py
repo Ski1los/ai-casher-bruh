@@ -425,6 +425,13 @@ def build():
     ]):
         b.trader.state.log.append(TradeRecord(now - (5 - i) * 5400, "bybit", kind, what, True, spent, sc, got, gc, spent,
                                               pnl_usd=pnl, source=src).__dict__)
+    # 💰 Профит-центр: тестовые сделки автопилота за 6 дней (доказанный плюс — видно план денег)
+    for i in range(18):
+        cost = 5.0
+        pnl = cost * ((0.9 if i % 4 else -0.5) + rnd.uniform(-0.2, 0.2)) / 100
+        b.trader.state.log.insert(0, TradeRecord(now - (18 - i) * 8 * 3600, "bybit", "sell", "SOL/USDT", False, 0.03,
+                                                 "SOL", cost + pnl, "USDT", cost + pnl, pnl_usd=pnl,
+                                                 source="scalp").__dict__)
     b.trader.state.day_trades = 3
     b.trader.state.day_pnl_usd = 0.042
     b.trader.state.day = b.trader._today()

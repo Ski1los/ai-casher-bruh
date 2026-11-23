@@ -536,6 +536,7 @@ function renderHome() {
         <div class="small muted" style="margin-top:6px">${t.auto ? (t.live ? "🔴 реально" : "🧪 в тесте") + `, от ${t.limits.auto_min}%` : "треугольники, по стакану"}</div></div>
     </div>
     <div class="banner info press" data-act="opps" style="margin-top:10px"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
+    ${profitCard()}
     ${scalpCard()}
     ${copyCard()}
     ${mentorsCard()}
@@ -1463,6 +1464,64 @@ const MN_VIEW = { bullish: "🟢 рост", bearish: "🔴 падение", neut
 const MN_DIR = { long: "📈 рост", short: "📉 падение", avoid: "🚫 не покупать" };
 const MN_TIP = { accepted: "✅", rejected: "❌", same: "➖", wait: "⏳" };
 
+const PF_VERDICT = { proven: "✅", promising: "🟡", flat: "⚪", losing: "🔴", data: "⏳", none: "▫️" };
+const PF_TEXT = { proven: "доказан плюс", promising: "в плюсе, может быть везение", flat: "около нуля", losing: "доказанный минус", data: "мало данных", none: "сделок нет" };
+
+function profitCard() {
+  const p = (S.ov && S.ov.profit) || null;
+  if (!p) return "";
+  const top = (p.top || []).map((e) => `<div class="small" style="margin-top:4px;white-space:normal">${PF_VERDICT[e.verdict] || "•"} ${esc(e.title)} · <span class="muted">${e.n} сд.</span> <b class="${cls(e.mean)}">${pct(e.mean, 2)}</b>/сд.</div>`).join("");
+  return `<div class="card pilot-card ${p.proven ? "on" : ""} press" data-act="profit" style="margin-top:10px">
+    <div class="row between"><div><div class="b">💰 Профит-центр</div><div class="tiny muted">что реально зарабатывает · план денег</div></div><span class="pill ${p.guard ? "ok" : "gray"}">🛡 ${p.guard ? "Страж" : "выкл"}</span></div>
+    ${top || `<div class="small muted" style="margin-top:8px;white-space:normal">Сделок пока нет. Включи демо и обучение — через 1–3 дня здесь будет видно, что приносит деньги.</div>`}
+    ${p.paused && p.paused.length ? `<div class="small" style="margin-top:6px">⏸ Страж поставил на паузу: ${p.paused.length}</div>` : ""}
+    ${p.proven ? `<div class="tiny muted" style="margin-top:6px">План на ${money(p.amount, { d: 2 })}: через 30 дней ≈ <b>${money(p.d30, { d: 2 })}</b>, если результаты сохранятся</div>` : ""}
+  </div>`;
+}
+
+async function loadProfit(amount) {
+  try { S.profit = await api("/api/profit" + (amount ? "?amount=" + amount : "")); if (Sheet.isOpen() && $("#sheetTitle").textContent === "Профит-центр") profitSheet(); }
+  catch (e) { fail(e); }
+}
+
+async function profitAction(body, okText) {
+  try {
+    S.profit = await api("/api/profit", body);
+    toast((S.profit.done && S.profit.done[0]) || okText || "Готово");
+    haptic.ok();
+    profitSheet();
+    refresh();
+  } catch (e) { fail(e); loadProfit(); }
+}
+
+function profitSheet() {
+  const d = S.profit;
+  if (!d) { Sheet.open("Профит-центр", `<div class="card empty">Считаю…</div>`, { full: true }); loadProfit(); return; }
+  const rows = (d.engines || []).map((e) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t" style="white-space:normal">${PF_VERDICT[e.verdict] || "•"} ${esc(e.title)}</div>
+      <div class="s" style="white-space:normal">${e.n ? `${e.n} сд., в плюс ${e.wins}` : "сделок нет"}${e.n >= 8 ? ` · при невезении ${pct(e.lcb, 2)}` : ""}${e.verdict === "proven" && e.day_pct ? ` · ≈${pct(e.day_pct, 2)}/день` : ""} · ${esc(PF_TEXT[e.verdict] || "")}${e.kind === "real" ? " · 💵 реальные деньги" : ""}</div></div>
+      <div class="r"><div class="b num ${e.n ? cls(e.mean) : "muted"}">${e.n ? pct(e.mean, 2) : "—"}</div><div class="tiny muted">за сделку</div></div></div>`).join("");
+  const p = d.plan;
+  const plan = p.rows.map((r) => `<div class="item"><div class="grow"><div class="t" style="white-space:normal">${esc(r.title)}</div><div class="s" style="white-space:normal">${esc(r.why)}</div></div><div class="r"><div class="b num">${money(r.usd, { d: 2 })}</div></div></div>`).join("");
+  const amounts = d.amounts.map((a) => `<span class="chip ${Number(a) === Number(p.amount) ? "on" : ""}" data-act="pf-amount" data-v="${a}">$${a}</span>`).join("");
+  const paused = Object.keys(d.paused || {}).map((r) => `<div class="banner" style="margin-top:8px;white-space:normal">⏸ Страж: пауза новых покупок (${esc(r === "pilot" ? "автопилот" : "мемкоины")}) до ${when(d.paused[r].until)} ${d.owner ? `<button class="btn sm ghost" data-act="pf-resume" data-v="${esc(r)}">Снять</button>` : ""}</div>`).join("");
+  const events = (d.events || []).slice(0, 4).map((x) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">${when(x.at)} ${esc(x.text.replace(/<[^>]+>/g, ""))}</div>`).join("");
+  Sheet.open("Профит-центр", `
+    <div class="tiny muted" style="white-space:normal">Результаты всех способов заработка по фактам. Демо — уже с поправкой на реальность (−0,1% за сделку на бирже, −2% на мемкоинах).</div>
+    ${paused}
+    ${d.muted && d.muted.copy ? `<div class="banner" style="margin-top:8px;white-space:normal">🔕 Сигналы копитрейдинга выключены Стражем (демо в минусе) ${d.owner ? `<button class="btn sm ghost" data-act="pf-unmute">Вернуть</button>` : ""}</div>` : ""}
+    <div class="section-title">Что зарабатывает</div>
+    ${rows ? `<div class="list">${rows}</div>` : `<div class="card empty">Сделок пока нет ни у одного способа. Включи демо мемкоинов, копитрейдинг, тренировку или автопилот в тесте.</div>`}
+    <div class="section-title">План денег</div>
+    <div class="chips">${amounts}</div>
+    <div class="list" style="margin-top:8px">${plan}</div>
+    <div class="card" style="margin-top:8px;white-space:normal">${p.proven && p.day_pct > 0 ? `📈 Если результаты сохранятся: за 30 дней ${money(p.amount, { d: 2 })} → <b>${money(p.d30, { d: 2 })}</b>, за 90 → ${money(p.d90, { d: 2 })}. При невезении за 30 дней → ${money(p.low30, { d: 2 })}.` : "Доказанного плюса пока нет — прогноз роста не рисую. Сейчас главный профит — не терять: бот учится на демо и напишет, когда что-то докажет плюс."}</div>
+    ${d.scale ? `<div class="banner info" style="margin-top:8px;white-space:normal">${d.scale.replace(/<\/?b>/g, "")}</div>` : ""}
+    ${d.owner ? `<div class="list" style="margin-top:10px"><div class="item"><div class="grow"><div class="t">🛡 Страж прибыли</div><div class="s" style="white-space:normal">пауза тому, что доказанно теряет настоящие деньги; выключает сигналы убыточного демо</div></div><label class="switch"><input type="checkbox" data-act="pf-guard" ${d.guard ? "checked" : ""}><span></span></label></div></div>` : ""}
+    <button class="btn block primary" style="margin-top:10px" data-act="pf-ai">🧠 Совет ИИ: как заработать больше</button>
+    ${events ? `<div class="section-title">Решения</div>${events}` : ""}
+    <div class="tiny muted" style="margin-top:12px;white-space:normal">«✅ доказан плюс» — от 15 сделок и даже при невезении (средняя минус разброс) сделка в плюсе. План — «четверть Келли»: формула размера ставки, урезанная в 4 раза ради безопасности. Прошлые сделки не гарантируют будущих.</div>`, { full: true });
+}
+
 function mentorsCard() {
   const m = (S.ov && S.ov.mentors) || null;
   if (!m) return "";
@@ -1580,7 +1639,7 @@ function chatHtml() {
 
 function aiSheet() {
   if (!S.ov.ai) {
-    Sheet.open("ИИ-помощник", `<div class="card"><div class="b">ИИ не подключён</div><ol class="steps"><li>Открой <b>console.groq.com/keys</b>, войди через Google (бесплатно, без карты).</li><li><b>Create API Key</b> → скопируй ключ (начинается с gsk_).</li><li>Render → <b>Environment</b> → <b>AI_API_KEY</b> = ключ → <b>Save</b>.</li></ol></div>`);
+    Sheet.open("ИИ-помощник", `<div class="card"><div class="b">ИИ не подключён</div><ol class="steps"><li>Открой <b>console.groq.com/keys</b>, войди через Google (бесплатно, без карты).</li><li><b>Create API Key</b> → скопируй ключ (начинается с gsk_).</li><li>Render → <b>Environment</b> → <b>AI_API_KEY</b> = ключ → <b>Save</b>.</li></ol><div class="small muted" style="white-space:normal">Или Gemini: ключ из aistudio.google.com/apikey (начинается с AQ. или AIza) → Render → <b>GEMINI_API_KEY</b>.</div></div>`);
     return;
   }
   Sheet.open("ИИ-трейдер", `<div id="chatBox">${chatHtml()}</div>`, {
@@ -1943,6 +2002,11 @@ document.addEventListener("click", async (e) => {
     case "copy": haptic.tap(); copySheet(); loadCopy(); break;
     case "copy-w": haptic.tap(); copyWalletSheet(d.v); break;
     case "mentors": haptic.tap(); mentorsSheet(); loadMentors(); break;
+    case "profit": haptic.tap(); profitSheet(); loadProfit(); break;
+    case "pf-amount": haptic.tap(); if (S.profit && S.profit.owner) profitAction({ amount: Number(d.v) }); else loadProfit(d.v); break;
+    case "pf-resume": if (await popup("Снять паузу?", "Страж поставил паузу, потому что последние настоящие сделки доказанно в минусе. Снова проверит после 5 новых сделок.", "Снять")) profitAction({ resume: d.v }); break;
+    case "pf-unmute": profitAction({ unmute: "copy" }); break;
+    case "pf-ai": haptic.tap(); aiSheet(); if (S.ov && S.ov.ai) askAI("Как мне получить максимум прибыли при минимальном риске по данным Профит-центра? Что доказало плюс, куда и сколько положить, что включить или выключить."); break;
     case "mn-add": { const a = ($("#mnLink").value || "").trim(); if (a) mentorsAction({ add: a }, "Добавил"); else toast("Вставь ссылку", true); break; }
     case "mn-del": if (await popup("Не следить за " + (d.s || "") + "?", "Счёт трейдера сохранится в истории.", "Убрать")) mentorsAction({ remove: d.v }, "Убрал"); break;
     case "mn-run": haptic.tap(); mentorsAction({ run: true }); break;
@@ -2045,6 +2109,7 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
   else if (el.dataset.act === "mn-on") mentorsAction({ on: el.checked }, el.checked ? "Учусь" : "Выключено");
   else if (el.dataset.act === "mn-notify") mentorsAction({ notify: el.checked });
+  else if (el.dataset.act === "pf-guard") profitAction({ guard: el.checked });
   else if (el.dataset.act === "tr-on") mentorsAction({ train: { on: el.checked } }, el.checked ? "Тренируюсь" : "Пауза");
   else if (el.dataset.act === "tr-signals") mentorsAction({ train: { signals: el.checked } });
   else if (el.dataset.act === "tr-notify") mentorsAction({ train: { notify: el.checked } });
@@ -2081,6 +2146,7 @@ refresh().then(() => {
   if (S.tab === "home" && tr().keys && tr().keys.length) loadPortfolio();
   if (new URLSearchParams(location.search).get("open") === "copy") { copySheet(); loadCopy(); }
   if (["mentors", "train"].includes(new URLSearchParams(location.search).get("open"))) { mentorsSheet(); loadMentors(); }
+  if (new URLSearchParams(location.search).get("open") === "profit") { profitSheet(); loadProfit(); }
 });
 
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 7000);
