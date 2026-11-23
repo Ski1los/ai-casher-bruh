@@ -3,7 +3,9 @@
 Работает через любой OpenAI-совместимый API. Бесплатные варианты без банковской карты:
   * Groq (рекомендуется): ключ начинается с gsk_, https://console.groq.com/keys
   * OpenRouter (модели :free): ключ начинается с sk-or-, https://openrouter.ai/keys
-  * Google AI Studio (Gemini): ключ начинается с AIza, https://aistudio.google.com/apikey
+  * Google AI Studio (Gemini): ключ начинается с AQ. (новый формат с 2026 г.) или AIza (старый),
+    https://aistudio.google.com/apikey. Gemini вызываем через родной адрес Google (заголовок x-goog-api-key):
+    новые ключи AQ. на OpenAI-совместимом адресе Google часто отклоняет.
 
 Достаточно одной переменной AI_API_KEY: провайдер определяется по началу ключа.
 Можно задать несколько ключей (GROQ_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY):
@@ -55,9 +57,9 @@ PROVIDERS: dict[str, dict] = {
     },
     "gemini": {
         "title": "Google Gemini",
-        "base": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "base": "https://generativelanguage.googleapis.com/v1beta",  # родной API (не /openai): так работают ключи AQ.
         "env": "GEMINI_API_KEY",
-        "prefix": "AIza",
+        "prefix": ("AQ.", "AIza"),
         "prefer": ["flash"],
         "fallback": ["gemini-2.5-flash"],
     },
@@ -78,6 +80,24 @@ class AIError(Exception):
 # ---------------------------------------------------------------------------
 # Настройки и выбор провайдера
 # ---------------------------------------------------------------------------
+
+
+GEMINI_ENV_ALIASES = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_KEY", "GOOGLE_AI_KEY")
+
+
+def clean_key(raw: str | None) -> str:
+    """Ключ из переменной окружения без случайного мусора: пробелов, кавычек, «Bearer », «ИМЯ=» и переносов строк
+    (так часто бывает, когда копируешь с телефона)."""
+    key = (raw or "").strip().strip("\"'«»“”` ").strip()
+    if "=" in key and re.match(r"^[A-Z_]{3,40}=", key):  # вставили «GEMINI_API_KEY=AQ...» целиком
+        key = key.split("=", 1)[1].strip().strip("\"'`")
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    return re.sub(r"\s+", "", key)
+
+
+def is_gemini_key(key: str) -> bool:
+    return key.startswith(PROVIDERS["gemini"]["prefix"])
 
 
 def detect_provider(key: str) -> str | None:
@@ -107,7 +127,7 @@ def endpoints_from_env(env: dict | None = None) -> list[Endpoint]:
     out: list[Endpoint] = []
     seen: set[str] = set()
 
-    main = (env.get("AI_API_KEY") or "").strip()
+    main = clean_key(env.get("AI_API_KEY"))
     if main:
         base = (env.get("AI_BASE_URL") or "").strip().rstrip("/")
         provider = (env.get("AI_PROVIDER") or "").strip().lower() or detect_provider(main)
@@ -120,7 +140,8 @@ def endpoints_from_env(env: dict | None = None) -> list[Endpoint]:
         seen.add(main)
 
     for name, p in PROVIDERS.items():
-        key = (env.get(p["env"]) or "").strip()
+        names = GEMINI_ENV_ALIASES if name == "gemini" else (p["env"],)
+        key = next((k for k in (clean_key(env.get(n)) for n in names) if k), "")
         if key and key not in seen:
             # своя модель применяется только к основному провайдеру
             out.append(Endpoint(name, p["base"], key, model if not out else None))
@@ -188,6 +209,8 @@ class LLMClient:
             )
 
     def _headers(self, ep: Endpoint) -> dict:
+        if ep.provider == "gemini" and "/openai" not in ep.base:
+            return {"x-goog-api-key": ep.key, "Content-Type": "application/json"}
         h = {"Authorization": f"Bearer {ep.key}", "Content-Type": "application/json"}
         if ep.provider == "openrouter":
             h["HTTP-Referer"] = "https://github.com/Ski1los/ai-casher-bruh"
@@ -200,12 +223,17 @@ class LLMClient:
         ids: list[str] = []
         try:
             http = await self._http()
-            async with http.get(f"{ep.base}/models", headers=self._headers(ep)) as r:
+            url = f"{ep.base}/models" + ("?pageSize=200" if self._native(ep) else "")
+            async with http.get(url, headers=self._headers(ep)) as r:
                 if r.status in (401, 403):
                     raise AIError(f"{ep.title}: ключ не подходит (ошибка {r.status}). Проверь AI_API_KEY.")
                 if r.status == 200:
                     data = await r.json(content_type=None)
-                    ids = [str(m.get("id", "")).removeprefix("models/") for m in data.get("data", [])]
+                    if "models" in data:  # родной API Gemini: {"models": [{"name": "models/…", ...}]}
+                        ids = [str(m.get("name", "")).removeprefix("models/") for m in data["models"]
+                               if "generateContent" in (m.get("supportedGenerationMethods") or ["generateContent"])]
+                    else:
+                        ids = [str(m.get("id", "")).removeprefix("models/") for m in data.get("data", [])]
         except AIError:
             raise
         except Exception as e:  # сеть: попробуем модель по умолчанию
@@ -227,7 +255,72 @@ class LLMClient:
             body["include_reasoning"] = False
         return body
 
+    @staticmethod
+    def _native(ep: Endpoint) -> bool:
+        return ep.provider == "gemini" and "/openai" not in ep.base
+
+    @staticmethod
+    def _gemini_body(messages: list[dict], max_tokens: int) -> dict:
+        """Сообщения в стиле OpenAI → запрос родного API Gemini (system → systemInstruction, assistant → model)."""
+        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+        contents = []
+        for m in messages:
+            if m["role"] == "system":
+                continue
+            role = "model" if m["role"] == "assistant" else "user"
+            if contents and contents[-1]["role"] == role:  # Gemini не любит два сообщения подряд от одного
+                contents[-1]["parts"][0]["text"] += "\n\n" + m["content"]
+            else:
+                contents.append({"role": role, "parts": [{"text": m["content"]}]})
+        body = {"contents": contents or [{"role": "user", "parts": [{"text": "…"}]}],
+                # «размышления» новых моделей тоже тратят выходные токены — даём запас
+                "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens * 2}}
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+        return body
+
+    async def _call_gemini(self, ep: Endpoint, messages: list[dict], max_tokens: int) -> str:
+        http = await self._http()
+        for attempt in range(4):
+            model = await self._model_for(ep)
+            body = self._gemini_body(messages, max_tokens)
+            async with http.post(f"{ep.base}/models/{model}:generateContent", json=body, headers=self._headers(ep)) as r:
+                text = await r.text()
+                if r.status == 200:
+                    data = json.loads(text)
+                    self.tokens_today += int((data.get("usageMetadata") or {}).get("totalTokenCount") or 0)
+                    cand = (data.get("candidates") or [{}])[0]
+                    parts = (cand.get("content") or {}).get("parts") or []
+                    content = clean_answer("".join(p.get("text", "") for p in parts if not p.get("thought")))
+                    if not content:
+                        if cand.get("finishReason") == "MAX_TOKENS" and max_tokens < 4000:
+                            max_tokens *= 2
+                            continue
+                        block = (data.get("promptFeedback") or {}).get("blockReason") or cand.get("finishReason")
+                        raise AIError(f"Gemini вернул пустой ответ{f' ({block})' if block else ''}")
+                    self.last_model, self.last_provider = model, ep.title
+                    return content
+                low = text.lower()
+                if r.status in (401, 403) or (r.status == 400 and ("api key" in low or "api_key" in low)):
+                    raise AIError(f"{ep.title}: ключ не подходит (ошибка {r.status}). Проверь ключ в Render: "
+                                  "скопируй его заново в AI Studio кнопкой «Copy key».")
+                if r.status == 429:
+                    wait = _retry_after(r.headers, text)
+                    if wait <= 20 and attempt == 0:
+                        await asyncio.sleep(wait + 0.5)
+                        continue
+                    ep.disabled_until = time.time() + max(wait, 30)
+                    raise AIError(f"{ep.title}: лимит бесплатного тарифа, подожди ~{max(wait, 30):.0f} с")
+                if r.status in (404, 400) and "model" in low:
+                    ep.dead_models.add(model)
+                    ep.model = None
+                    continue
+                raise AIError(f"{ep.title}: ошибка {r.status}: {text[:160]}")
+        raise AIError(f"{ep.title}: не удалось получить ответ")
+
     async def _call(self, ep: Endpoint, messages: list[dict], max_tokens: int) -> str:
+        if self._native(ep):
+            return await self._call_gemini(ep, messages, max_tokens)
         http = await self._http()
         extras = True
         for attempt in range(4):
@@ -272,7 +365,7 @@ class LLMClient:
 
     async def chat(self, messages: list[dict], max_tokens: int = 1200) -> str:
         if not self.endpoints:
-            raise AIError("ИИ не подключён: нет ключа AI_API_KEY")
+            raise AIError("ИИ не подключён: в Render нет ключа (GEMINI_API_KEY или AI_API_KEY)")
         async with self._lock:
             self._count_day()
             self.requests_today += 1
@@ -667,6 +760,9 @@ NO_AI_TEXT = """\
 3. В Render открой сервис <b>ai-casher-bot</b> → <b>Environment</b> → <b>Add Environment Variable</b>:
    Key: <code>AI_API_KEY</code>, Value: твой ключ → <b>Save Changes</b>.
 4. Бот перезапустится сам (около минуты), и можно писать вопросы прямо сюда обычным текстом.
+
+<b>Или Gemini:</b> ключ из <a href="https://aistudio.google.com/apikey">aistudio.google.com/apikey</a> (начинается с \
+<code>AQ.</code> или <code>AIza</code>) положи в <code>GEMINI_API_KEY</code>. Проверка ключа: /mentors gemini
 
 Ключ никому не показывай и не присылай в чат.
 

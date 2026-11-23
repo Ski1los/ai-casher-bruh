@@ -12,7 +12,7 @@ from aiogram import F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from .mentors import TICK_SEC, VIEWS, MentorError, parse_link
+from .mentors import TICK_SEC, VIDEOS_PER_DAY, VIEWS, MentorError, parse_link
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -60,8 +60,34 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔔 Сообщать о роликах" if not st["notify"] else "🔕 Не сообщать о роликах",
                                   callback_data="mn:notify"),
              InlineKeyboardButton(text="⏸ Выключить" if st["on"] else "🟢 Включить", callback_data="mn:toggle")],
-            [InlineKeyboardButton(text="❔ Как это работает", callback_data="mn:help")]]
+            [InlineKeyboardButton(text="🔌 Проверить Gemini", callback_data="mn:gcheck"),
+             InlineKeyboardButton(text="❔ Как это работает", callback_data="mn:help")]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def gemini_check_text(b: ArbitrageBot) -> str:
+    """Понятная проверка ключа Gemini: где найден, принял ли его Google, какая модель."""
+    mt = b.mentors
+    g = mt.gemini
+    if not g.configured:
+        why = mt.gemini_hint or "в Render нет переменной GEMINI_API_KEY с ключом"
+        return ("🔌 <b>Gemini не подключён</b>: " + html.escape(why) + ".\n\n"
+                "Как подключить: aistudio.google.com/apikey → Create API key → открой ключ → «Copy key» (полный ключ, "
+                "начинается с <code>AQ.</code>) → Render → твой сервис → Environment → <code>GEMINI_API_KEY</code> → "
+                "вставь → Save Changes. Render сам перезапустит бота, через 1–2 минуты нажми проверку ещё раз.")
+    masked = f"{g.key[:5]}…{g.key[-4:]}" if len(g.key) > 12 else "…"
+    try:
+        model = await g.check()
+    except Exception as e:
+        return (f"🔌 Ключ найден ({html.escape(mt.gemini_env or '?')}: <code>{html.escape(masked)}</code>), но "
+                f"<b>не работает</b>: {html.escape(str(e))[:300]}\n\nЧаще всего ключ скопирован не целиком: в AI "
+                "Studio открой ключ и нажми «Copy key», вставь заново в Render.")
+    ai = b.ai.client
+    ai_line = ("ИИ-помощник тоже на Gemini ✅" if any(e.provider == "gemini" for e in ai.endpoints)
+               else "ИИ-помощник работает через другой ключ")
+    return (f"🔌 <b>Gemini подключён ✅</b> ({html.escape(mt.gemini_env or '?')}: <code>{html.escape(masked)}</code>)\n"
+            f"Модель: {html.escape(model)}. Ролики YouTube бот будет смотреть сам — до {VIDEOS_PER_DAY} в день.\n"
+            f"{ai_line}.")
 
 
 def tips_text(b: ArbitrageBot) -> str:
@@ -241,7 +267,9 @@ def register(b: ArbitrageBot) -> None:
         if not await owner_only(uid, message.chat.id):
             return
         cmd, rest = args[0].lower(), (args[1] if len(args) > 1 else "")
-        if cmd in ("add", "добавить", "video", "видео", "ролик") and rest:
+        if cmd in ("gemini", "check", "проверка"):
+            await b._send(message.chat.id, await gemini_check_text(b), keyboard(b))
+        elif cmd in ("add", "добавить", "video", "видео", "ролик") and rest:
             await add(message.chat.id, rest.strip())
         elif cmd in ("del", "удалить", "remove") and rest:
             src = b.mentors.find(rest)
@@ -327,6 +355,9 @@ def register(b: ArbitrageBot) -> None:
             await b._send(chat_id, calls_text(b), keyboard(b))
         elif action == "list":
             await b._send(chat_id, list_text(b), list_kb(b))
+        elif action == "gcheck":
+            await b._send(chat_id, "⏳ Проверяю ключ Gemini…")
+            await b._send(chat_id, await gemini_check_text(b), keyboard(b))
         elif not await owner_only(cb.from_user.id, chat_id):
             return
         elif action == "run":

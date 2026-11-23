@@ -33,6 +33,7 @@ from typing import Awaitable, Callable
 
 import aiohttp
 
+from .ai import GEMINI_ENV_ALIASES, clean_key, is_gemini_key
 from .copytrade import (EXIT_GAIN, EXIT_MIN, EXIT_STOPS, EXIT_TPS, FILTER_GRID, LEARN_GAIN, LEARN_SUBSET, _passes,
                         add_path, exit_net, simulate_exit, tp_text)
 from .dex import fmt_usd
@@ -256,13 +257,24 @@ class YouTube:
 # Разбор ролика: Gemini по ссылке, иначе — название и описание через ИИ бота
 # ---------------------------------------------------------------------------
 
-def gemini_key(env: dict | None = None) -> str:
+def gemini_key_info(env: dict | None = None) -> tuple[str, str | None, str | None]:
+    """(ключ, имя переменной, подсказка). Ключи Gemini: новый формат AQ. (с 2026 г.) и старый AIza."""
     env = os.environ if env is None else env
-    for name in ("GEMINI_API_KEY", "AI_API_KEY"):
-        key = (env.get(name) or "").strip()
-        if key.startswith("AIza"):
-            return key
-    return ""
+    hint = None
+    for name in (*GEMINI_ENV_ALIASES, "AI_API_KEY"):
+        key = clean_key(env.get(name))
+        if not key:
+            continue
+        if is_gemini_key(key):
+            return key, name, None
+        if name != "AI_API_KEY":
+            hint = (f"в {name} лежит не ключ Gemini (начало «{key[:4]}…»). Ключ Gemini начинается с AQ. или AIza — "
+                    "скопируй его в AI Studio кнопкой «Copy key»")
+    return "", None, hint
+
+
+def gemini_key(env: dict | None = None) -> str:
+    return gemini_key_info(env)[0]
 
 
 class GeminiVideo:
@@ -290,7 +302,8 @@ class GeminiVideo:
         try:
             async with http.get(f"{GEMINI_BASE}/models?pageSize=200", headers={"x-goog-api-key": self.key}) as r:
                 if r.status in (400, 401, 403):
-                    raise MentorError(f"ключ Gemini не подходит (ошибка {r.status})")
+                    body = (await r.text())[:160]
+                    raise MentorError(f"ключ Gemini не подходит (ошибка {r.status}): {body}")
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     names = [m["name"].removeprefix("models/") for m in data.get("models", [])
@@ -305,6 +318,27 @@ class GeminiVideo:
             raise MentorError("Gemini: нет подходящей модели. Задай GEMINI_VIDEO_MODEL")
         self.model = model
         return model
+
+    async def check(self) -> str:
+        """Проверка ключа: короткий запрос к Gemini. Возвращает понятный итог (для кнопки «🔌 Проверить Gemini»)."""
+        if not self.key:
+            raise MentorError("ключа Gemini нет")
+        self.dead.discard(self.model or "")
+        model = await self._pick_model()
+        http = await self._session()
+        body = {"contents": [{"parts": [{"text": "Ответь одним словом: ок"}]}],
+                "generationConfig": {"maxOutputTokens": 200}}
+        async with http.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=body,
+                             headers={"x-goog-api-key": self.key}, timeout=aiohttp.ClientTimeout(total=40)) as r:
+            text = await r.text()
+            if r.status == 200:
+                self.last_error = None
+                return model
+            if r.status == 429:
+                raise MentorError("ключ рабочий, но сейчас исчерпан бесплатный лимит — подожди минуту")
+            if r.status in (400, 401, 403):
+                raise MentorError(f"Google отклонил ключ (ошибка {r.status}): {text[:180]}")
+            raise MentorError(f"Gemini: ошибка {r.status}: {text[:180]}")
 
     async def analyze(self, url: str, title: str = "") -> dict:
         if time.time() < self.disabled_until:
@@ -489,7 +523,7 @@ class Mentors:
         self.price_of = price_of  # async (coins) -> {COIN: цена в $} с бирж Bybit/BingX
         self._http: aiohttp.ClientSession | None = None
         self.youtube = youtube or YouTube(self._session)
-        key = gemini_key(env)
+        key, self.gemini_env, self.gemini_hint = gemini_key_info(env)
         self.gemini = gemini if gemini is not None else GeminiVideo(key, self._session)
         self.twitch = twitch or TwitchChat(self._session)
         self.last_error: str | None = None
@@ -615,6 +649,8 @@ class Mentors:
                 self.st["budget"]["videos"] += 1
             except MentorError as e:
                 self.last_error = str(e)
+                if "лимит" not in str(e):
+                    self.gemini.last_error = str(e)
                 text_ok = self.ai_client is not None and getattr(self.ai_client, "configured", True)
                 if not text_ok or (wait_on_limit and "лимит" in str(e)) or not (video.get("title") or video.get("description")):
                     raise
@@ -1025,6 +1061,10 @@ class Mentors:
         st = self.st
         if d["gemini"]:
             mode = f"✅ Gemini смотрит ролики (осталось сегодня {max(0, d['budget_left'])} из {VIDEOS_PER_DAY})"
+            if self.gemini.last_error:
+                mode += f"\n⚠️ {html.escape(self.gemini.last_error[:200])} — нажми «🔌 Проверить Gemini»"
+        elif self.gemini_hint:
+            mode = f"⚠️ Gemini не подключён: {html.escape(self.gemini_hint)}"
         elif d["text_ai"]:
             mode = "⚠️ Gemini не подключён — разбираю ролики только по названию и описанию (добавь GEMINI_API_KEY)"
         else:

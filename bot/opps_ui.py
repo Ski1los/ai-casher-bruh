@@ -228,7 +228,7 @@ def register(b: ArbitrageBot) -> None:
             await show(chat_id, cb.from_user.id, force=True)
         elif action == "plan":
             if not b.ai.configured:
-                await b._send(chat_id, "🤖 ИИ не подключён: добавь AI_API_KEY в Render (бесплатный ключ Groq). Подробно: /ai")
+                await b._send(chat_id, "🤖 ИИ не подключён: добавь в Render GEMINI_API_KEY (ключ AQ.…) или AI_API_KEY (Groq). Подробно: /ai")
                 return
             await snapshot(b)
             await b._refresh_balances()

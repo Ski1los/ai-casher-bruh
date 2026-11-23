@@ -26,7 +26,7 @@ services:
       - key: AI_API_KEY
         sync: false
       # Gemini «смотрит» ролики трейдеров на YouTube (/mentors). Бесплатно: https://aistudio.google.com/apikey
-      # Необязательно: если AI_API_KEY уже от Gemini (начинается с AIza), этот ключ не нужен.
+      # Необязательно: если AI_API_KEY уже от Gemini (начинается с AQ. или AIza), этот ключ не нужен.
       - key: GEMINI_API_KEY
         sync: false
       # Торговля (необязательно): ключ биржи ТОЛЬКО со спотовой торговлей, БЕЗ права вывода.
