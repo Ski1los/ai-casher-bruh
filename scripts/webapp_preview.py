@@ -410,6 +410,41 @@ def build():
     mn.train._lesson("🏋️ Лучшая стратегия на демо — «Проверенные авторы»: 9 сделок, в плюс 7, в среднем +1.9% за сделку "
                      "(с поправкой на везение). Теперь сигналы — только по ней.", now - 9000)
 
+    # 🎥 стримы вживую: decu в эфире, итог прошлого эфира, привычки и «цена ошибок» по проверенным входам
+    lv = mn.live
+    lv.st["budget"].update(day=time.strftime("%Y-%m-%d", time.gmtime(now)), n=37)
+    lv.st["total"] = 212
+    lv.st["sessions"]["decu"] = {
+        "login": "decu", "name": "decu", "stream_id": "1", "title": "SOL trenches — 100 → 1000", "started": now - 5400,
+        "opened": now - 5300, "last_at": now - 120, "n": 17, "mode": "video", "why": "",
+        "obs": [{"at": now - 120, "summary": "Держит лонг GOAT в +12%, подтянул стоп в безубыток и объяснил чату, "
+                                                "где будет фиксировать половину.", "asset": "GOAT", "action": "move_stop",
+                 "position": {"side": "long"}}],
+        "actions": [{"at": now - 3900, "action": "enter_long", "asset": "WIF", "said": ""},
+                    {"at": now - 3000, "action": "exit_loss", "asset": "WIF", "said": ""},
+                    {"at": now - 1500, "action": "enter_long", "asset": "GOAT", "said": ""},
+                    {"at": now - 120, "action": "move_stop", "asset": "GOAT", "said": ""}],
+        "plus": {"stop_set": 2, "cut_loss": 1}, "miss": {"fomo_chase": 1}, "disc": [5, 6, 7, 7], "lessons": [],
+        "acted": {}, "counted": {}}
+    decu["live"] = {"sessions": 6, "obs": 118, "minutes": 1260, "entries": 21,
+                    "plus": {"stop_set": 9, "cut_loss": 6, "took_profit": 4}, "miss": {"fomo_chase": 7, "oversize": 4,
+                                                                                       "averaging_down": 3},
+                    "disc": [6, 5, 7, 6, 6, 4, 7]}
+    trencher = srcs["tw:trencher"]
+    trencher["live"] = {"sessions": 2, "obs": 31, "minutes": 380, "entries": 9, "plus": {"explained": 2},
+                        "miss": {"no_stop": 6, "overleverage": 4, "revenge": 2}, "disc": [3, 2, 4, 3]}
+    lv.st["history"].append({"login": "trencher", "name": "Trencher", "title": "", "at": now - 20000, "minutes": 190,
+                             "n": 31, "entries": 9, "exits": 7, "wins": 2, "losses": 5, "assets": ["BONK", "WIF"],
+                             "plus": {"explained": 2}, "miss": {"no_stop": 6, "revenge": 2}, "disc": 3.1,
+                             "lessons": ["После двух убытков подряд — пауза, а не сделка вдвое больше"]})
+    for i, (tags, r) in enumerate([(["no_stop"], -6.1), (["no_stop", "overleverage"], -9.4), (["no_stop"], -2.2),
+                                   (["no_stop", "fomo_chase"], -7.0), (["fomo_chase"], -3.3), (["fomo_chase"], 1.5),
+                                   (["fomo_chase"], -4.0), (["stop_set"], 3.1), (["stop_set"], -1.0),
+                                   (["stop_set", "explained"], 4.4), (["stop_set"], 2.2)]):
+        ms["calls"].append({"id": f"lv{i}", "source": decu["id"], "asset": "SOL", "mint": "", "key": f"lv{i}",
+                            "direction": "long", "at": now - 300000, "horizon_h": 24, "path": [r], "done": True,
+                            "ret": r, "price0": 150.0, "kind": "cex", "live": True, "tags": tags})
+
     b.opps._get_json = opps_json
     b.opps.news = opps_news
 

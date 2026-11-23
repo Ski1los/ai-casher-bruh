@@ -40,6 +40,7 @@ from .dex import fmt_usd
 from .solana import valid_address
 from .scout import Scout, history_text
 from .training import Training
+from .livewatch import LiveWatch
 
 log = logging.getLogger(__name__)
 
@@ -448,6 +449,7 @@ class TwitchChat:
         self.connected = False
         self.last_error: str | None = None
         self.messages = 0
+        self.last_call: dict[str, float] = {}  # канал → когда стример/модератор кинул адрес токена (🎥 смотреть сразу)
         self._ws = None
         self._want: set[str] = set()
 
@@ -469,7 +471,10 @@ class TwitchChat:
         self.messages += 1
         if not trusted_sender(msg):
             return
-        for addr in addresses_in(msg["text"]):
+        found = addresses_in(msg["text"])
+        if found:
+            self.last_call[msg["channel"]] = time.time()
+        for addr in found:
             try:
                 self.queue.put_nowait({"channel": msg["channel"], "mint": addr, "by": msg["display"],
                                        "text": msg["text"][:200], "at": time.time()})
@@ -538,6 +543,7 @@ class Mentors:
         self.train = Training(self)  # 🏋️ сам торгует выученным на демо (bot/training.py)
         self.scout = Scout(self)  # 🔭 сам ищет трейдеров и отсеивает фейки (bot/scout.py)
         self.pending: list[dict] = []  # сигналы тренировки, появившиеся при разборе ролика
+        self.live = LiveWatch(self)  # 🎥 смотрит эфиры Twitch: действия стримера, ошибки и плюсы (bot/livewatch.py)
 
     def take_pending(self) -> list[dict]:
         out, self.pending = self.pending, []
@@ -1066,6 +1072,7 @@ class Mentors:
             "tips_checked": [{"tip": t["text"][:120], "by": t["author"], "verdict": t["verdict"]}
                              for t in d["tips"][:4] if t["verdict"]],
             "training_demo": self.train.ai_context(),
+            "live_streams": self.live.ai_context(),
             "scout": {"how": "🔭 бот сам ищет трейдеров (Gemini+Google, поиск YouTube, Twitch Crypto), фейк-фильтр, "
                              "испытательный срок, убирает убыточных и рекламщиков",
                       "on_trial": [t["name"] for t in d["scout"]["trial"]], "kept": d["scout"]["kept"],
@@ -1112,6 +1119,10 @@ class Mentors:
             lines.append("\n<b>О чём говорят за неделю</b>: " + ", ".join(
                 f"{html.escape(c['asset'])} {'📈' * min(3, c['long'])}{'📉' * min(3, c['short'])}" for c in d["consensus"][:6]))
         lines.append(f"\nПрогнозов на проверке: {d['calls_open']}, проверено: {d['calls_done']}.")
+        lv = self.live.st
+        on_air = len(lv["sessions"])
+        lines.append(f"🎥 Стримы вживую: {'смотрю действия стримеров' if lv['on'] else 'выключено'}"
+                     + (f" · сейчас в эфире {on_air}" if on_air else "") + " — кнопка «🎥 Стримы вживую»")
         tl = self.train.short_line()
         lines.append(tl or "🏋️ Тренировка: идеи трейдеров бот сам торгует на демо — /train")
         sc = d["scout"]
