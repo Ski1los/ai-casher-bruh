@@ -29,11 +29,12 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, trading_ui, updater
+from . import autonomy, copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, trading_ui, updater
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
 from .mentors import Mentors
 from .profit import ProfitCenter
+from .autonomy import Autonomy
 from .solkey import looks_like_secret
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
@@ -152,8 +153,8 @@ HELP_TEXT = """\
 Могу и торговать: кнопками, командами, через ИИ или автоматически (нужен API-ключ биржи, /keys).
 
 <b>💡 Заработок с маленькой суммы</b>
+/autonomy — ♾ <b>полный автомат</b>: всё работает само, «Результат» раз в 6 ч
 /profit — 💰 <b>профит</b>: что реально зарабатывает, план денег
-/autopilot — 🤖 <b>бот торгует сам</b>: одна кнопка, дальше без тебя
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
 /copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 мемкоины (🧪 демо)
@@ -165,8 +166,7 @@ HELP_TEXT = """\
 /auto_off — выключить автосигналы
 
 <b>Демо-счета</b> (виртуальные деньги, реальные стаканы и комиссии)
-/demo_start — запустить демо на $5, $50 и $500 по обеим стратегиям
-/demo_start 5 — только на $5
+/demo_start — демо на $5, $50 и $500 (<code>/demo_start 5</code> — только $5)
 /demo — сводка по всем счетам
 /demo 5 — подробно по счетам на $5: сделки и почему связки отклонены
 /demo_history — последние сделки
@@ -519,6 +519,12 @@ class ArbitrageBot:
         # 💰 Профит-центр: результаты всех способов по фактам, план денег, Страж прибыли (bot/profit.py);
         # состояние — в copy.st["profit"]
         self.profit = ProfitCenter(self)
+        # ♾ Полный автомат: держит обучение включённым, сторож циклов, «Результат», деньги — только с разрешения
+        # (bot/autonomy.py); состояние — в copy.st["autonomy"]
+        self.autonomy = Autonomy(self)
+        self.trader.on_panic = self.autonomy.on_panic
+        self._loops: dict[str, tuple] = {}  # имя → (фабрика корутины, задача): сторож перезапускает упавшие
+        self._beats: dict[str, float] = {}  # имя цикла → когда он последний раз отметился (для поиска зависших)
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.webapp = WebApp(self, token)  # Telegram Mini App: /app на том же сервере, что и /health
@@ -1007,6 +1013,7 @@ class ArbitrageBot:
             profit_line = ""
         if profit_line:
             parts.append(profit_line)
+        parts.append(self.autonomy.summary_line())
         parts.append("Комиссии, узкие места и рекомендации: /analysis" + (" · мнение ИИ: /ai" if self.ai.configured else ""))
         return "\n\n".join(parts)
 
@@ -1441,6 +1448,7 @@ class ArbitrageBot:
         meme_ui.register(self)
         mentors_ui.register(self)
         profit_ui.register(self)
+        autonomy.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1602,6 +1610,8 @@ class ArbitrageBot:
     async def _auto_loop(self) -> None:
         await asyncio.sleep(3)
         while True:
+            self._beats["scan"] = time.time()
+            self._guard_autonomy()
             if time.time() - self._last_cleanup > CLEANUP_EVERY_SEC:
                 try:
                     r = self.cleanup()
@@ -1618,6 +1628,19 @@ class ArbitrageBot:
                     log.exception("Ошибка в автосканировании")
             await asyncio.sleep(self.settings.scan_interval_sec)
 
+    def _spawn(self, name: str, factory) -> asyncio.Task:
+        """Запускает бесконечный цикл и запоминает, как его перезапустить (сторож ♾ автомата)."""
+        task = asyncio.create_task(factory())
+        self._loops[name] = (factory, task)
+        return task
+
+    def _guard_autonomy(self) -> None:
+        """Сторожа тоже сторожат: если цикл ♾ автомата умер — сканер поднимает его заново."""
+        item = self._loops.get("autonomy")
+        if item and item[1].done():
+            log.warning("Цикл полного автомата остановился — перезапускаю")
+            self._spawn("autonomy", item[0])
+
     async def _warn_duplicate(self) -> None:
         if not self.duplicate_running() or self.owner_id is None:
             return
@@ -1630,6 +1653,7 @@ class ArbitrageBot:
         """Режим $5: каждые 30 секунд следит за позицией или ищет вход."""
         await asyncio.sleep(10)
         while True:
+            self._beats["scalp"] = time.time()
             try:
                 await self._warn_duplicate()
                 await self._scalp_tick()
@@ -1644,8 +1668,8 @@ class ArbitrageBot:
             events = await self.scalper.step()
             for text in events:
                 await self._send(self.owner_id, text)
-        elif self.owner_id is not None and self.trader.working:
-            await self.scalper.learn()
+        elif self.owner_id is not None and (self.trader.working or self.autonomy.on):
+            await self.scalper.learn(public=not self.trader.working)
         if events:
             self.save_trading()
             await self._backup_now()
@@ -1809,7 +1833,7 @@ class ArbitrageBot:
         if port:  # запущены в облаке: сразу открываем порт, чтобы хостинг видел, что сервис жив
             runner = await start_health_server(port, self.webapp.setup)
             if public_url():
-                tasks.append(asyncio.create_task(self_ping_loop(public_url())))
+                tasks.append(self._spawn("ping", lambda: self_ping_loop(public_url())))
 
         try:
             me = await self._get_me_with_retry()
@@ -1836,6 +1860,7 @@ class ArbitrageBot:
                     BotCommand(command="alerts", description="Мои алерты"),
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
                     BotCommand(command="setup", description="🚀 Готовность к торговле: что осталось"),
+                    BotCommand(command="autonomy", description="♾ Полный автомат: бот работает сам"),
                     BotCommand(command="profit", description="💰 Профит: что реально зарабатывает, план денег"),
                     BotCommand(command="autopilot", description="🤖 Автопилот: бот торгует сам"),
                     BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
@@ -1871,16 +1896,17 @@ class ArbitrageBot:
             tasks.append(asyncio.create_task(self._hello(hello)))
             if self.trader.creds:
                 tasks.append(asyncio.create_task(self._check_keys_on_start()))
-                tasks.append(asyncio.create_task(self._keys_watch_loop()))
-            tasks.append(asyncio.create_task(extras_ui.alerts_loop(self)))
-            tasks.append(asyncio.create_task(market_ui.radar_loop(self)))
-            tasks.append(asyncio.create_task(opps_ui.opps_loop(self)))
-            tasks.append(asyncio.create_task(copy_ui.copy_loop(self)))
-            tasks.append(asyncio.create_task(mentors_ui.mentors_loop(self)))
-            tasks.append(asyncio.create_task(profit_ui.profit_loop(self)))
-            tasks.append(asyncio.create_task(self._auto_loop()))
-            tasks.append(asyncio.create_task(self._scalp_loop()))
-            tasks.append(asyncio.create_task(self._equity_loop()))
+                tasks.append(self._spawn("keys", self._keys_watch_loop))
+            tasks.append(self._spawn("alerts", lambda: extras_ui.alerts_loop(self)))
+            tasks.append(self._spawn("radar", lambda: market_ui.radar_loop(self)))
+            tasks.append(self._spawn("opps", lambda: opps_ui.opps_loop(self)))
+            tasks.append(self._spawn("copy", lambda: copy_ui.copy_loop(self)))
+            tasks.append(self._spawn("mentors", lambda: mentors_ui.mentors_loop(self)))
+            tasks.append(self._spawn("profit", lambda: profit_ui.profit_loop(self)))
+            tasks.append(self._spawn("autonomy", lambda: autonomy.autonomy_loop(self)))
+            tasks.append(self._spawn("scan", self._auto_loop))
+            tasks.append(self._spawn("scalp", self._scalp_loop))
+            tasks.append(self._spawn("equity", self._equity_loop))
             if self.app_url():
                 try:
                     await self.bot.set_chat_menu_button(
@@ -1889,14 +1915,14 @@ class ArbitrageBot:
                     log.info("Mini App: %s", self.app_url())
                 except Exception as e:
                     log.warning("Не удалось поставить кнопку приложения: %s", e)
-            tasks.append(asyncio.create_task(self._daily_report_loop()))
+            tasks.append(self._spawn("report", self._daily_report_loop))
             if cloud_port() or os.getenv("RENDER"):
-                tasks.append(asyncio.create_task(self._update_loop()))
+                tasks.append(self._spawn("update", self._update_loop))
             log.info("Память после запуска: %s · заморожено объектов старта: %d", memory_line(), freeze_startup())
             await self.dp.start_polling(self.bot)
         finally:
             aiogram_log.removeHandler(self.conflicts)
-            for t in tasks:
+            for t in tasks + [item[1] for item in self._loops.values()]:
                 t.cancel()
             if runner:
                 await runner.cleanup()

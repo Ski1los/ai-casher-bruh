@@ -211,7 +211,8 @@ def collect(b, now: float | None = None) -> list[dict]:
 
     def arb():
         rets, first = [], None
-        for acc in b.demo.accounts:
+        accounts = b.demo.accounts
+        for acc in (accounts.values() if isinstance(accounts, dict) else accounts):
             for t in acc.trades:
                 if t.closed_at and t.cost_usd:
                     rets.append(t.profit_usd / t.cost_usd * 100)

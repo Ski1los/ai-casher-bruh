@@ -548,10 +548,15 @@ class Scalper:
             out += await self._step_one(name, now)
         return out
 
-    async def learn(self) -> None:
+    def public_exchanges(self) -> list[str]:
+        """Биржи сканера без ключей (Bybit первым): лаборатории хватает публичных свечей."""
+        return sorted(self.trader.scanner.exchanges, key=lambda n: (n != "bybit", n))
+
+    async def learn(self, public: bool = False) -> None:
         """Автопилот выключен, но ключ есть: лаборатория всё равно учится (без денег и без ордеров),
-        чтобы к включению уже было видно, какие стратегии работают вживую."""
-        for name in self.exchanges():
+        чтобы к включению уже было видно, какие стратегии работают вживую. public=True — ключа нет
+        (♾ полный автомат): учимся на публичных свечах, чтобы опыт копился ещё до первого депозита."""
+        for name in self.exchanges() or (self.public_exchanges() if public else []):
             try:
                 await self.rank(name)
                 await self.lab_step(name)

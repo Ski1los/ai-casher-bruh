@@ -1013,6 +1013,12 @@ class Trader:
 
     async def panic(self) -> str:
         """Стоп-кран: выключить автоторговлю и реальный режим, отменить все открытые ордера."""
+        hook = getattr(self, "on_panic", None)
+        if hook is not None:  # ♾ полный автомат: снять разрешение на деньги, сам ничего не включать
+            try:
+                hook()
+            except Exception:
+                log.exception("on_panic")
         self.state.auto = False
         scalp_pos = bool(self.state.scalp.get("positions") or self.state.scalp.get("pos"))
         if self.state.scalp:
