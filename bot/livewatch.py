@@ -38,7 +38,7 @@ from typing import Any
 
 import aiohttp
 
-from .ai import THINK_ROOM
+from .ai import BUSY_RETRY_SEC, BUSY_TEXT, THINK_ROOM, BusyModels, is_busy, short_api_error, tidy_error
 
 log = logging.getLogger(__name__)
 
@@ -615,7 +615,10 @@ class LiveGemini:
         self.key = key
         self._session = session_factory
         self.model = model or (os.environ.get("GEMINI_LIVE_MODEL") or "").strip() or None
+        self.pinned = self.model  # модель из настроек: после перегрузки возвращаемся к ней
         self.dead: set[str] = set()
+        self.busy = BusyModels()  # перегруженные модели (503 «high demand») — 10 минут берём другую
+        self._stopgap = False
         self.disabled_until = 0.0
         self.last_error: str | None = None
         self.fps = LIVE_FPS if LIVE_FPS > 1 else None          # None — частота кадров по умолчанию (1 в секунду)
@@ -646,7 +649,12 @@ class LiveGemini:
                          b'}]}],"generationConfig":', json.dumps(cfg).encode(), b"}"])
 
     async def _pick_model(self) -> str:
-        if self.model and self.model not in self.dead:
+        busy = self.busy.now()
+        skip = self.dead | busy
+        if self.pinned and self.pinned not in skip:
+            self.model, self._stopgap = self.pinned, False
+            return self.model
+        if self.model and self.model not in skip and (busy or not self._stopgap):
             return self.model
         from . import mentors
         names: list[str] = []
@@ -660,12 +668,17 @@ class LiveGemini:
                              if "generateContent" in (m.get("supportedGenerationMethods") or [])]
         except Exception as e:
             log.info("Gemini (эфиры): список моделей: %s", e)
-        model = pick_live_model(names, self.dead) or next(
-            (m for m in ("gemini-flash-lite-latest", "gemini-2.5-flash-lite") if m not in self.dead), None) \
-            or mentors.pick_video_model(names, self.dead)
+        # сначала Flash-Lite (большой бесплатный лимит); все заняты — обычный Flash, пока Lite перегружен
+        model = pick_live_model(names, skip) or next(
+            (m for m in ("gemini-flash-lite-latest", "gemini-2.5-flash-lite") if m not in skip), None) \
+            or mentors.pick_video_model(names, skip) or next(
+            (m for m in ("gemini-flash-latest", "gemini-2.5-flash") if m not in skip), None)
+        if not model and self.busy.now():
+            raise LiveError("Gemini: " + BUSY_TEXT.format(status=503) + " — повторю сам через ~1,5 мин")
         if not model:
             raise LiveError("Gemini: нет подходящей модели. Задай GEMINI_LIVE_MODEL")
         self.model = model
+        self._stopgap = bool(busy)  # временная замена: как только перегрузка пройдёт — вернёмся к Flash-Lite
         return model
 
     async def analyze(self, data: bytes, mime: str, prompt: str) -> dict:
@@ -676,7 +689,8 @@ class LiveGemini:
         body = self._body(b64, mime, prompt)
         del b64
         http = await self._session()
-        for _ in range(4):
+        busy = 0
+        for _ in range(6):
             model = await self._pick_model()
             async with http.post(f"{mentors.GEMINI_BASE}/models/{model}:generateContent", data=body,
                                  headers={"x-goog-api-key": self.key, "Content-Type": "application/json"},
@@ -694,6 +708,16 @@ class LiveGemini:
                 except mentors.MentorError as e:
                     raise LiveError(str(e)) from None
             low = text.lower()
+            if is_busy(r.status, text):
+                # у Google наплыв: 1-й раз — повтор через 3 с, дальше — другая модель (эта отдыхает 10 минут)
+                busy += 1
+                log.info("Gemini (эфиры): %s перегружена (%s)", model, r.status)
+                if busy == 1:
+                    await asyncio.sleep(BUSY_RETRY_SEC)
+                else:
+                    self.busy.mark(model)
+                    self.model = None
+                continue
             if r.status == 429:
                 self.disabled_until = time.time() + 10 * 60
                 raise LiveError("Gemini: лимит бесплатного тарифа, продолжу через 10 минут")
@@ -709,7 +733,9 @@ class LiveGemini:
                 self.dead.add(model)
                 self.model = None
                 continue
-            raise LiveError(f"Gemini: ошибка {r.status}: {text[:160]}")
+            raise LiveError(f"Gemini: ошибка {r.status}: {short_api_error(text)}")
+        if busy:
+            raise LiveError("Gemini: " + BUSY_TEXT.format(status=503) + " — повторю сам через ~1,5 мин")
         raise LiveError("Gemini: не удалось разобрать эфир")
 
 
@@ -1225,7 +1251,7 @@ class LiveWatch:
                 "cards": [{**c, "miss": [[MISTAKE_TAGS[k], v] for k, v in c["miss"]],
                            "plus": [[PLUS_TAGS[k], v] for k, v in c["plus"]]} for c in cards[:8]],
                 "history": list(reversed(st["history"][-5:])), "lessons": self.lessons(),
-                "error": st["last_error"], "focus": st["focus"], "details": self.recent_details(),
+                "error": tidy_error(st["last_error"]), "focus": st["focus"], "details": self.recent_details(),
                 "detail_value": self.detail_value(), "mirror": self.mirror.status_dict(),
                 "fps": getattr(self.ai, "fps", None), "res": getattr(self.ai, "res", None)}
 
@@ -1334,7 +1360,7 @@ class LiveWatch:
             lines.append(f"\nПоследний итог: <b>{html.escape(h['name'])}</b>, {_dur(h['minutes'] * 60)}, входов "
                          f"{h['entries']}" + (f", дисциплина {h['disc']:.1f}/10" if h["disc"] is not None else ""))
         if st["last_error"]:
-            lines.append(f"⚠️ {html.escape(st['last_error'])}")
+            lines.append(f"⚠️ {html.escape(tidy_error(st['last_error']) or '')}")
         lines.append("\nДобавить стримера: <code>/mentors add twitch.tv/ник</code> · смотреть сразу: "
                      "<code>/stream ник</code>")
         return "\n".join(lines)

@@ -45,7 +45,7 @@ import urllib.parse
 
 import aiohttp
 
-from .ai import THINK_ROOM
+from .ai import BUSY_TEXT, THINK_ROOM, is_busy, short_api_error, tidy_error
 
 log = logging.getLogger(__name__)
 
@@ -530,8 +530,11 @@ class Scout:
         """Текстовый запрос к Gemini → текст ответа. search=True — с поиском Google (если модель не умеет — без)."""
         g = self.m.gemini
         http = await self.m._session()
-        model = await g._pick_model()
-        for tools in (([{"google_search": {}}], None) if search else (None,)):
+        busy = 0
+        tries = [[{"google_search": {}}], None] if search else [None]
+        while tries:
+            tools = tries[0]
+            model = await g._pick_model()
             body = {"contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens + THINK_ROOM}}
             if tools:
@@ -544,11 +547,18 @@ class Scout:
                     data = json.loads(text)
                     parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                if is_busy(r.status, text) and busy < 4 and hasattr(g, "on_busy"):
+                    busy += 1  # Google перегружен: повтор, потом другая модель
+                    await g.on_busy(model, r.status, busy)
+                    continue
                 if r.status == 400 and tools:  # модель не умеет поиск Google — спросим без него
+                    tries.pop(0)
                     continue
                 if r.status == 429:
                     g.disabled_until = time.time() + 15 * 60
-                raise RuntimeError(f"Gemini {r.status}: {text[:120]}")
+                if is_busy(r.status, text):
+                    raise RuntimeError("Gemini: " + BUSY_TEXT.format(status=r.status) + " — поищу позже")
+                raise RuntimeError(f"Gemini {r.status}: {short_api_error(text, 120)}")
         return ""
 
     def _gemini_ready(self) -> bool:
@@ -952,7 +962,7 @@ class Scout:
         return {"on": st["on"], "last": st["last"], "next": st["last"] + DISCOVER_EVERY if st["last"] else None,
                 "trial": trial, "kept": kept, "rejected": rejected, "rejected_total": len(st["rejected"]),
                 "found": st["found"], "dropped": st["dropped"],
-                "stars": st["kept"], "log": list(reversed(st["log"][-6:])), "error": st["last_error"],
+                "stars": st["kept"], "log": list(reversed(st["log"][-6:])), "error": tidy_error(st["last_error"]),
                 "max_trial": dict(MAX_TRIAL), "gemini": self.m.gemini.configured,
                 "leaderboard": self.leaderboard()[:8], "learned": self.learned(), "history_on": bool(self.m.candles_of)}
 

@@ -76,6 +76,69 @@ REQUEST_TIMEOUT = 90
 # Лишние токены не тратятся: платим (и ждём) только за то, что модель реально сгенерировала.
 THINK_ROOM = 6000
 
+# --- Перегрузка серверов (503 «high demand», 500/502/504) ------------------------------------------
+# Это временно и не наша ошибка: повторяем через несколько секунд, потом берём другую модель Gemini,
+# а занятую не трогаем 10 минут. В чат — одна понятная строка, а не сырой JSON сервера.
+BUSY_STATUSES = (500, 502, 503, 504)
+BUSY_WORDS = ("overloaded", "high demand", "unavailable", "try again later", "resource has been exhausted")
+BUSY_RETRY_SEC = 3.0
+BUSY_MODEL_SEC = 10 * 60
+BUSY_TEXT = "серверы Google сейчас перегружены (ошибка {status}, это временно, ключ в порядке)"
+BUSY_ASK = " — спроси ещё раз через минуту"
+
+
+def is_busy(status: int, text: str = "") -> bool:
+    if status in BUSY_STATUSES:
+        return True
+    return status == 429 and any(w in (text or "").lower() for w in ("overloaded", "high demand"))
+
+
+def short_api_error(text: str, limit: int = 140) -> str:
+    """Из ответа сервера — короткая строка: message из JSON {"error": {...}}, без скобок и переносов."""
+    msg = ""
+    try:
+        data = json.loads(text)
+        err = data.get("error") if isinstance(data, dict) else None
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            err = data[0].get("error")
+        if isinstance(err, dict):
+            msg = str(err.get("message") or err.get("status") or "")
+        elif isinstance(err, str):
+            msg = err
+        elif isinstance(data, dict):
+            msg = str(data.get("message") or "")
+    except (ValueError, TypeError, AttributeError):
+        pass
+    msg = " ".join((msg or text or "").split())
+    return msg[:limit].rstrip() + ("…" if len(msg) > limit else "")
+
+
+def tidy_error(text: str | None) -> str | None:
+    """Для показа: старые ошибки с сырым JSON сервера → одна строка («кто: Gemini: ошибка 503: перегружен…»)."""
+    if not text or "{" not in text:
+        return text
+    head = " ".join(text.split("{", 1)[0].split()).rstrip(" :")
+    m = re.search(r'"message"\s*:\s*"([^"]{3,})', text)
+    code = re.search(r"\b(5\d\d|4\d\d)\b", text)
+    if code and is_busy(int(code.group(1)), text):
+        return f"{head.split(': ошибка')[0]}: " + BUSY_TEXT.format(status=code.group(1))
+    return f"{head}: {' '.join(m.group(1).split())[:140]}" if m else head
+
+
+class BusyModels:
+    """Какие модели сейчас перегружены: {модель: до какого времени не трогать}."""
+
+    def __init__(self) -> None:
+        self.until: dict[str, float] = {}
+
+    def mark(self, model: str, now: float | None = None) -> None:
+        self.until[model] = (time.time() if now is None else now) + BUSY_MODEL_SEC
+
+    def now(self, now: float | None = None) -> set[str]:
+        t = time.time() if now is None else now
+        self.until = {m: u for m, u in self.until.items() if u > t}
+        return set(self.until)
+
 
 class AIError(Exception):
     """Понятная пользователю ошибка ИИ."""
@@ -119,6 +182,12 @@ class Endpoint:
     model: str | None = None  # None = выбрать автоматически
     disabled_until: float = 0.0  # после 429/ошибки не дёргаем какое-то время
     dead_models: set = field(default_factory=set)
+    busy: BusyModels = field(default_factory=BusyModels)  # перегруженные модели (503) — временно обходим
+    stopgap: bool = False  # модель выбрана на время перегрузки: потом вернёмся к лучшей
+    pinned: str | None = None  # модель из AI_MODEL: после перегрузки возвращаемся к ней
+
+    def __post_init__(self) -> None:
+        self.pinned = self.pinned or self.model
 
     @property
     def title(self) -> str:
@@ -223,7 +292,12 @@ class LLMClient:
         return h
 
     async def _model_for(self, ep: Endpoint) -> str:
-        if ep.model and ep.model not in ep.dead_models:
+        busy = ep.busy.now()
+        skip = ep.dead_models | busy  # убранные и временно перегруженные (503) модели
+        if ep.pinned and ep.pinned not in skip:
+            ep.model, ep.stopgap = ep.pinned, False
+            return ep.model
+        if ep.model and ep.model not in skip and (busy or not ep.stopgap):
             return ep.model
         ids: list[str] = []
         try:
@@ -243,13 +317,17 @@ class LLMClient:
             raise
         except Exception as e:  # сеть: попробуем модель по умолчанию
             log.warning("ИИ: не смог получить список моделей %s: %s", ep.title, e)
-        model = pick_model(ep.provider, ids, ep.dead_models) if ids else None
+        model = pick_model(ep.provider, ids, skip) if ids else None
         if model is None:
-            fallback = [m for m in PROVIDERS.get(ep.provider, {}).get("fallback", []) if m not in ep.dead_models]
+            fallback = [m for m in PROVIDERS.get(ep.provider, {}).get("fallback", []) if m not in skip]
+            if not fallback and ep.busy.now():
+                ep.disabled_until = time.time() + 60  # все модели заняты: пусть ответит другой ИИ, если он есть
+                raise AIError(f"{ep.title}: " + BUSY_TEXT.format(status=503) + BUSY_ASK)
             if not fallback:
                 raise AIError(f"{ep.title}: не нашёл подходящей модели. Задай AI_MODEL вручную.")
             model = fallback[0]
         ep.model = model
+        ep.stopgap = bool(busy)
         log.info("ИИ: %s, модель %s", ep.title, model)
         return model
 
@@ -284,9 +362,19 @@ class LLMClient:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         return body
 
+    async def _busy(self, ep: Endpoint, model: str, status: int, tries: int) -> None:
+        """Сервер перегружен: первый раз — ждём пару секунд и повторяем, дальше — другая модель на 10 минут."""
+        log.info("ИИ: %s, модель %s перегружена (%s)", ep.title, model, status)
+        if tries == 1:
+            await asyncio.sleep(BUSY_RETRY_SEC)
+            return
+        ep.busy.mark(model)
+        ep.model = None
+
     async def _call_gemini(self, ep: Endpoint, messages: list[dict], max_tokens: int) -> str:
         http = await self._http()
-        for attempt in range(4):
+        busy = 0
+        for attempt in range(6):
             model = await self._model_for(ep)
             body = self._gemini_body(messages, max_tokens)
             async with http.post(f"{ep.base}/models/{model}:generateContent", json=body, headers=self._headers(ep)) as r:
@@ -316,11 +404,18 @@ class LLMClient:
                         continue
                     ep.disabled_until = time.time() + max(wait, 30)
                     raise AIError(f"{ep.title}: лимит бесплатного тарифа, подожди ~{max(wait, 30):.0f} с")
+                if is_busy(r.status, text):
+                    busy += 1
+                    await self._busy(ep, model, r.status, busy)
+                    continue
                 if r.status in (404, 400) and "model" in low:
                     ep.dead_models.add(model)
                     ep.model = None
                     continue
-                raise AIError(f"{ep.title}: ошибка {r.status}: {text[:160]}")
+                raise AIError(f"{ep.title}: ошибка {r.status}: {short_api_error(text)}")
+        if busy:
+            ep.disabled_until = time.time() + 60
+            raise AIError(f"{ep.title}: " + BUSY_TEXT.format(status=503) + BUSY_ASK)
         raise AIError(f"{ep.title}: не удалось получить ответ")
 
     async def _call(self, ep: Endpoint, messages: list[dict], max_tokens: int) -> str:
@@ -328,7 +423,8 @@ class LLMClient:
             return await self._call_gemini(ep, messages, max_tokens)
         http = await self._http()
         extras = True
-        for attempt in range(4):
+        busy = 0
+        for attempt in range(6):
             model = await self._model_for(ep)
             body = self._payload(ep, model, messages, max_tokens, extras)
             async with http.post(f"{ep.base}/chat/completions", json=body, headers=self._headers(ep)) as r:
@@ -349,6 +445,10 @@ class LLMClient:
                 low = text.lower()
                 if r.status in (401, 403):
                     raise AIError(f"{ep.title}: ключ не подходит (ошибка {r.status}). Проверь ключ.")
+                if is_busy(r.status, text):
+                    busy += 1
+                    await self._busy(ep, model, r.status, busy)
+                    continue
                 if r.status == 429:
                     wait = _retry_after(r.headers, text)
                     if wait <= 20 and attempt == 0:
@@ -363,9 +463,12 @@ class LLMClient:
                     ep.dead_models.add(model)  # модель убрали или она недоступна: выбираем другую
                     ep.model = None
                     continue
-                if r.status == 413 or "context" in low and "length" in low:
+                if r.status == 413 or ("context" in low and "length" in low):
                     raise AIError("слишком длинный запрос для модели")
-                raise AIError(f"{ep.title}: ошибка {r.status}: {text[:160]}")
+                raise AIError(f"{ep.title}: ошибка {r.status}: {short_api_error(text)}")
+        if busy:
+            ep.disabled_until = time.time() + 60
+            raise AIError(f"{ep.title}: " + BUSY_TEXT.format(status=503) + BUSY_ASK)
         raise AIError(f"{ep.title}: не удалось получить ответ")
 
     async def chat(self, messages: list[dict], max_tokens: int = 1200, background: bool = False) -> str:
