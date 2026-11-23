@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -27,7 +28,7 @@ log = logging.getLogger(__name__)
 BACKUP_FILENAME = "bot_state.json"
 BACKUP_CAPTION = "💾 Резервная копия бота (демо-счёт и настройки). Не открепляй это сообщение."
 SELF_PING_SEC = 10 * 60
-BOT_VERSION = "30"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
+BOT_VERSION = "31"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
 
 
 def version_text() -> str:
@@ -194,6 +195,7 @@ class TelegramBackup:
         self.chat_id = chat_id
         self.message_id: int | None = None
         self._lock = asyncio.Lock()
+        self._last_digest: bytes | None = None  # не загружаем тот же файл повторно
 
     async def restore(self) -> dict | None:
         try:
@@ -214,7 +216,10 @@ class TelegramBackup:
 
     async def save(self, state: dict) -> None:
         async with self._lock:
-            data = json.dumps(state, ensure_ascii=False).encode("utf-8")
+            data = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            digest = hashlib.blake2b(data, digest_size=16).digest()
+            if digest == self._last_digest and self.message_id:
+                return  # ничего не изменилось — не тратим запрос к Telegram
             file = BufferedInputFile(data, filename=BACKUP_FILENAME)
             if self.message_id:
                 try:
@@ -223,6 +228,7 @@ class TelegramBackup:
                         chat_id=self.chat_id,
                         message_id=self.message_id,
                     )
+                    self._last_digest = digest
                     return
                 except Exception as e:
                     log.info("Бэкап: не удалось обновить старое сообщение (%s), создаю новое", e)
@@ -234,6 +240,7 @@ class TelegramBackup:
                     disable_notification=True,
                 )
                 self.message_id = msg.message_id
+                self._last_digest = digest
                 await self.bot.pin_chat_message(self.chat_id, msg.message_id, disable_notification=True)
             except Exception as e:
                 log.warning("Бэкап: не удалось сохранить: %s", e)

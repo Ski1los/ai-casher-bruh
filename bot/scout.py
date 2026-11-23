@@ -760,7 +760,7 @@ class Scout:
                 score += max(-1.0, min(2.0, h["shrunk"] / 2))
             passed.append((score, c, cid, name, v, h, videos))
         added = []
-        for score, c, cid, name, v, h, videos in sorted(passed, key=lambda x: -x[0])[:want]:
+        for _score, c, cid, name, v, h, videos in sorted(passed, key=lambda x: -x[0])[:want]:
             src = self.m._add("youtube", cid, name, note=f"🔭 {c.get('why') or c['via']}"[:120], user=False)
             self._mark(src, c["via"], v["risk"], now, "youtube", query=c.get("query"))
             if h is not None:
@@ -820,7 +820,7 @@ class Scout:
             if not why:
                 continue
             soft = why.startswith(("в ", "за ", "испытание закончилось"))  # нет прогнозов / нет плюса — не обман
-            src["removed"] = True
+            src["removed"], src["removed_at"] = True, now
             self._reject(src["id"], src["name"], why, now, (SOFT_REJECT_DAYS + 30) if soft else None)
             self.st["dropped"] += 1
             if src.get("trial_until"):
@@ -830,7 +830,21 @@ class Scout:
             self._log(re.sub(r"<[^>]+>", "", text), now)
             if self.m.st["notify"]:
                 events.append({"text": text, "buttons": []})
+        self.prune(now)
         return events
+
+    def prune(self, now: float) -> int:
+        """Забыть убранных разведчиком через 14 дней (их имя и причина остаются в «отсеянных»): иначе за год в
+        памяти и бэкапе копились бы тысячи записей. Пока по источнику есть открытые прогнозы — не трогаем."""
+        sources = self.m.st["sources"]
+        busy = {c["source"] for c in self.m.st["calls"] if not c["done"]}
+        old = [sid for sid, s in sources.items() if s.get("removed") and s.get("auto") and sid not in busy
+               and now - (s.get("removed_at") or 0) >= 14 * 86400]
+        for sid in old:
+            del sources[sid]
+        if old:
+            self.m._changed()
+        return len(old)
 
     def _verdict(self, src: dict, now: float) -> str | None:
         """'star' — оставить; строка — причина убрать; None — ещё рано судить."""

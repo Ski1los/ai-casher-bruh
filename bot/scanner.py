@@ -54,6 +54,27 @@ def make_exchange(name: str):
     return ex
 
 
+def slim_markets(ex) -> int:
+    """Убрать сырые ответы биржи (поле info) из пар и монет: боту они не нужны, а это ~1–2 КБ на каждую
+    из ~1700 спотовых пар Bybit и BingX. ccxt берёт market["info"] только для фьючерсов (интервал funding).
+    Возвращает, сколько записей облегчили."""
+    n = 0
+    for m in (getattr(ex, "markets", None) or {}).values():
+        if isinstance(m, dict) and m.get("info"):
+            m["info"] = {}
+            n += 1
+    for c in (getattr(ex, "currencies", None) or {}).values():
+        if not isinstance(c, dict):
+            continue
+        if c.get("info"):
+            c["info"] = {}
+            n += 1
+        for net in (c.get("networks") or {}).values():
+            if isinstance(net, dict) and net.get("info"):
+                net["info"] = {}
+    return n
+
+
 DEPTH_CHECK_TOP = 10  # для скольких лучших вариантов проверять стакан
 TRI_DEPTH_CHECK_TOP = 5  # то же для треугольников (по 3 стакана на каждый)
 
@@ -225,6 +246,7 @@ class Scanner:
         loaded_at = self._markets_loaded_at.get(name, 0)
         if time.time() - loaded_at > MARKETS_RELOAD_SEC:
             await ex.load_markets(reload=loaded_at > 0)
+            slim_markets(ex)
             self._markets_loaded_at[name] = time.time()
             self.apply_fee_overrides(name)
 

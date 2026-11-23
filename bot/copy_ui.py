@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
 
 log = logging.getLogger(__name__)
+_TASKS: set[asyncio.Task] = set()  # держим ссылки на фоновые задачи, иначе сборщик мусора может их оборвать
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.get_running_loop().create_task(coro)
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
+    return task
 
 COPY_HELP = """\
 🐋 <b>Копитрейдинг: как пользоваться</b>
@@ -161,7 +169,7 @@ def register(b: ArbitrageBot) -> None:
             b.save_copy()
             await b._send(message.chat.id, b.copy.text(), keyboard(b))
             if cmd == "on" and not b.copy.st["wallets"]:
-                asyncio.create_task(find_now(b, message.chat.id))
+                _spawn(find_now(b, message.chat.id))
         elif cmd == "find":
             await find_now(b, message.chat.id)
         else:
@@ -189,7 +197,7 @@ def register(b: ArbitrageBot) -> None:
             await b._send(chat_id, ("🟢 Копитрейдинг включён. Проверяю кошельки каждые 1,5 минуты." if action == "on"
                                     else "⏸ Копитрейдинг выключен.") + "\n\n" + b.copy.text(), keyboard(b))
             if action == "on" and not b.copy.st["wallets"]:
-                asyncio.create_task(find_now(b, chat_id))
+                _spawn(find_now(b, chat_id))
         elif action == "sig":
             b.copy.st["signals"] = not b.copy.st["signals"]
             b.save_copy()

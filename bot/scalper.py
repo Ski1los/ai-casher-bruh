@@ -1045,7 +1045,7 @@ class Scalper:
         quote = t.settings.quote
         tried = self.st["convert_tried"]
         out = []
-        for coin, free, usd in self._idle_rows(name):
+        for coin, free, _usd in self._idle_rows(name):
             key = f"{name}:{coin}"
             if time.time() - float(tried.get(key) or 0) < IDLE_RETRY_SEC:
                 continue
