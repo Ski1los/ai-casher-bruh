@@ -1551,16 +1551,25 @@ async function mentorsAction(body, okText) {
 function scoutBlock(m) {
   const s = m.scout;
   if (!s) return "";
-  const trial = (s.trial || []).map((t) => `<div class="tiny" style="margin-top:4px;white-space:normal">🔭 ${t.kind === "youtube" ? "▶️" : "📺"} <b>${esc(t.name)}</b> · ${t.checked ? `${t.checked} пров., <span class="${cls(t.avg)}">${pct(t.avg, 1)}</span>` : t.kind === "youtube" ? `роликов ${t.videos}, прогнозов ${t.calls}` : `токенов ${t.calls}`} <span class="muted">· ${esc(t.via || "")}</span></div>`).join("");
+  const trial = (s.trial || []).map((t) => `<div class="tiny" style="margin-top:4px;white-space:normal">🔭 ${t.kind === "youtube" ? "▶️" : "📺"} <b>${esc(t.name)}</b> · ${t.checked ? `${t.checked} пров., <span class="${cls(t.avg)}">${pct(t.avg, 1)}</span>` : t.kind === "youtube" ? `роликов ${t.videos}, прогнозов ${t.calls}` : `токенов ${t.calls}`} <span class="muted">· ${esc(t.via || "")}</span>${t.history ? `<div class="muted">${esc(t.history)}</div>` : ""}</div>`).join("");
+  const board = (s.leaderboard || []).slice(0, 6).map((x, i) => {
+    const icon = x.trial && x.status === "watch" ? "🔭" : MN_ICON[x.status] || "•";
+    const live = x.n ? `${x.n} пров. · <span class="${cls(x.avg)}">${pct(x.avg, 1)}</span> · $10/идея: <span class="${cls(x.per10)}">${x.per10 >= 0 ? "+" : ""}${x.per10.toFixed(2)}$</span>` : `<span class="muted">живых проверок нет</span>`;
+    const hist = x.hist_n ? ` <span class="muted">· 📜 ${x.hist_n} прошлых, <span class="${cls(x.hist_avg)}">${pct(x.hist_avg, 1)}</span>${x.bias ? " ↑" : ""}</span>` : "";
+    return `<div class="tiny" style="margin-top:4px;white-space:normal">${i + 1}. ${icon} <b>${esc(x.name)}</b> — ${live}${hist}</div>`;
+  }).join("");
+  const learned = (s.learned || []).filter((x) => x.taken).slice(0, 3).map((x) => `${esc(x.via)}: ⭐ ${x.kept}/${x.taken}`).join(" · ");
   const rej = (s.rejected || []).slice(0, 3).map((r) => `<div class="tiny muted" style="margin-top:3px;white-space:normal">✖️ ${esc(r.name)} — ${esc(r.why)}</div>`).join("");
   return `<div class="card pilot-card ${s.on ? "on" : ""}" style="margin-top:10px">
     <div class="row between"><div><div class="b">🔭 Разведчик</div><div class="tiny muted">сам ищет трейдеров · фейк-фильтр · испытание ценой</div></div>
       ${m.owner ? `<label class="switch"><input type="checkbox" data-act="sc-on" ${s.on ? "checked" : ""}><span></span></label>` : ""}</div>
     <div class="small muted" style="margin-top:6px;white-space:normal">Взял на испытание ${s.found}, прошли ⭐ ${s.stars}, отсеяно ${s.rejected_total}${s.kept && s.kept.length ? ` · оставил: ${s.kept.map(esc).join(", ")}` : ""}</div>
     ${trial || `<div class="tiny muted" style="margin-top:6px">На испытании пока никого</div>`}
+    ${board ? `<div class="small b" style="margin-top:10px">🏆 Рейтинг по доказанной прибыли</div>${board}` : ""}
+    ${learned ? `<div class="tiny muted" style="margin-top:6px;white-space:normal">🧠 Где нахожу лучших: ${learned}</div>` : ""}
     ${rej ? `<div style="margin-top:6px">${rej}</div>` : ""}
     ${s.error ? `<div class="tiny" style="margin-top:6px;white-space:normal">⚠️ ${esc(s.error)}</div>` : ""}
-    ${m.owner ? `<button class="btn block ghost sm" style="margin-top:8px" data-act="sc-find">🔎 Найти трейдеров сейчас</button>` : ""}
+    ${m.owner ? `<div class="row" style="gap:8px;margin-top:8px"><button class="btn ghost sm grow" data-act="sc-find">🔎 Найти сейчас</button>${s.history_on ? `<button class="btn ghost sm grow" data-act="sc-hist">📜 История</button>` : ""}</div>` : ""}
   </div>`;
 }
 
@@ -2028,6 +2037,7 @@ document.addEventListener("click", async (e) => {
     case "mn-del": if (await popup("Не следить за " + (d.s || "") + "?", "Счёт трейдера сохранится в истории.", "Убрать")) mentorsAction({ remove: d.v }, "Убрал"); break;
     case "mn-run": haptic.tap(); mentorsAction({ run: true }); break;
     case "sc-find": haptic.tap(); mentorsAction({ scout: { find: true } }); break;
+    case "sc-hist": haptic.tap(); mentorsAction({ scout: { history: true } }); break;
     case "tr-reset": if (await popup("Тренировка заново с $" + d.v + "?", "Демо-деньги и сделки стратегий обнулятся. Выученные стоп, тейк и лучшая стратегия останутся.", "Начать")) mentorsAction({ train: { reset: Number(d.v) } }, "Заново: $" + d.v); break;
     case "demo-sell": if (await popup("Продать " + (d.s || "") + " на демо?", "Демо-позиция закроется по текущей котировке.", "Продать")) memeAction({ demo_sell: d.v }, "Продано (демо)", el); break;
     case "demo-reset": if (await popup("Начать демо заново с $" + d.v + "?", "Демо-сделки и итог обнулятся. То, чему бот научился (стоп, тейк, комиссии), останется.", "Начать")) memeAction({ demo_reset: Number(d.v) }, "Демо: $" + d.v); break;

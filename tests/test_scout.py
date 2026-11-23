@@ -298,3 +298,251 @@ def test_webapp_scout_toggle(app_env):
         assert d["scout"]["on"] is False
 
     call(b, fn)
+
+
+# ---------------------------------------------------------------------------
+# v30: 📜 история прогнозов, снежный ком, самообучение, рейтинг
+# ---------------------------------------------------------------------------
+
+def test_title_calls():
+    assert sc.title_calls("Bitcoin to $150K soon!") == [{"asset": "BTC", "direction": "long"}]
+    assert sc.title_calls("SOL and ETH will CRASH this week") == [{"asset": "SOL", "direction": "short"},
+                                                                   {"asset": "ETH", "direction": "short"}]
+    assert sc.title_calls("Биткоин: обвал неизбежен?") == [{"asset": "BTC", "direction": "short"}]
+    assert sc.title_calls("Don't buy $PEPE yet") == [{"asset": "PEPE", "direction": "short"}]
+    assert sc.title_calls("XRP pump or dump?") == []      # обе стороны — не прогноз
+    assert sc.title_calls("Bitcoin news today") == []      # нет направления
+    assert sc.title_calls("This link will pump") == []     # «link» — слово, а не монета
+    assert sc.parse_title_calls('[{"i": 2, "asset": "btc", "direction": "long"}, {"i": 9, "asset": "X", '
+                                '"direction": "up"}, {"i": 1, "asset": "$SOL", "direction": "short"}]', 3) == [
+        {"i": 2, "asset": "BTC", "direction": "long"}, {"i": 1, "asset": "SOL", "direction": "short"}]
+
+
+def day_candles(start: float, closes: list[float]) -> list[list[float]]:
+    """Дневные свечи с полуночи после start; open = close прошлой."""
+    t0 = (int(start // DAY) + 1) * DAY
+    out, prev = [], closes[0]
+    for i, c in enumerate(closes):
+        out.append([(t0 + i * DAY) * 1000, prev, max(prev, c), min(prev, c), c, 1.0])
+        prev = c
+    return out
+
+
+def test_backtest_math():
+    pub = NOW - 20 * DAY
+    candles = {"BTC": day_candles(pub, [100, 102, 104, 110, 120, 90] + [90] * 14)}
+    items = [{"asset": "BTC", "direction": "long", "published": pub, "title": "BTC up"},
+             {"asset": "BTC", "direction": "long", "published": pub + 3600, "title": "повтор"},
+             {"asset": "BTC", "direction": "short", "published": pub + 3 * DAY, "title": "BTC down"},
+             {"asset": "ETH", "direction": "long", "published": pub, "title": "нет свечей"},
+             {"asset": "BTC", "direction": "long", "published": NOW - DAY, "title": "срок не прошёл"}]
+    h = sc.backtest(items, candles, NOW)
+    assert h["n"] == 2  # повтор, монета без свечей и свежий прогноз не считаются
+    rows = sorted(h["rows"], key=lambda r: r["at"])
+    # вход — открытие первой свечи после ролика (100), выход — закрытие 3-й (104), минус 0.2% комиссий
+    assert rows[0]["ret"] == round((104 / 100 - 1) * 100 - 0.2, 2)
+    # шорт: вход 104 (открытие первой свечи после pub+3д = закрытие прошлой), выход — закрытие через 3 дня (90)
+    assert rows[1]["ret"] == round(-(90 / 104 - 1) * 100 - 0.2, 2)
+    assert h["wins"] == 2 and h["bull_share"] == 0.5 and h["shrunk"] == round(sum(r["ret"] for r in rows) / 7, 2)
+    bad = {"n": 6, "wins": 1, "avg": -5.0, "shrunk": -2.7, "bull_share": 1.0}
+    assert sc.history_bad(bad) and not sc.history_bad({**bad, "n": 3}) and not sc.history_bad(None)
+    assert "почти все «вверх»" in sc.history_text(bad)
+    assert "нет проверяемых" in sc.history_text({**bad, "n": 0})
+
+
+def test_extract_refs_and_queries():
+    text = ("Мои друзья: https://www.youtube.com/@DataDash и youtube.com/channel/" + uc(5) +
+            " стримы: https://twitch.tv/Trencher_1 , https://www.twitch.tv/videos/123")
+    refs = sc.extract_refs(text)
+    assert {"platform": "youtube", "channel_id": uc(5), "name": uc(5)} in refs
+    assert {"platform": "youtube", "handle": "DataDash", "name": "DataDash"} in refs
+    assert {"platform": "twitch", "handle": "trencher_1", "name": "Trencher_1"} in refs
+    assert not any(r.get("handle") == "videos" for r in refs)
+    assert sc.pick_queries({}, 2, 0) == list(sc.YT_QUERIES[:2])
+    assert sc.pick_queries({}, 2, 3) == list(sc.YT_QUERIES[3:5])  # без опыта — по кругу
+    good, bad = sc.YT_QUERIES[5], sc.YT_QUERIES[0]
+    q = sc.pick_queries({good: {"taken": 3, "kept": 2}, bad: {"taken": 6, "kept": 0}}, 2, 0)
+    assert q[0] == good and bad not in q
+
+
+def with_candles(mt, series: dict[str, list[float]], start: float):
+    async def candles_of(coin, since_ms):
+        return day_candles(start, series[coin]) if coin in series else []
+
+    mt.candles_of = candles_of
+
+
+def titled(titles: list[str], first_age_days=4, step_days=4):
+    return [{"id": f"t{i}", "title": t, "description": "my analysis", "views": 30_000, "short": False,
+             "published": NOW - (first_age_days + i * step_days) * DAY, "url": ""} for i, t in enumerate(titles)]
+
+
+def test_discover_uses_history_and_ranks():
+    start = NOW - 40 * DAY
+    up = [100 + i * 3 for i in range(45)]  # BTC растёт весь месяц
+    rows = [{"channel_id": uc(i), "name": n, "subs": 100_000} for i, n in ((31, "Wrong Bear"), (32, "Meh"), (33, "Right Bull"))]
+    mt, yt, s = setup_scout(None, rows, [])
+    s._gemini_ready = lambda: False  # прогнозы из названий — по словам
+    with_candles(mt, {"BTC": up}, start)
+    add_feed(yt, uc(31), titled(["Bitcoin crash incoming"] * 6))           # всё время шортил растущий BTC
+    add_feed(yt, uc(32), titled(["Crypto market update"] * 6))             # без прогнозов
+    add_feed(yt, uc(33), titled(["Bitcoin breakout, going up"] * 6))       # угадывал
+    for cid in (uc(31), uc(32), uc(33)):
+        yt.videos[cid][0]["published"] = NOW - DAY                          # канал живой
+    mt.scout.st["q_stats"] = {}
+    sc_add = sc.ADD_PER_RUN["youtube"]
+    sc.ADD_PER_RUN["youtube"] = 1
+    try:
+        asyncio.run(s.discover(NOW))
+    finally:
+        sc.ADD_PER_RUN["youtube"] = sc_add
+    ids = {x["id"] for x in mt.active("youtube") if x.get("auto")}
+    assert ids == {f"yt:{uc(33)}"}  # из двух прошедших взял лучшего по истории
+    assert "в минусе" in s.st["rejected"][f"yt:{uc(31)}"]["why"]
+    assert f"yt:{uc(32)}" not in s.st["rejected"]  # не взят, но и не отвергнут — найдётся позже
+    src = mt.st["sources"][f"yt:{uc(33)}"]
+    assert src["history"]["n"] >= 4 and src["history"]["avg"] > 0 and src["history"]["method"] == "по словам в названиях"
+    assert "📜 история" in s.text()
+    assert s.st["via_stats"]["поиск YouTube"]["taken"] == 1 and src["query"] in sc.YT_QUERIES
+
+
+def test_gemini_title_extraction_and_fallback():
+    mt, yt, s = setup_scout()
+    vids = titled(["Watch this", "Big week ahead"])
+    asked = []
+
+    async def gj(prompt, search=False, max_tokens=4000):
+        asked.append(prompt)
+        return '[{"i": 2, "asset": "SOL", "direction": "long"}]'
+
+    s._gemini_json = gj
+    items, method = asyncio.run(s._title_calls(vids))
+    assert method == "Gemini" and items[0]["asset"] == "SOL" and items[0]["published"] == vids[1]["published"]
+    assert "2. Big week ahead" in asked[0]
+
+    async def broken(prompt, search=False, max_tokens=4000):
+        raise RuntimeError("Gemini 429")
+
+    s._gemini_json, s._gemini_left = broken, 4
+    items, method = asyncio.run(s._title_calls(titled(["ETH to the moon"])))
+    assert method == "по словам в названиях" and items[0]["asset"] == "ETH"
+    s._gemini_json, s._gemini_left = gj, 0  # лимит прохода исчерпан — тоже по словам
+    assert asyncio.run(s._title_calls(vids))[1] == "по словам в названиях"
+
+
+def test_snowball_from_star_traders():
+    mt, yt, s = setup_scout()
+    star = mt._add("youtube", uc(40), "Звезда")
+    star["status"] = "star"
+    yt.videos[uc(40)] = [{**videos(1)[0], "description": "коллега: https://youtube.com/channel/" + uc(41) +
+                          " и стрим twitch.tv/solsniper"}]
+    add_feed(yt, uc(41), videos())
+    asyncio.run(s.discover(NOW))
+    a, b = mt.st["sources"].get(f"yt:{uc(41)}"), mt.st["sources"].get("tw:solsniper")
+    assert a and b and a["via"] == sc.VIA_SNOWBALL and "Звезда" in a["note"]
+
+
+def test_soft_rejects_expire_hard_stay():
+    mt, yt, s = setup_scout(None, [{"channel_id": uc(42), "name": "Уснул", "subs": 90_000},
+                                   {"channel_id": uc(43), "name": "Накрутка", "subs": 3_000_000}])
+    add_feed(yt, uc(42), videos(age_days=40))
+    add_feed(yt, uc(43), videos(views=50))
+    asyncio.run(s.discover(NOW))
+    rej = s.st["rejected"]
+    assert rej[f"yt:{uc(42)}"]["until"] and rej[f"yt:{uc(43)}"]["until"] is None
+    later = NOW + (sc.SOFT_REJECT_DAYS + 1) * DAY
+    known = s.known_ids(later)
+    assert f"yt:{uc(42)}" not in known and f"yt:{uc(43)}" in known
+
+
+def test_early_drop_and_learning():
+    mt, yt, s = setup_scout()
+    src = trial_src(mt, s, ident=uc(44), rets=[-9.0, -7.0, -8.0, -6.5, -10.0])
+    s.review(NOW)
+    assert src["removed"] and "уже на 5 проверках" in s.st["rejected"][src["id"]]["why"]
+    assert s.st["rejected"][src["id"]]["until"] is None
+    assert s.st["via_stats"]["тест"] == {"taken": 1, "kept": 0, "dropped": 1}
+    good = trial_src(mt, s, ident=uc(45), status="star", rets=[4.0] * 8)
+    s.review(NOW)
+    assert not good["removed"] and s.st["via_stats"]["тест"]["kept"] == 1
+    assert s.via_rate("тест") == round((1 + 1) / (2 + 3), 10)
+    assert "Звезда" not in s._learned_hint() and "Испытуемый" in s._learned_hint()
+
+
+def test_leaderboard_tiers_and_refresh_history():
+    mt, yt, s = setup_scout()
+    lucky = mt._add("youtube", uc(46), "Везунчик")
+    lucky["rets"] = [30.0, 25.0, 20.0]
+    steady = mt._add("youtube", uc(47), "Стабильный")
+    steady["rets"] = [3.0] * 10
+    hist_only = mt._add("youtube", uc(48), "Только история")
+    hist_only["history"] = {"n": 6, "wins": 4, "avg": 3.0, "shrunk": 1.6, "bull_share": 0.5, "rows": [], "at": NOW}
+    loser = mt._add("youtube", uc(49), "Доказанно теряет")
+    loser["rets"] = [-4.0] * 9
+    board = [x["name"] for x in s.leaderboard()]
+    assert board.index("Стабильный") < board.index("Везунчик") < board.index("Только история") < board.index("Доказанно теряет")
+    assert "Стабильный" in s.rank_text() and "по $10 на идею" in s.rank_text()
+    start = NOW - 40 * DAY
+    with_candles(mt, {"ETH": [100 - i for i in range(45)]}, start)
+    s._gemini_ready = lambda: False
+    add_feed(yt, uc(47), titled(["Ethereum dump coming"] * 5))
+    for x in mt.active("youtube"):
+        x["history"] = x.get("history") or {"at": NOW}
+    steady["history"] = None
+    assert asyncio.run(s.refresh_history(NOW)) == 1  # по одному за тик и только устаревшие
+    assert steady["history"]["n"] >= 4 and steady["history"]["avg"] > 0
+    assert asyncio.run(s.refresh_history(NOW + 3600)) == 0
+
+
+def test_telegram_rank_and_history(bot_env):
+    b, session = bot_env
+    calls = []
+
+    async def fake_refresh(now=None, force=False, limit=1):
+        calls.append((force, limit))
+        return 2
+
+    b.mentors.scout.refresh_history = fake_refresh
+    b.mentors.candles_of = lambda coin, since: asyncio.sleep(0, [])
+
+    async def run():
+        await press(b, "mn:srank")
+        assert "Рейтинг трейдеров" in session.sent[-1][1]
+        await press(b, "mn:shist")
+        assert calls == [(True, 20)] and "Посчитал историю 2" in session.sent[-1][1]
+        assert not b.mentors.scout.busy
+
+    asyncio.run(run())
+
+
+def test_public_candles_picks_first_exchange_with_coin():
+    from types import SimpleNamespace
+    from bot import extras_ui
+
+    class Ex:
+        def __init__(self, markets, rows=None, fail=False):
+            self.markets, self.rows, self.fail, self.asked = markets, rows or [], fail, []
+
+        async def fetch_ohlcv(self, symbol, tf, since=None, limit=None):
+            self.asked.append((symbol, tf, since))
+            if self.fail:
+                raise RuntimeError("403")
+            return self.rows
+
+    async def ensure(name, ex):
+        return None
+
+    bybit = Ex({"ETH/USDT": {}}, fail=True)
+    bingx = Ex({"ETH/USDT": {}}, [[1000, 1, 2, 0.5, 1.5, 9], [2000, 0, 0, 0, 0, 0]])
+    b = SimpleNamespace(settings=SimpleNamespace(quote="USDT"),
+                        scanner=SimpleNamespace(exchanges={"bybit": bybit, "bingx": bingx}, _ensure_markets=ensure))
+    rows = asyncio.run(extras_ui.public_candles(b, "ETH", 123))
+    assert rows == [[1000.0, 1.0, 2.0, 0.5, 1.5, 9.0]]  # пустая свеча отброшена, Bybit с ошибкой пропущен
+    assert bingx.asked == [("ETH/USDT", "1d", 123)]
+    assert asyncio.run(extras_ui.public_candles(b, "NOPE", 0)) == []
+
+
+def test_fit_keeps_whole_lines():
+    lines = ["<b>заголовок</b>"] + [f"<b>строка {i}</b> " + "x" * 90 for i in range(100)]
+    out = sc.fit(lines)
+    assert len(out) <= 4000 and out.count("<b>") == out.count("</b>")

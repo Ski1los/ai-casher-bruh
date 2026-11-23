@@ -13,6 +13,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .mentors import TICK_SEC, VIDEOS_PER_DAY, VIEWS, MentorError, parse_link
+from .scout import fit
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -70,6 +71,8 @@ def scout_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
     on = b.mentors.scout.st["on"]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔎 Найти трейдеров сейчас", callback_data="mn:sfind")],
+        [InlineKeyboardButton(text="🏆 Рейтинг", callback_data="mn:srank"),
+         InlineKeyboardButton(text="📜 Проверить историю", callback_data="mn:shist")],
         [InlineKeyboardButton(text="⏸ Не искать самому" if on else "🟢 Искать самому", callback_data="mn:stoggle"),
          InlineKeyboardButton(text="🎓 Трейдеры", callback_data="mn:show")]])
 
@@ -97,6 +100,30 @@ async def scout_find(b: ArbitrageBot, chat_id: int) -> None:
             "" if not why else f" ({html.escape(why)[:200]})") + ". Все кандидаты отсеяны фейк-фильтром или уже "
             "знакомы, либо на испытании нет свободных мест. Попробую сам через сутки.", scout_kb(b))
     await b._send(chat_id, sc.text(), scout_kb(b))
+
+
+async def scout_history(b: ArbitrageBot, chat_id: int) -> None:
+    sc = b.mentors.scout
+    if not b.mentors.candles_of:
+        await b._send(chat_id, "📜 Нет доступа к ценам бирж — историю посчитать нечем.", scout_kb(b))
+        return
+    if sc.busy:
+        await b._send(chat_id, "⏳ Разведчик занят поиском, попробуй через пару минут.")
+        return
+    n = len(b.mentors.active("youtube"))
+    await b._send(chat_id, f"📜 Считаю прошлые прогнозы {n} каналов YouTube на настоящих свечах Bybit/BingX — "
+                           "это до пары минут…")
+    sc.busy = True
+    try:
+        done = await sc.refresh_history(force=True, limit=20)
+    except Exception as e:
+        log.exception("История прогнозов")
+        await b._send(chat_id, f"⚠️ Не получилось: {html.escape(str(e))[:300]}", scout_kb(b))
+        return
+    finally:
+        sc.busy = False
+    b.save_copy()
+    await b._send(chat_id, f"📜 Посчитал историю {done} из {n} каналов.\n\n" + sc.rank_text(), scout_kb(b))
 
 
 async def gemini_check_text(b: ArbitrageBot) -> str:
@@ -166,11 +193,12 @@ def list_text(b: ArbitrageBot) -> str:
     d = b.mentors.status_dict()
     lines = ["👥 <b>Трейдеры</b> — нажми 🗑, чтобы перестать следить. Добавить: <code>/mentors add ссылка</code>"]
     for s in d["sources"]:
-        icon = {"star": "⭐", "watch": "👀", "muted": "🔇"}[s["status"]]
+        icon = "🔭" if s["trial"] and s["status"] == "watch" else {"star": "⭐", "watch": "👀", "muted": "🔇"}[s["status"]]
         where = "▶️ YouTube" if s["kind"] == "youtube" else "📺 Twitch" + (" · 🟢 чат" if s["live_chat"] else "")
         lines.append(f"{icon} <b>{html.escape(s['name'])}</b> ({where}) — {html.escape(s['note'] or '')}"
+                     + (f"\n   {html.escape(s['history'])}" if s["history"] else "")
                      + (f"\n   ⚠️ {html.escape(s['error'])}" if s["error"] else ""))
-    return "\n".join(lines)
+    return fit(lines)
 
 
 async def send_events(b: ArbitrageBot, events: list[dict]) -> None:
@@ -329,8 +357,15 @@ def register(b: ArbitrageBot) -> None:
         if not b._allowed(message):
             return
         uid = message.from_user.id if message.from_user else None
-        if (command.args or "").strip().lower() in ("now", "сейчас", "find", "найти") and uid == b.owner_id:
+        arg = (command.args or "").strip().lower()
+        if arg in ("now", "сейчас", "find", "найти") and uid == b.owner_id:
             await scout_find(b, message.chat.id)
+            return
+        if arg in ("history", "история") and uid == b.owner_id:
+            await scout_history(b, message.chat.id)
+            return
+        if arg in ("rank", "top", "рейтинг", "топ"):
+            await b._send(message.chat.id, b.mentors.scout.rank_text(), scout_kb(b))
             return
         await b._send(message.chat.id, b.mentors.scout.text(), scout_kb(b))
 
@@ -407,6 +442,8 @@ def register(b: ArbitrageBot) -> None:
             await b._send(chat_id, list_text(b), list_kb(b))
         elif action == "scout":
             await b._send(chat_id, mt.scout.text(), scout_kb(b))
+        elif action == "srank":
+            await b._send(chat_id, mt.scout.rank_text(), scout_kb(b))
         elif action == "gcheck":
             await b._send(chat_id, "⏳ Проверяю ключ Gemini…")
             await b._send(chat_id, await gemini_check_text(b), keyboard(b))
@@ -423,6 +460,8 @@ def register(b: ArbitrageBot) -> None:
             await show(chat_id)
         elif action == "sfind":
             await scout_find(b, chat_id)
+        elif action == "shist":
+            await scout_history(b, chat_id)
         elif action == "stoggle":
             mt.scout.st["on"] = not mt.scout.st["on"]
             mt._changed()

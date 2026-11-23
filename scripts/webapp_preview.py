@@ -369,6 +369,13 @@ def build():
         sco._mark(s, via, 1, now - 3 * 86400, kind)
         s.update(upd)
     sco.st.update(found=7, kept=1, dropped=3)
+    mn.candles_of = lambda coin, since: asyncio.sleep(0, [])  # кнопка «📜 История» видна
+    hist = {"n": 7, "wins": 5, "avg": 2.4, "shrunk": 1.4, "bull_share": 0.71, "rows": [], "method": "Gemini", "at": now}
+    srcs["yt:UCxxxxxxxxxxxxxxxxxxxx01"]["history"] = hist
+    cow["history"] = {**hist, "n": 9, "wins": 6, "avg": 3.1, "shrunk": 2.0}
+    ban["history"] = {**hist, "n": 11, "wins": 3, "avg": -4.0, "shrunk": -2.8, "bull_share": 1.0}
+    sco.st["via_stats"] = {"Gemini + Google": {"taken": 4, "kept": 1, "dropped": 2},
+                           "поиск YouTube": {"taken": 3, "kept": 0, "dropped": 1}}
     sco._reject("yt:UCbad", "Crypto Millionaire 100x", "фейк-фильтр: 1.2M подписчиков, а смотрят ~800 — похоже на накрутку",
                 now - 86400)
     sco._reject("tw:slots", "SlotsKing", "гемблинг/раздачи в названии стрима", now - 80000)
