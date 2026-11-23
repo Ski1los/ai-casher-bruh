@@ -334,7 +334,7 @@ def new_scalp_state() -> dict:
             "events": [], "last_buy_candle": {}, "use_coins": False, "convert_tried": {},
             # lab: бумажные сделки по живым свечам; blocked: монеты на паузе после стоп-лосса;
             # risk: монеты с делистингом или плохими новостями; streak/pause: серия убытков по биржам
-            "lab": {"open": {}, "stats": {}}, "blocked": {}, "risk": {}, "streak": {}, "pause": {}}
+            "lab": {"open": {}, "stats": {}}, "blocked": {}, "risk": {}, "streak": {}, "pause": {}, "pause_why": {}}
 
 
 class Scalper:
@@ -618,7 +618,9 @@ class Scalper:
         cost = math.floor(min(free, t.settings.max_trade_usd) * 100 + 1e-6) / 100
         pause = float(self.st["pause"].get(name) or 0)
         if pause > now:
-            self.last_reason = (f"щит: {LOSS_STREAK} убытка подряд — новые покупки на паузе до "
+            why = (self.st.get("pause_why") or {}).get(name)
+            self.last_reason = (f"🛡 {why} до {self._clock(pause)} (снять: /profit)" if why else
+                                f"щит: {LOSS_STREAK} убытка подряд — новые покупки на паузе до "
                                 f"{self._clock(pause)}. Рынок сейчас против стратегии, лучше переждать")
             return []
         ranking = await self.rank(name)
@@ -954,8 +956,9 @@ class Scalper:
                     out.append({"coin": coin, "until": float(until), "reason": why, "kind": src})
         for name, until in self.st["pause"].items():
             if float(until) > now:
+                why = (self.st.get("pause_why") or {}).get(name)
                 out.append({"coin": "*", "exchange": name, "until": float(until), "kind": "pause",
-                            "reason": f"{LOSS_STREAK} убытка подряд на {self._name(name)}: пауза новых покупок"})
+                            "reason": why or f"{LOSS_STREAK} убытка подряд на {self._name(name)}: пауза новых покупок"})
         return out
 
     def _after_close(self, name: str, coin: str, pnl: float, why: str, now: float) -> str:
@@ -975,7 +978,9 @@ class Scalper:
         st["streak"][name] = int(st["streak"].get(name) or 0) + 1
         if st["streak"][name] >= LOSS_STREAK:
             st["streak"][name] = 0
-            st["pause"][name] = now + STREAK_PAUSE_SEC
+            if float(st["pause"].get(name) or 0) < now + STREAK_PAUSE_SEC:  # пауза Стража (дольше) остаётся
+                st["pause"][name] = now + STREAK_PAUSE_SEC
+                st["pause_why"].pop(name, None)
             note += (f"\n🛡 {LOSS_STREAK} убытка подряд: новые покупки на {html.escape(self._name(name))} "
                      f"на паузе до {self._clock(now + STREAK_PAUSE_SEC)}. Открытые продажи остаются.")
         return note

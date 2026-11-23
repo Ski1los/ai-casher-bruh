@@ -29,10 +29,11 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, trading_ui, updater
+from . import copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, trading_ui, updater
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
 from .mentors import Mentors
+from .profit import ProfitCenter
 from .solkey import looks_like_secret
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
@@ -151,6 +152,7 @@ HELP_TEXT = """\
 Могу и торговать: кнопками, командами, через ИИ или автоматически (нужен API-ключ биржи, /keys).
 
 <b>💡 Заработок с маленькой суммы</b>
+/profit — 💰 <b>профит</b>: что реально зарабатывает, план денег
 /autopilot — 🤖 <b>бот торгует сам</b>: одна кнопка, дальше без тебя
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
@@ -164,7 +166,7 @@ HELP_TEXT = """\
 
 <b>Демо-счета</b> (виртуальные деньги, реальные стаканы и комиссии)
 /demo_start — запустить демо на $5, $50 и $500 по обеим стратегиям
-/demo_start 5 — только на $5 (или <code>/demo_start 5 20</code>)
+/demo_start 5 — только на $5
 /demo — сводка по всем счетам
 /demo 5 — подробно по счетам на $5: сделки и почему связки отклонены
 /demo_history — последние сделки
@@ -181,7 +183,7 @@ HELP_TEXT = """\
 /orders — открытые ордера и отмена
 /live — включить реальные ордера, /test — вернуть тест
 /autopilot — 🤖 <b>автопилот</b>: режим $5 + «Монеты в дело», сам выбирает монету и стратегию (<code>/autopilot off</code>)
-/scalp — 🎯 <b>режим $5</b>: состояние, проверка на истории, «Монеты в дело» (<code>/scalp on</code>, <code>/scalp off</code>)
+/scalp — 🎯 <b>режим $5</b>: состояние и проверка на истории (<code>/scalp on</code>/<code>off</code>)
 /autotrade on|off — автоторговля треугольниками (нужно от ~$10–20)
 /why — 🔍 что автоторговля делает и почему нет сделок
 /trades — журнал сделок
@@ -204,7 +206,7 @@ HELP_TEXT = """\
 <code>/alert TON &lt; 5</code> — сообщить, когда цена дойдёт до уровня (или <code>/alert SOL +5%</code>)
 /alerts — мои алерты (удаление кнопками)
 <code>/phantom АДРЕС</code> — 👻 баланс кошелька Phantom (только просмотр, сид-фразу не нужно!)
-/clean — 🧹 освободить память бота (кэши)
+/clean — 🧹 освободить память
 
 <b>Мемкоины и брокер</b> 🦎
 <code>/dex BONK</code> или <code>/dex АДРЕС</code> — токен с DexScreener: цена, ликвидность, риски, ссылки GMGN/Axiom
@@ -513,6 +515,9 @@ class ArbitrageBot:
             log.info("Кошелёк бота для мемкоинов: %s", self.meme.address)
         # 🎓 учёба у трейдеров YouTube/Twitch (bot/mentors.py); состояние — в copy.st["mentors"]
         self.mentors = Mentors(self.copy, self.meme, self.ai.client, price_of=self._public_prices)
+        # 💰 Профит-центр: результаты всех способов по фактам, план денег, Страж прибыли (bot/profit.py);
+        # состояние — в copy.st["profit"]
+        self.profit = ProfitCenter(self)
 
         self.bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.webapp = WebApp(self, token)  # Telegram Mini App: /app на том же сервере, что и /health
@@ -758,6 +763,7 @@ class ArbitrageBot:
             "trading": self._trading_context(),
             "extras": self._extras_context(),
             "earning_opportunities_now": for_ai(self.opps_last),
+            "profit_center": self._profit_context(),
         }
 
     def _extras_context(self) -> dict:
@@ -792,12 +798,19 @@ class ArbitrageBot:
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
             "api_keys": keys,
             "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
-                                "/hot", "/radar", "/tinvest", "/mentors", "/train"],
+                                "/hot", "/radar", "/tinvest", "/mentors", "/train", "/profit"],
             "tinvest": self._tinvest_context(),
             "memecoin_radar_on": bool(self.radar_chats),
             "copytrading_solana": self._copy_context(),
             "traders_youtube_twitch": self.mentors.ai_context(),
         }
+
+    def _profit_context(self) -> dict:
+        try:
+            return self.profit.ai_context()
+        except Exception as e:  # отчёт для ИИ не должен падать из-за одной части
+            log.warning("Профит-центр для ИИ: %s", e)
+            return {}
 
     def _copy_context(self) -> dict:
         """Копитрейдинг для ИИ: коротко, без лишних цифр (ИИ видит итоги, уроки и ошибки)."""
@@ -986,6 +999,13 @@ class ArbitrageBot:
         train_line = self.mentors.train.short_line()
         if train_line:
             parts.append(train_line)
+        try:
+            profit_line = self.profit.short_line()
+        except Exception as e:
+            log.warning("Профит-центр в отчёте: %s", e)
+            profit_line = ""
+        if profit_line:
+            parts.append(profit_line)
         parts.append("Комиссии, узкие места и рекомендации: /analysis" + (" · мнение ИИ: /ai" if self.ai.configured else ""))
         return "\n\n".join(parts)
 
@@ -1419,6 +1439,7 @@ class ArbitrageBot:
         copy_ui.register(self)
         meme_ui.register(self)
         mentors_ui.register(self)
+        profit_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1814,6 +1835,7 @@ class ArbitrageBot:
                     BotCommand(command="alerts", description="Мои алерты"),
                     BotCommand(command="phantom", description="👻 Кошелёк Phantom (просмотр)"),
                     BotCommand(command="setup", description="🚀 Готовность к торговле: что осталось"),
+                    BotCommand(command="profit", description="💰 Профит: что реально зарабатывает, план денег"),
                     BotCommand(command="autopilot", description="🤖 Автопилот: бот торгует сам"),
                     BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
                     BotCommand(command="lab", description="🧪 Лаборатория: стратегии вживую"),
@@ -1852,6 +1874,7 @@ class ArbitrageBot:
             tasks.append(asyncio.create_task(opps_ui.opps_loop(self)))
             tasks.append(asyncio.create_task(copy_ui.copy_loop(self)))
             tasks.append(asyncio.create_task(mentors_ui.mentors_loop(self)))
+            tasks.append(asyncio.create_task(profit_ui.profit_loop(self)))
             tasks.append(asyncio.create_task(self._auto_loop()))
             tasks.append(asyncio.create_task(self._scalp_loop()))
             tasks.append(asyncio.create_task(self._equity_loop()))
