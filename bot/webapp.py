@@ -479,7 +479,12 @@ class WebApp:
         d = mt.status_dict()
         stars = [s["name"] for s in d["sources"] if s["status"] == "star"]
         last = d["videos"][0] if d["videos"] else None
+        t = mt.train.status_dict()
+        best = next((r for r in t["variants"] if r["active"]), None)
         return {"on": d["on"], "sources": len(d["sources"]), "stars": stars[:3], "gemini": d["gemini"],
+                "train": {"ideas": t["ideas"], "best": best["name"] if best else None,
+                          "equity": best["equity"] if best else None, "pct": best["pct"] if best else None,
+                          "n": best["n"] if best else 0},
                 "calls_done": d["calls_done"], "calls_open": d["calls_open"],
                 "last": {"author": last["author"], "summary": last["summary"][:160], "view": last["market_view"]}
                 if last else None}
@@ -1069,6 +1074,7 @@ class WebApp:
         d = mt.status_dict()
         d["owner"] = bool(request[OWNER])
         d["videos_per_day"] = VIDEOS_PER_DAY
+        d["train"] = mt.train.status_dict()
         return d
 
     async def mentors_set(self, request: web.Request) -> dict:
@@ -1081,6 +1087,19 @@ class WebApp:
             mt.st["on"] = bool(body["on"])
         if "notify" in body:
             mt.st["notify"] = bool(body["notify"])
+        tr = body.get("train")
+        if isinstance(tr, dict):  # 🏋️ тренировка: {on} / {signals} / {notify} / {reset: $}
+            for k in ("on", "signals", "notify"):
+                if k in tr:
+                    mt.train.st[k] = bool(tr[k])
+            if tr.get("reset"):
+                try:
+                    usd = float(tr["reset"])
+                except (TypeError, ValueError):
+                    raise ApiError("сумма — число") from None
+                mt.train.reset(max(1.0, min(usd, 1000.0)))
+                done.append(f"Тренировка заново: по ${usd:g} у каждой стратегии")
+            mt._changed()
         if "remove" in body:
             src = mt.st["sources"].get(str(body["remove"]))
             if src:

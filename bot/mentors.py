@@ -37,6 +37,7 @@ from .copytrade import (EXIT_GAIN, EXIT_MIN, EXIT_STOPS, EXIT_TPS, FILTER_GRID, 
                         add_path, exit_net, simulate_exit, tp_text)
 from .dex import fmt_usd
 from .solana import valid_address
+from .training import Training
 
 log = logging.getLogger(__name__)
 
@@ -493,6 +494,12 @@ class Mentors:
         self.twitch = twitch or TwitchChat(self._session)
         self.last_error: str | None = None
         self.busy = False
+        self.train = Training(self)  # 🏋️ сам торгует выученным на демо (bot/training.py)
+        self.pending: list[dict] = []  # сигналы тренировки, появившиеся при разборе ролика
+
+    def take_pending(self) -> list[dict]:
+        out, self.pending = self.pending, []
+        return out
 
     async def _session(self) -> aiohttp.ClientSession:
         if self._http is None or self._http.closed:
@@ -634,6 +641,9 @@ class Mentors:
             call = await self._open_call(src, c, now, video=video["id"])
             if call:
                 rec["call_ids"].append(call["id"])
+                e = self.train.on_call(call, src, {"sponsored": res["sponsored"], "hype": res["hype"]}, now)
+                if e:
+                    self.pending.append(e)
         st["videos"].append(rec)
         del st["videos"][:-40]
         for t in res["tips"]:
@@ -841,8 +851,11 @@ class Mentors:
                 continue
             if not call:
                 continue
+            signal = self.train.on_call(call, src, {"by_streamer": item["by"].lower() == item["channel"]}, now)
             if src["status"] == "star" and self.st["notify"]:
                 events.append(await self._star_call_event(src, call, now))
+            elif signal:
+                events.append(signal)
         return events
 
     async def _star_call_event(self, src: dict, call: dict, now: float) -> dict:
@@ -935,7 +948,9 @@ class Mentors:
         try:
             events = await self.drain_twitch(now)
             events += await self.check_youtube(now)
+            events += self.take_pending()
             events += await self.update_calls(now)
+            events += await self.train.update(now)
             await self.twitch.set_channels({s["ident"] for s in self.active("twitch")})
             return events
         finally:
@@ -1002,6 +1017,7 @@ class Mentors:
             "consensus_7d": [{"asset": c["asset"], "long": c["long"], "short": c["short"]} for c in d["consensus"][:5]],
             "tips_checked": [{"tip": t["text"][:120], "by": t["author"], "verdict": t["verdict"]}
                              for t in d["tips"][:4] if t["verdict"]],
+            "training_demo": self.train.ai_context(),
         }
 
     def text(self) -> str:
@@ -1037,6 +1053,8 @@ class Mentors:
             lines.append("\n<b>О чём говорят за неделю</b>: " + ", ".join(
                 f"{html.escape(c['asset'])} {'📈' * min(3, c['long'])}{'📉' * min(3, c['short'])}" for c in d["consensus"][:6]))
         lines.append(f"\nПрогнозов на проверке: {d['calls_open']}, проверено: {d['calls_done']}.")
+        tl = self.train.short_line()
+        lines.append(tl or "🏋️ Тренировка: идеи трейдеров бот сам торгует на демо — /train")
         if st["log"]:
             lines.append("🧠 " + html.escape(st["log"][-1]["text"][:240]))
         if d["last_error"]:

@@ -359,6 +359,36 @@ def build():
          "verdict": {"state": "accepted", "text": "принят: стоп −20% дал бы +71.0% вместо +58.2% на 31 копиях"}}]
     ms["budget"].update(day=time.strftime("%Y-%m-%d", time.gmtime(now)), videos=4)
     mn._log("✅ Принял совет decu: стоп −20%. На 31 копиях было бы +71.0% вместо +58.2%.", now - 2000)
+    # 🏋️ тренировка: 5 стратегий с демо-сделками
+    tst = mn.train.st
+    demo_rets = {"all": [4.1, -7.9, 2.2, -8.1, 9.6, -3.0, 1.2, -8.0, 5.5, -2.4, 0.8],
+                 "trusted": [4.1, 2.2, 9.6, -3.0, 5.5, 1.2, -2.4, 6.3, 3.9],
+                 "consensus": [9.6, 5.5, -8.0, 3.9], "clean": [4.1, 2.2, -8.1, 1.2, -2.4, 0.8, -7.9, 2.0],
+                 "confident": [9.6, -8.0, 5.5, 6.3, -2.4]}
+    for name, rets in demo_rets.items():
+        v = tst["variants"][name]
+        cash = 10.0
+        for k, r in enumerate(rets):
+            usd = round(cash * 0.25, 2)
+            cash += usd * r / 100
+            v["closed"].append({"asset": ["SOL", "ETH", "GOAT", "LINK", "SUI"][k % 5], "author": ["Benjamin Cowen", "decu",
+                                "Coin Bureau"][k % 3], "kind": "sol" if k % 5 == 2 else "cex", "pct": r,
+                                "usd": round(usd * r / 100, 4), "why": "stop" if r < -7.5 else "tp" if r > 9 else "time",
+                                "at": now - 400000 + k * 30000, "closed": now - 380000 + k * 30000})
+        v.update(cash=round(cash, 4), n=len(rets), wins=sum(r > 0 for r in rets), rets=rets, pnl=round(cash - 10, 4))
+    tst["active"] = "trusted"
+    tst["ideas"] = 23
+    tst["rules"]["cex"] = {"stop": 0.08, "tp": 0.1}
+    tst["track"]["c1"] = {"kind": "cex", "asset": "ETH", "mint": "", "price0": 3100.0, "at": now - 4000,
+                          "until": now + 200000, "path": [0.0, -1.2, 2.4]}
+    tv = tst["variants"]["trusted"]
+    tv["cash"] -= 2.6
+    tv["positions"]["c1"] = {"id": "c1", "key": "ETH", "kind": "cex", "asset": "ETH", "mint": "", "author": "Benjamin Cowen",
+                             "at": now - 4000, "usd": 2.6, "until": now + 200000, "stop": 0.08, "tp": 0.1, "now": 2.4}
+    mn.train._lesson("🏋️ Урок по выходам (монеты: стоп −8%, тейк нет → стоп −8%, тейк +10%). На 16 идеях с полным путём "
+                     "цены так было бы +31.2% вместо +18.4%.", now - 30000)
+    mn.train._lesson("🏋️ Лучшая стратегия на демо — «Проверенные авторы»: 9 сделок, в плюс 7, в среднем +1.9% за сделку "
+                     "(с поправкой на везение). Теперь сигналы — только по ней.", now - 9000)
 
     b.opps._get_json = opps_json
     b.opps.news = opps_news
