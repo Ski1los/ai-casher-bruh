@@ -1622,6 +1622,64 @@ function liveBlock(m) {
     ${m.owner ? `<div class="small muted" style="margin-top:10px">Смотреть раз в</div><div class="chips" style="margin-top:6px">${[3, 5, 10, 20].map((x) => `<div class="chip ${l.every_min === x ? "on" : ""}" data-act="lv-int" data-v="${x}">${x} мин</div>`).join("")}</div>
       <div class="small muted" style="margin-top:10px">Сообщать в чат</div><div class="chips" style="margin-top:6px">${Object.keys(NOTE).map((k) => `<div class="chip ${l.notify === k ? "on" : ""}" data-act="lv-notify" data-v="${k}">${NOTE[k]}</div>`).join("")}</div>` : ""}
     <div class="tiny dim" style="margin-top:8px;white-space:normal">Бот смотрит 16 с эфира раз в несколько минут (лимит бесплатного Gemini) и сразу, когда стример кидает токен в чат. В счёт трейдера идёт только проверка входов ценой.</div>
+  </div>${detailsBlock(m)}${mirrorBlock(m)}`;
+}
+
+function detailsBlock(m) {
+  const l = m.live;
+  const det = (l && l.details) || [];
+  const val = (l && l.detail_value) || [];
+  if (!det.length && !val.length) return "";
+  const rows = det.slice(0, 6).map((x) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t" style="white-space:normal">${esc(x.label)}${x.who ? ` · ${esc(x.who)}` : ""}</div>
+      <div class="s" style="white-space:normal">${hm(x.at)} ${esc(x.name)}: ${esc(x.text)}${x.asset ? ` · <b>${esc(x.asset)}</b>` : ""}</div></div></div>`).join("");
+  const v = val.map((x) => `<div class="item"><div class="grow"><div class="t" style="white-space:normal">${esc(x.label)}</div><div class="s">${x.n} шт. · в плюс ${x.win}%</div></div><div class="r"><div class="b num ${cls(x.avg)}">${pct(x.avg, 0)}</div></div></div>`).join("");
+  return `<div class="card" style="margin-top:10px">
+    <div class="b">🔎 Мелкие детали на экране</div><div class="tiny muted" style="white-space:normal">инсайд-чаты, созвоны, трекеры кошельков, цифры токена — всё, что мелькнуло у стримера</div>
+    ${rows ? `<div class="list" style="margin-top:8px">${rows}</div>` : ""}
+    ${v ? `<div class="small b" style="margin-top:10px">Чего стоят такие «засветы» <span class="muted">(⚡ Пульс вёл токены сутки)</span></div><div class="list" style="margin-top:6px">${v}</div>` : ""}
+  </div>`;
+}
+
+function mirrorBlock(m) {
+  const r = m.live && m.live.mirror;
+  if (!r) return "";
+  const VI = { proven: "✅", promising: "🟡", flat: "⚪", losing: "🔴", data: "⏳", none: "▫️" };
+  const books = (r.books || []).map((b) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">${VI[b.verdict] || "•"} ${esc(b.title)}</div>
+      <div class="s" style="white-space:normal">${esc(b.how)}</div>
+      <div class="tiny" style="white-space:normal">${b.n ? `${b.n} сд., в плюс ${b.wins}${b.avg != null ? `, ${pct(b.avg, 1)}/сд.` : ""}` : "сделок ещё не было"}${(b.open || []).length ? ` · открыто: ${b.open.map((o) => `${o.side > 0 ? "🟢" : "🔴"} ${esc(o.asset)} ${pct(o.now, 1)}`).join(", ")}` : ""}</div></div>
+      <div class="r"><div class="b num">${money(b.equity, { d: 2 })}</div></div></div>`).join("");
+  const str = (r.streamers || []).map((x) => `<div class="item"><div class="grow"><div class="t">${VI[x.verdict] || "•"} ${esc(x.name)}</div><div class="s">точная: ${x.n ? `${x.n} сд., ${pct(x.avg, 1)}` : "—"} · умная: ${x.smart_n ? `${x.smart_n} сд., ${pct(x.smart_avg, 1)}` : "—"}</div></div></div>`).join("");
+  return `<div class="card pilot-card ${r.on ? "on" : ""}" style="margin-top:10px">
+    <div class="row between"><div><div class="b">🪞 Повтор стримеров на демо</div><div class="tiny muted">что стример делает в эфире — бот сразу повторяет на виртуальных $10</div></div>
+      ${m.owner ? `<label class="switch"><input type="checkbox" data-act="mr-on" ${r.on ? "checked" : ""}><span></span></label>` : ""}</div>
+    <div class="list" style="margin-top:8px">${books}</div>
+    ${str ? `<div class="small b" style="margin-top:10px">Копировать ли стримера</div><div class="list" style="margin-top:6px">${str}</div>` : ""}
+    ${r.late_avg != null ? `<div class="tiny muted" style="margin-top:6px">⏱ Опоздание стоит в среднем ${pct(r.late_avg, 2)} на вход</div>` : ""}
+    <div class="tiny dim" style="margin-top:8px;white-space:normal">Плечо стримера не повторяю, комиссии учтены. Если умная копия заметно лучше точной — ошибки стримера стоят денег.</div>
+  </div>`;
+}
+
+function pulseBlock(m) {
+  const p = m.pulse;
+  if (!p) return "";
+  const VI = { proven: "✅", promising: "🟡", flat: "⚪", losing: "🔴", data: "⏳", none: "▫️" };
+  const books = (p.books || []).map((b) => `<div class="item"><div class="grow"><div class="t">${b.active ? "👉 " : ""}${VI[b.verdict] || "•"} ${esc(b.title)}</div><div class="s" style="white-space:normal">${esc(b.how)} · ${b.n ? `${b.n} сд., в плюс ${b.wins}, ${pct(b.avg, 1)}/сд.` : `открыто ${b.open}`}</div></div><div class="r"><div class="b num">${money(b.equity, { d: 2 })}</div></div></div>`).join("");
+  const ins = p.insights || [];
+  const insRows = ins.length ? [...ins.slice(0, 3), ...ins.slice(-3).reverse().filter((x) => x.avg > 0 && !ins.slice(0, 3).includes(x))].map((x) => `<div class="item"><div class="grow"><div class="t" style="white-space:normal">${x.avg > 0 ? "✅" : "❌"} ${esc(x.label)}</div><div class="s">${x.n} токенов · в плюс ${x.win}%</div></div><div class="r"><div class="b num ${cls(x.avg)}">${pct(x.avg, 0)}</div></div></div>`).join("") : "";
+  const rec = (p.recent || []).slice(0, 5).map((x) => `<div class="item"><div class="grow"><div class="t">${esc(x.symbol)}</div><div class="s">${esc((x.src || []).slice(0, 2).join(", "))} · ${ago(x.at)}</div></div><div class="r"><div class="b num ${cls(x.now)}">${pct(x.now, 0)}</div><div class="s num">макс ${pct(x.max, 0)}</div></div></div>`).join("");
+  const g = p.gmgn || {};
+  return `<div class="card pilot-card ${p.on ? "on" : ""}" style="margin-top:12px">
+    <div class="row between"><div><div class="b">⚡ Пульс рынка</div><div class="tiny muted">GMGN + Axiom Pulse: бот торгует кандидатами на бумаге и учится</div></div>
+      ${m.owner ? `<label class="switch"><input type="checkbox" data-act="pl-on" ${p.on ? "checked" : ""}><span></span></label>` : ""}</div>
+    <div class="small muted" style="margin-top:6px;white-space:normal">${g.configured ? "GMGN" + (g.test_key ? " (тестовый ключ)" : "") + " + DexScreener" : "DexScreener + RugCheck · для полного пульса добавь GMGN_API_KEY"} · веду ${p.tracking}, закрыто ${p.done} · стоп −${Math.round(p.rule.stop * 100)}%, тейк ${p.rule.tp ? "+" + Math.round(p.rule.tp * 100) + "%" : "нет"}</div>
+    <div class="small" style="margin-top:6px;white-space:normal">${p.active_title ? `Сигналы — от стратегии <b>${esc(p.active_title)}</b>` : "Сигналов пока нет: ни одна стратегия не доказала плюс"}</div>
+    <div class="list" style="margin-top:8px">${books}</div>
+    ${insRows ? `<div class="small b" style="margin-top:10px">Чему научился на рынке</div><div class="list" style="margin-top:6px">${insRows}</div>` : ""}
+    ${(p.avoid || []).length ? `<div class="tiny" style="margin-top:6px;white-space:normal">🚫 Стоп-лист: ${p.avoid.map(esc).join("; ")}</div>` : ""}
+    ${rec ? `<div class="small b" style="margin-top:10px">Свежие кандидаты</div><div class="list" style="margin-top:6px">${rec}</div>` : ""}
+    ${p.error ? `<div class="tiny" style="margin-top:6px;white-space:normal">⚠️ ${esc(p.error)}</div>` : ""}
+    ${m.owner ? `<div class="list" style="margin-top:10px"><div class="item"><div class="grow"><div class="t">🔔 Сигналы лучшей стратегии</div></div><label class="switch"><input type="checkbox" data-act="pl-notify" ${p.notify ? "checked" : ""}><span></span></label></div></div>` : ""}
+    <div class="tiny dim" style="margin-top:8px;white-space:normal">Бумажные $10 на стратегию, комиссии и сеть учтены. Настоящие деньги пульс не трогает.</div>
   </div>`;
 }
 
@@ -1671,6 +1729,7 @@ function mentorsSheet() {
     <div class="row between"><span class="pill ${m.on ? "ok" : "gray"}">${m.on ? "🟢 учусь" : "⏸ выключено"}</span><span class="pill ${m.gemini ? "ok" : "test"}">${m.gemini ? `Gemini: ${Math.max(0, m.budget_left)} из ${m.videos_per_day} роликов сегодня` : "без Gemini"}</span></div>
     ${m.gemini ? "" : `<div class="banner info" style="margin-top:10px;white-space:normal">Без ключа Gemini бот читает только название и описание ролика. Ключ бесплатный: aistudio.google.com/apikey → Create API key → Render → Environment → <b>GEMINI_API_KEY</b>.</div>`}
     ${liveBlock(m)}
+    ${pulseBlock(m)}
     ${trainBlock(m)}
     ${scoutBlock(m)}
     ${m.owner ? `<div class="list" style="margin-top:10px">
@@ -2196,6 +2255,9 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "mn-on") mentorsAction({ on: el.checked }, el.checked ? "Учусь" : "Выключено");
   else if (el.dataset.act === "mn-notify") mentorsAction({ notify: el.checked });
   else if (el.dataset.act === "lv-on") mentorsAction({ live: { on: el.checked } }, el.checked ? "Смотрю эфиры" : "Эфиры не смотрю");
+  else if (el.dataset.act === "mr-on") mentorsAction({ live: { mirror: el.checked } }, el.checked ? "Повторяю стримеров на демо" : "Не повторяю");
+  else if (el.dataset.act === "pl-on") mentorsAction({ pulse: { on: el.checked } }, el.checked ? "Пульс включён" : "Пульс выключен");
+  else if (el.dataset.act === "pl-notify") mentorsAction({ pulse: { notify: el.checked } }, el.checked ? "Сигналы пульса включены" : "Сигналы пульса выключены");
   else if (el.dataset.act === "sc-on") mentorsAction({ scout: { on: el.checked } }, el.checked ? "Разведчик ищет сам" : "Разведчик выключен");
   else if (el.dataset.act === "pf-guard") profitAction({ guard: el.checked });
   else if (el.dataset.act === "au-on") profitAction({ auto: el.checked });

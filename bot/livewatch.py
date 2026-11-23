@@ -62,6 +62,8 @@ MAX_CLIP_BYTES = 10 * 1024 * 1024                        # Gemini принима
 MAX_BW = 3_600_000                                       # 720p30 (~3 Мбит/с) влезает, 720p60/1080p — нет
 INTERVALS = (3, 5, 10, 20)                               # минут между взглядами на один эфир
 MAX_STREAMS = 2                                          # одновременно смотрим не больше двух эфиров
+LIVE_FPS = _env_int("LIVE_FPS", 2, 1, 5)                 # кадров в секунду для ИИ: 2 — ловит окна, мелькнувшие на миг
+LIVE_RES = (os.environ.get("LIVE_MEDIA_RES") or "high").strip().lower()  # high — мелкий текст (чаты, цифры) читается
 ONLINE_EVERY = 120                                       # проверять, кто в эфире
 TICK_SEC = 30
 SAME_ACTION_SEC = 30 * 60                                # повтор того же действия с той же монетой — не новость
@@ -82,13 +84,31 @@ PLUS_TAGS = {
     "stop_set": "ставит стоп", "took_profit": "фиксирует прибыль", "cut_loss": "быстро режет убыток",
     "small_size": "небольшой размер позиции", "waited_setup": "ждёт сетап, не спешит",
     "followed_plan": "действует по плану", "explained": "объясняет, почему входит",
+    "checked_token": "проверяет холдеров, бандлы и разработчика перед входом",
 }
 MISTAKE_TAGS = {
     "no_stop": "нет стопа", "averaging_down": "усредняет убыток", "overleverage": "большое плечо",
     "fomo_chase": "догоняет рост (FOMO)", "revenge": "отыгрывается после убытка", "moved_stop": "отодвигает стоп",
     "oversize": "слишком большая позиция", "no_plan": "вход без плана", "held_loser": "пересиживает убыток",
     "early_exit": "выходит слишком рано", "overtrading": "слишком много сделок",
+    "copied_call": "входит по чужому коллу, не проверив токен", "ignored_red_flags": "входит, несмотря на красные флаги",
 }
+# Мелкие детали на экране: то, что мелькает сбоку, во втором окне, в телефоне — часто важнее графика
+DETAIL_TYPES = {
+    "insider_chat": "🕵️ закрытый/инсайд-чат", "call_channel": "📣 колл-канал или группа сигналов",
+    "voice_call": "🎧 созвон (Telegram/Discord)", "wallet_tracker": "👛 трекер кошельков",
+    "smart_buy": "🐋 покупка умного кошелька/KOL", "dev_action": "🧑‍💻 действия разработчика токена",
+    "token_stats": "📊 цифры токена", "pulse": "⚡ Axiom Pulse / GMGN Trenches", "tweet": "🐦 твит или пост",
+    "promo": "💰 реклама/спонсор", "pnl_flex": "🖼 хвастается P&L-карточкой", "other": "🔎 деталь",
+}
+ALERT_DETAILS = {"insider_chat", "call_channel", "voice_call", "wallet_tracker", "smart_buy", "dev_action"}
+# деталь → источник для ⚡ Пульса (там бот ведёт токен сутки и считает, чего стоит такой «засвет»)
+DETAIL_SRC = {"insider_chat": "insider", "call_channel": "insider", "voice_call": "insider",
+              "wallet_tracker": "tracker", "smart_buy": "tracker"}
+TOKEN_PCT = {"top10_pct": "top10", "dev_pct": "dev", "snipers_pct": "snipers", "bundles_pct": "bundler",
+             "insiders_pct": "insider"}
+RED = {"top10": (0.5, "топ-10 держат {}"), "dev": (0.15, "у разработчика {}"), "snipers": (0.3, "снайперы держат {}"),
+       "bundler": (0.3, "бандлы {}"), "insider": (0.3, "инсайдеры {}"), "rug": (0.3, "риск rug {}")}
 MARKETS = {"spot": "спот", "perp": "фьючерсы", "meme": "мемкоин", "unknown": ""}
 LESSON_MIN = 3   # показывать «цену ошибки» от 3 проверенных входов
 LESSON_SURE = 8  # от 8 — уверенно
@@ -108,14 +128,29 @@ PROMPT = """\
  "position": {{"side": "long|short|none", "entry": null, "size_usd": null, "leverage": null, "stop": null, \
 "take": null, "pnl_pct": null}},
  "said": "главное, что сказал о сделке, по-русски, до 160 символов",
+ "details": [{{"type": "{dtypes}", "text": "что именно видно или слышно, до 140 символов", \
+"who": "чей чат/канал/кошелёк, если видно", "asset": "тикер или пусто", "contract": "адрес, если виден целиком"}}],
+ "token": {{"mcap": null, "liquidity": null, "holders": null, "top10_pct": null, "dev_pct": null, \
+"snipers_pct": null, "bundles_pct": null, "insiders_pct": null, "age_min": null}},
  "pluses": [{{"tag": "{plus}", "text": "до 120 символов: что именно сделал хорошо"}}],
  "mistakes": [{{"tag": "{miss}", "text": "до 120 символов: что именно сделал не так"}}],
  "discipline": 0-10 или null (насколько действия дисциплинированы; null — если торговли не видно),
  "lesson": "один практический вывод для новичка из этого фрагмента, до 160 символов",
  "confidence": "low|medium|high"}}
+МЕЛКИЕ ДЕТАЛИ — главное, ради чего ты смотришь: осмотри ВЕСЬ экран, каждый кадр, включая углы, боковые \
+панели, всплывающие уведомления, второй монитор и телефон в кадре. Окно Telegram/Discord с чатом, где кидают \
+токены (закрытый, «альфа», «инсайд») — insider_chat; публичный колл-канал — call_channel; слышен созвон или \
+чужой голос называет токен — voice_call; трекер кошельков (Cielo, GMGN, Axiom, Photon: «кошелёк X купил») — \
+wallet_tracker; видно, что покупает KOL или «умный» кошелёк — smart_buy; разработчик продаёт/выпускает новый \
+токен — dev_action; лента новых токенов Axiom Pulse / GMGN Trenches — pulse; твит — tweet. Даже если окно \
+мелькнуло на долю секунды — запиши в details, перепиши тикер и адрес, если их можно прочитать. Панель токена \
+(Market Cap, Liquidity, Holders, Top 10, Dev, Snipers, Insiders, Bundles, возраст) — числа в token, проценты как \
+0–100. Нет деталей — пустой список, не выдумывай.
 Правила: action — действие именно в этом фрагменте (позиция уже была открыта и он просто смотрит — watching). \
 Сравни с прошлым взглядом: стоп дальше от цены, чем был, — move_stop и ошибка moved_stop; добавил к убыточной \
-позиции — add и ошибка averaging_down. Плюсы и ошибки — только с тегами из списка, не больше 3 каждого, \
+позиции — add и ошибка averaging_down. Купил токен сразу после того, как его кинули в чат/колл, не открыв \
+холдеров и график, — ошибка copied_call; проверил холдеров/бандлы/разработчика перед входом — плюс checked_token. \
+Плюсы и ошибки — только с тегами из списка, не больше 3 каждого, \
 только если это действительно видно или сказано. Числа — как на экране (цена, $, %, плечо x)."""
 
 
@@ -279,6 +314,58 @@ def parse_live(data: dict, logins: list[str]) -> dict[str, dict | None]:
     return out
 
 
+def clean_token(raw: Any) -> dict:
+    """Цифры панели токена с экрана → доли 0–1 (проценты с экрана делим на 100) и $; неправдоподобное — None."""
+    raw = raw if isinstance(raw, dict) else {}
+    out: dict[str, float | None] = {}
+    for k in ("mcap", "liquidity", "holders", "age_min"):
+        v = _num(raw.get(k))
+        out["liq" if k == "liquidity" else k] = v if v is not None and v >= 0 else None
+    for k, name in TOKEN_PCT.items():
+        v = _num(raw.get(k))
+        out[name] = round(v / 100, 4) if v is not None and 0 <= v <= 100 else None
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def token_flags(t: dict | None) -> list[str]:
+    """Красные флаги токена по цифрам (с экрана или из GMGN): концентрация, разработчик, снайперы, бандлы…"""
+    t = t or {}
+    out = []
+    for k, (limit, text) in RED.items():
+        v = t.get(k)
+        if v is not None and v > limit:
+            out.append(text.format(f"{v:.2f}" if k == "rug" else f"{v:.0%}"))
+    if t.get("honeypot"):
+        out.append("продать нельзя (honeypot)")
+    liq = t.get("liq")
+    if liq is not None and 0 < liq < 10_000:
+        out.append(f"ликвидность всего ${liq:,.0f}".replace(",", " "))
+    return out
+
+
+def clean_details(items: Any) -> list[dict]:
+    from .solana import valid_address
+    out, seen = [], set()
+    for it in (items if isinstance(items, list) else [])[:8]:
+        if not isinstance(it, dict):
+            continue
+        typ = _s(it.get("type"), 20).lower()
+        if typ not in DETAIL_TYPES:
+            continue
+        text = _s(it.get("text"), 140)
+        asset = _s(it.get("asset"), 16).upper().lstrip("$")
+        contract = _s(it.get("contract"), 50)
+        d = {"type": typ, "text": text or DETAIL_TYPES[typ], "who": _s(it.get("who"), 40),
+             "asset": asset if re.fullmatch(r"[A-Z0-9]{1,15}", asset) else "",
+             "contract": contract if valid_address(contract) else ""}
+        key = (typ, d["contract"] or d["asset"] or d["text"][:40])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out[:6]
+
+
 def clean_obs(raw: dict) -> dict:
     """Ответ ИИ → проверенный вид: действие и теги только из списков, числа — числа."""
     raw = raw if isinstance(raw, dict) else {}
@@ -315,7 +402,18 @@ def clean_obs(raw: dict) -> dict:
            "position": position, "said": _s(raw.get("said"), 180), "pluses": tags(raw.get("pluses"), PLUS_TAGS),
            "mistakes": tags(raw.get("mistakes"), MISTAKE_TAGS),
            "discipline": None if disc is None else max(0.0, min(10.0, disc)),
-           "lesson": _s(raw.get("lesson"), 180), "confidence": conf if conf in ("low", "medium", "high") else "medium"}
+           "lesson": _s(raw.get("lesson"), 180), "confidence": conf if conf in ("low", "medium", "high") else "medium",
+           "details": clean_details(raw.get("details")), "token": clean_token(raw.get("token"))}
+    obs["red_flags"] = token_flags(obs["token"])
+    if obs["action"] in ENTRY and obs["red_flags"] and all(m["tag"] != "ignored_red_flags" for m in obs["mistakes"]):
+        # бот видит по цифрам с экрана сам: вошёл, хотя у токена красные флаги
+        obs["mistakes"] = (obs["mistakes"] + [{"tag": "ignored_red_flags",
+                                               "text": "вошёл, хотя " + ", ".join(obs["red_flags"][:2])}])[:3]
+    if not obs["contract"]:  # адрес мелькнул в детали (чат, трекер), а торгуется тот же тикер — берём его
+        for d in obs["details"]:
+            if d["contract"] and obs["asset"] and d["asset"] == obs["asset"]:
+                obs["contract"] = d["contract"]
+                break
     # то, что бот видит сам по цифрам, не полагаясь на ИИ: добавил к убыточной позиции = усреднение убытка
     pnl = position["pnl_pct"]
     if obs["action"] == "add" and pnl is not None and pnl < 0 and all(m["tag"] != "averaging_down" for m in obs["mistakes"]):
@@ -518,10 +616,32 @@ class LiveGemini:
         self.dead: set[str] = set()
         self.disabled_until = 0.0
         self.last_error: str | None = None
+        self.fps = LIVE_FPS if LIVE_FPS > 1 else None          # None — частота кадров по умолчанию (1 в секунду)
+        self.res = {"high": "MEDIA_RESOLUTION_HIGH", "medium": "MEDIA_RESOLUTION_MEDIUM",
+                    "low": "MEDIA_RESOLUTION_LOW"}.get(LIVE_RES)
 
     @property
     def configured(self) -> bool:
         return bool(self.key)
+
+    def _strip(self, body: bytes) -> bytes:
+        """Убрать из готового запроса разрешение и частоту кадров (без повторного кодирования видео)."""
+        if self.fps:
+            body = body.replace(b',"videoMetadata":{"fps":' + str(self.fps).encode() + b"}", b"", 1)
+        if self.res:
+            body = body.replace(b', "mediaResolution": "' + self.res.encode() + b'"', b"", 1)
+        self.res, self.fps = None, None
+        return body
+
+    def _body(self, b64: bytes, mime: str, prompt: str) -> bytes:
+        cfg: dict = {"responseMimeType": "application/json", "temperature": 0.1, "maxOutputTokens": 2000}
+        if self.res:
+            cfg["mediaResolution"] = self.res
+        meta = b',"videoMetadata":{"fps":' + str(self.fps).encode() + b"}" if self.fps and mime.startswith("video/") else b""
+        # тело собираем из байтов: так огромная строка base64 не копируется лишний раз через json.dumps
+        return b"".join([b'{"contents":[{"parts":[{"inline_data":{"mime_type":', json.dumps(mime).encode(),
+                         b',"data":"', b64, b'"}', meta, b'},{"text":', json.dumps(prompt, ensure_ascii=False).encode(),
+                         b'}]}],"generationConfig":', json.dumps(cfg).encode(), b"}"])
 
     async def _pick_model(self) -> str:
         if self.model and self.model not in self.dead:
@@ -551,14 +671,10 @@ class LiveGemini:
             raise LiveError("Gemini: лимит, жду")
         from . import mentors
         b64 = base64.b64encode(data)
-        cfg = {"responseMimeType": "application/json", "temperature": 0.1, "maxOutputTokens": 1500}
-        # тело собираем из байтов: так огромная строка base64 не копируется лишний раз через json.dumps
-        body = b"".join([b'{"contents":[{"parts":[{"inline_data":{"mime_type":', json.dumps(mime).encode(),
-                         b',"data":"', b64, b'"}},{"text":', json.dumps(prompt, ensure_ascii=False).encode(),
-                         b'}]}],"generationConfig":', json.dumps(cfg).encode(), b"}"])
+        body = self._body(b64, mime, prompt)
         del b64
         http = await self._session()
-        for _ in range(3):
+        for _ in range(4):
             model = await self._pick_model()
             async with http.post(f"{mentors.GEMINI_BASE}/models/{model}:generateContent", data=body,
                                  headers={"x-goog-api-key": self.key, "Content-Type": "application/json"},
@@ -581,6 +697,12 @@ class LiveGemini:
                 raise LiveError("Gemini: лимит бесплатного тарифа, продолжу через 10 минут")
             if r.status in (401, 403):
                 raise LiveError(f"Gemini: ключ не подходит ({r.status})")
+            if r.status == 400 and (self.res or self.fps) and any(
+                    x in low for x in ("media_resolution", "mediaresolution", "video_metadata", "videometadata", "fps")):
+                # эта модель не понимает «высокое разрешение» / частоту кадров — смотрим как раньше
+                log.info("Gemini (эфиры): без media_resolution/fps: %s", text[:120])
+                body = self._strip(body)
+                continue
             if r.status in (400, 404) and "model" in low and ("not found" in low or "not supported" in low):
                 self.dead.add(model)
                 self.model = None
@@ -599,7 +721,7 @@ def new_state() -> dict:
 
 
 def new_profile() -> dict:
-    return {"sessions": 0, "obs": 0, "minutes": 0, "entries": 0, "plus": {}, "miss": {}, "disc": []}
+    return {"sessions": 0, "obs": 0, "minutes": 0, "entries": 0, "plus": {}, "miss": {}, "disc": [], "seen": {}}
 
 
 class LiveWatch:
@@ -611,6 +733,9 @@ class LiveWatch:
         self.online_at = 0.0
         self.lock = asyncio.Lock()
         self.events: list[dict] = []
+        from .mirror import Mirror
+        self.mirror = Mirror(self)  # 🪞 повтор действий стримера на демо (bot/mirror.py)
+        self.pulse = None  # ⚡ пульс рынка (bot/pulse.py): проверка токенов с экрана и учёт «засветов»; ставит бот
 
     @property
     def ai(self) -> LiveGemini:
@@ -692,6 +817,12 @@ class LiveWatch:
         events: list[dict] = []
         if now - self.online_at >= ONLINE_EVERY:
             events += await self.refresh_online(now)
+        try:
+            closed = await self.mirror.update(now)
+            if st["notify"] in ("actions", "all"):
+                events += closed
+        except Exception as e:
+            log.info("Повтор на демо: %s", e)
         if self.budget_left(now) <= 0 or time.time() < self.ai.disabled_until:
             return events
         chat = getattr(self.m.twitch, "last_call", {}) or {}
@@ -752,7 +883,8 @@ class LiveWatch:
         self.st["sessions"][login] = {"login": login, "name": src["name"], "stream_id": info["id"],
                                       "title": info["title"], "started": info["started"], "opened": now,
                                       "last_at": 0.0, "n": 0, "obs": [], "actions": [], "plus": {}, "miss": {},
-                                      "disc": [], "lessons": [], "acted": {}, "counted": {}, "mode": ""}
+                                      "disc": [], "lessons": [], "acted": {}, "counted": {}, "mode": "",
+                                      "details": [], "seen": {}}
         self.m._changed()
 
     def prompt(self, sess: dict, src: dict, meta: dict) -> str:
@@ -769,7 +901,7 @@ class LiveWatch:
                       f"Последние действия: " + (", ".join(f"{a['action']} {a.get('asset', '')}" for a in
                                                             sess["actions"][-3:]) or "нет") + ".")
         return PROMPT.format(what=what, name=src["name"], title=sess.get("title", ""), before=before,
-                             plus="|".join(PLUS_TAGS), miss="|".join(MISTAKE_TAGS))
+                             plus="|".join(PLUS_TAGS), miss="|".join(MISTAKE_TAGS), dtypes="|".join(DETAIL_TYPES))
 
     async def apply(self, sess: dict, src: dict, obs: dict, now: float, why: str = "",
                     force_event: bool = False) -> list[dict]:
@@ -804,10 +936,31 @@ class LiveWatch:
                 new_action = True
                 sess["actions"] = (sess["actions"] + [{"at": now, "action": obs["action"], "asset": asset,
                                                        "said": obs["said"][:120]}])[-30:]
+        fresh_details = self._details(sess, prof, obs, now)
+        check = None
+        mint = obs["contract"] or next((d["contract"] for d in fresh_details if d["contract"]), "")
+        if mint and self.pulse is not None and (new_action or fresh_details):
+            try:
+                check = await self.pulse.token_check(mint, now)
+            except Exception as e:
+                log.info("Проверка токена со стрима: %s", e)
+            flags = token_flags(check)
+            if check and flags and mint == obs["contract"]:
+                obs["red_flags"] = list(dict.fromkeys(obs["red_flags"] + flags))[:5]
+                if new_action and obs["action"] in ENTRY and all(m["tag"] != "ignored_red_flags" for m in obs["mistakes"]):
+                    obs["mistakes"] = (obs["mistakes"] + [{"tag": "ignored_red_flags",
+                                                           "text": f"по {check.get('src', 'проверке')}: " + ", ".join(flags[:2])}])[:3]
+                    sess["miss"]["ignored_red_flags"] = sess["miss"].get("ignored_red_flags", 0) + 1
+                    prof["miss"]["ignored_red_flags"] = prof["miss"].get("ignored_red_flags", 0) + 1
         call = None
         if new_action and obs["action"] in ENTRY:
             prof["entries"] += 1
             call = await self._check_entry(src, obs, now)
+        mirror_lines: list[str] = []
+        try:
+            mirror_lines = await self.mirror.on_obs(sess, src, obs, now, new_action, sess["obs"][-1] if sess["obs"] else None)
+        except Exception as e:
+            log.info("Повтор на демо: %s", e)
         for k in list(sess["acted"]):
             if now - sess["acted"][k] > 6 * 3600:
                 del sess["acted"][k]
@@ -819,9 +972,37 @@ class LiveWatch:
         self.m._changed()
         mode = st["notify"]
         fresh_miss = [it for k, it in new_tags if k == "miss"]
-        show = force_event or (mode == "all" and bool(obs["trading"] or obs["summary"])) or (
-            mode == "actions" and bool(new_action or fresh_miss))
-        return [self.obs_event(sess, src, obs, call, why)] if show else []
+        alert = [d for d in fresh_details if d["type"] in ALERT_DETAILS]
+        show = force_event or (mode == "all" and bool(obs["trading"] or obs["summary"] or fresh_details)) or (
+            mode == "actions" and bool(new_action or fresh_miss or alert or mirror_lines))
+        if not show:
+            return []
+        return [self.obs_event(sess, src, obs, call, why, details=fresh_details, check=check, mirror=mirror_lines)]
+
+    def _details(self, sess: dict, prof: dict, obs: dict, now: float) -> list[dict]:
+        """Новые мелкие детали (та же деталь повторно за 30 минут — не новость). Токены из инсайд-чатов и трекеров
+        уходят в ⚡ Пульс: там бот ведёт их сутки и считает, чего стоит такой «засвет» на экране."""
+        if obs["confidence"] == "low":
+            return []
+        seen = sess.setdefault("seen", {})
+        prof.setdefault("seen", {})
+        fresh = []
+        for d in obs["details"]:
+            key = f"{d['type']}:{d['contract'] or d['asset'] or d['who'] or d['text'][:30]}"
+            if now - seen.get(key, 0) < SAME_ACTION_SEC:
+                continue
+            seen[key] = now
+            fresh.append(d)
+            prof["seen"][d["type"]] = prof["seen"].get(d["type"], 0) + 1
+            sess["details"] = (sess.get("details", []) + [{"at": now, **d}])[-10:]
+            if d["contract"] and self.pulse is not None:
+                self.pulse.add_external(d["contract"], DETAIL_SRC.get(d["type"], "stream"), sess["name"], now)
+        if obs["contract"] and self.pulse is not None and obs["action"] in SIGNIFICANT:
+            self.pulse.add_external(obs["contract"], "stream", sess["name"], now)
+        for k in list(seen):
+            if now - seen[k] > 6 * 3600:
+                del seen[k]
+        return fresh
 
     async def _check_entry(self, src: dict, obs: dict, now: float) -> dict | None:
         """Вход стримера → прогноз на проверку ценой (как в 🎓) + идея для 🏋️ тренировки на демо."""
@@ -844,7 +1025,8 @@ class LiveWatch:
             self.m.pending.append(signal)
         return call
 
-    def obs_event(self, sess: dict, src: dict, obs: dict, call: dict | None, why: str = "") -> dict:
+    def obs_event(self, sess: dict, src: dict, obs: dict, call: dict | None, why: str = "",
+                  details: list[dict] | None = None, check: dict | None = None, mirror: list[str] | None = None) -> dict:
         login = sess["login"]
         icon = {"star": "⭐", "muted": "🔇"}.get(src.get("status"), "👀")
         head = f"🎥 {icon} <b>{html.escape(src['name'])}</b> · вживую {_hm(time.time())}"
@@ -871,6 +1053,37 @@ class LiveWatch:
             lines.append(html.escape(obs["summary"]))
         if obs["said"]:
             lines.append(f"💬 «{html.escape(obs['said'])}»")
+        for d in (details if details is not None else obs.get("details") or [])[:4]:
+            row = f"{DETAIL_TYPES[d['type']]}"
+            if d["who"]:
+                row += f" ({html.escape(d['who'])})"
+            row += f": {html.escape(d['text'])}"
+            tok = d["asset"] or ""
+            if d["contract"]:
+                tok = (tok + " " if tok else "") + f"<code>{d['contract']}</code>"
+            lines.append(row + (f" — {tok}" if tok and tok not in d["text"] else ""))
+        t = obs.get("token") or {}
+        nums = []
+        for k, label in (("mcap", "кап."), ("liq", "ликв."), ("holders", "холдеров")):
+            if t.get(k):
+                nums.append(f"{label} {'$' if k != 'holders' else ''}{_price(t[k])}")
+        for k, label in (("top10", "топ-10"), ("dev", "dev"), ("snipers", "снайперы"), ("bundler", "бандлы"),
+                         ("insider", "инсайдеры")):
+            if t.get(k) is not None:
+                nums.append(f"{label} {t[k]:.0%}")
+        if nums:
+            lines.append("📊 На экране: " + " · ".join(nums))
+        if check:
+            cn = [f"{label} {check[k]:.0%}" for k, label in (("top10", "топ-10"), ("dev", "dev"), ("bundler", "бандлы"),
+                                                              ("insider", "инсайдеры")) if check.get(k) is not None]
+            if check.get("rug") is not None:
+                cn.append(f"риск rug {check['rug']:.2f}")
+            if check.get("dev_sold") is True:
+                cn.append("dev продал")
+            if cn:
+                lines.append(f"🔬 Проверил по {html.escape(check.get('src', ''))}: " + " · ".join(cn))
+        if obs.get("red_flags"):
+            lines.append("🚩 Красные флаги: " + html.escape(", ".join(obs["red_flags"][:4])))
         if obs["pluses"]:
             lines.append("✅ " + "; ".join(f"<b>{PLUS_TAGS[x['tag']]}</b> — {html.escape(x['text'])}" for x in obs["pluses"]))
         if obs["mistakes"]:
@@ -888,11 +1101,17 @@ class LiveWatch:
                          (" (мемкоин — как копия со стопом)" if call["kind"] == "sol" else "") + ".")
         elif obs["action"] in ENTRY:
             lines.append("📏 Проверить ценой не смогу: монеты нет на Bybit/BingX/DexScreener или не видно, какая.")
+        for row in mirror or []:
+            lines.append(row)
         if obs["confidence"] == "low" or sess.get("mode") == "image":
             why = f": {sess['why']}" if sess.get("mode") == "image" and sess.get("why") else ""
             lines.append("<i>Видно плохо" + (f" (только кадр без звука{html.escape(why)})" if sess.get("mode") == "image"
                                              else "") + " — выводы осторожные.</i>")
-        return {"text": "\n".join(lines), "buttons": [("📺 Открыть стрим", f"https://twitch.tv/{login}")]}
+        buttons = [("📺 Открыть стрим", f"https://twitch.tv/{login}")]
+        mint = obs["contract"] or next((d["contract"] for d in details or [] if d["contract"]), "")
+        if mint:
+            buttons.append(("🟢 GMGN", f"https://gmgn.ai/sol/token/{mint}"))
+        return {"text": "\n".join(lines), "buttons": buttons}
 
     def finish(self, login: str, now: float) -> list[dict]:
         """Эфир кончился: итог в чат, профиль стримера, архив."""
@@ -917,7 +1136,10 @@ class LiveWatch:
                "wins": sum(a["action"] == "take_profit" for a in exits),
                "losses": sum(a["action"] == "exit_loss" for a in exits),
                "assets": list(dict.fromkeys(a["asset"] for a in entries if a["asset"]))[:5],
-               "plus": dict(sess["plus"]), "miss": dict(sess["miss"]), "disc": disc, "lessons": sess["lessons"][-2:]}
+               "plus": dict(sess["plus"]), "miss": dict(sess["miss"]), "disc": disc, "lessons": sess["lessons"][-2:],
+               "details": len(sess.get("details") or []),
+               "alerts": [f"{DETAIL_TYPES[d['type']]}: {d['text'][:60]}" for d in (sess.get("details") or [])
+                          if d.get("type") in ALERT_DETAILS][-3:]}
         st["history"] = (st["history"] + [rec])[-20:]
         if st["notify"] == "off":
             return []
@@ -943,6 +1165,8 @@ class LiveWatch:
             lines.append("❌ Ошибки: " + top(rec["miss"], MISTAKE_TAGS))
         if rec["disc"] is not None:
             lines.append(f"🧭 Дисциплина в среднем {rec['disc']:.1f}/10")
+        if rec.get("alerts"):
+            lines.append("🔎 Мелькнуло на экране: " + " · ".join(html.escape(x) for x in rec["alerts"]))
         if rec["lessons"]:
             lines.append("🎓 Уроки: " + " · ".join(html.escape(x) for x in rec["lessons"]))
         lines.append("Его входы бот проверяет ценой — итог будет в 📈 Прогнозах и в счёте стримера.")
@@ -999,7 +1223,31 @@ class LiveWatch:
                 "cards": [{**c, "miss": [[MISTAKE_TAGS[k], v] for k, v in c["miss"]],
                            "plus": [[PLUS_TAGS[k], v] for k, v in c["plus"]]} for c in cards[:8]],
                 "history": list(reversed(st["history"][-5:])), "lessons": self.lessons(),
-                "error": st["last_error"], "focus": st["focus"]}
+                "error": st["last_error"], "focus": st["focus"], "details": self.recent_details(),
+                "detail_value": self.detail_value(), "mirror": self.mirror.status_dict(),
+                "fps": getattr(self.ai, "fps", None), "res": getattr(self.ai, "res", None)}
+
+    def recent_details(self, n: int = 6) -> list[dict]:
+        out = []
+        for sess in self.st["sessions"].values():
+            for d in sess.get("details") or []:
+                out.append({"at": d["at"], "name": sess["name"], "type": d["type"], "label": DETAIL_TYPES[d["type"]],
+                            "text": d["text"], "who": d["who"], "asset": d["asset"], "contract": d["contract"]})
+        return sorted(out, key=lambda x: -x["at"])[:n]
+
+    def detail_value(self) -> list[dict]:
+        """Чего стоят «засветы» на экране: токены из инсайд-чатов, трекеров и входов стримеров, которые ⚡ Пульс вёл
+        сутки с той же ценой, стопом и комиссиями, что и остальные кандидаты."""
+        if self.pulse is None:
+            return []
+        names = {"src:insider": "токены из инсайд-чатов/коллов на экране", "src:tracker": "токены с трекеров кошельков "
+                 "на экране", "src:stream": "токены, которыми торговал стример"}
+        try:
+            return [{"label": names[x["id"]], "n": x["n"], "avg": x["avg"], "win": x["win"]}
+                    for x in self.pulse.insights() if x["id"] in names]
+        except Exception as e:
+            log.info("Пульс для стримов: %s", e)
+            return []
 
     def ai_context(self) -> dict:
         d = self.status_dict()
@@ -1010,7 +1258,14 @@ class LiveWatch:
                 "streamer_habits": [{"name": c["name"], "discipline": c["disc"], "top_mistakes": c["miss"],
                                      "top_pluses": c["plus"], "entries_seen": c["entries"]} for c in d["cards"][:6]],
                 "cost_of_mistakes_checked_by_price": [{"what": x["label"], "entries": x["n"], "avg_pct": x["avg"]}
-                                                      for x in d["lessons"]]}
+                                                      for x in d["lessons"]],
+                "small_details_seen": [{"who": x["name"], "what": x["label"], "text": x["text"][:100]}
+                                       for x in d["details"][:4]],
+                "value_of_screen_details": d["detail_value"],
+                "mirror_demo": [{"book": b["title"], "trades": b["n"], "avg_pct": b["avg"], "equity": b["equity"]}
+                                for b in d["mirror"]["books"]],
+                "copy_streamer_verdict": [{"name": x["name"], "exact": x["avg"], "smart": x["smart_avg"], "n": x["n"]}
+                                          for x in d["mirror"]["streamers"][:5]]}
 
     def text(self) -> str:
         d = self.status_dict()
@@ -1059,6 +1314,19 @@ class LiveWatch:
         else:
             lines.append(f"\n📏 Каждый увиденный вход бот проверяет ценой. От {LESSON_MIN} проверенных входов здесь "
                          "появится «цена» каждой ошибки на цифрах.")
+        if d["details"]:
+            lines.append("\n<b>Мелкие детали на экране</b> (чаты, созвоны, трекеры, цифры токена):")
+            for x in d["details"][:4]:
+                lines.append(f"{_hm(x['at'])} {html.escape(x['name'])} — {x['label']}: {html.escape(x['text'][:90])}")
+        if d["detail_value"]:
+            lines.append("<b>Чего стоят такие «засветы»</b> (⚡ Пульс вёл токены сутки):")
+            for x in d["detail_value"]:
+                lines.append(f"• {html.escape(x['label'])}: {x['n']} шт., в среднем <b>{x['avg']:+.0f}%</b>, в плюс {x['win']}%")
+        mr = d["mirror"]
+        if mr["on"]:
+            parts = [f"{b['title']}: " + (f"{b['n']} сд., ${b['equity']:.2f}" if b["n"] or b["open"] else "ждёт входа")
+                     for b in mr["books"]]
+            lines.append("\n🪞 Повтор на демо — " + " · ".join(parts) + " (подробно: кнопка 🪞)")
         if d["history"]:
             h = d["history"][0]
             lines.append(f"\nПоследний итог: <b>{html.escape(h['name'])}</b>, {_dur(h['minutes'] * 60)}, входов "

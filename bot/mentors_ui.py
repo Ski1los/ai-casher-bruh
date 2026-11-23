@@ -89,6 +89,12 @@ LIVE_HOW = f"""\
 3) Ролик смотрит Gemini и записывает, что стример <b>делает</b>: вход или выход, монета, цена входа, стоп, \
 тейк, плечо, размер, что сказал. Бот помнит прошлый взгляд, поэтому видит действия во времени: передвинул стоп, \
 усреднил убыток, закрыл в минус.
+🔎 <b>Мелкие детали.</b> Бот осматривает весь экран (2 кадра в секунду, высокое разрешение — мелкий текст \
+читается): окно инсайд-чата или колл-канала, созвон в Discord/Telegram, трекер кошельков, покупки KOL, ленту \
+Axiom Pulse / GMGN, панель токена (холдеры, топ-10, разработчик, снайперы, бандлы). Мелькнувший адрес бот сразу \
+проверяет через GMGN/RugCheck и отдаёт в ⚡ /pulse — там видно на цифрах, чего стоят такие «засветы».
+🪞 <b>Повтор на демо.</b> Вход, доливку, стоп и выход стримера бот сразу повторяет на виртуальных $10 по \
+настоящей цене: «точная копия» и «умная копия» (без его ошибок). Так видно, стоит ли копировать стримера.
 4) Каждое действие получает оценку: ✅ сильные стороны (ставит стоп, фиксирует прибыль, режет убыток, ждёт \
 сетап…) и ❌ ошибки (нет стопа, усреднение убытка, большое плечо, FOMO, отыгрыш…), плюс дисциплина 0–10 и урок.
 5) <b>Главное — проверка ценой.</b> Каждый увиденный вход бот проверяет по ценам Bybit/BingX/DexScreener и \
@@ -114,9 +120,19 @@ def live_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=f"🔔 Сообщать: {NOTIFY_TEXT[st['notify']]}", callback_data="mn:lnotify")])
     rows.append([InlineKeyboardButton(text="⏸ Не смотреть" if st["on"] else "🟢 Смотреть эфиры", callback_data="mn:ltoggle"),
                  InlineKeyboardButton(text="🔄 Обновить", callback_data="mn:live")])
+    rows.append([InlineKeyboardButton(text="🪞 Повтор на демо", callback_data="mn:mirror"),
+                 InlineKeyboardButton(text="⚡ Пульс рынка", callback_data="pu:show")])
     rows.append([InlineKeyboardButton(text="❔ Как это работает", callback_data="mn:lhelp"),
                  InlineKeyboardButton(text="🎓 Трейдеры", callback_data="mn:show")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def mirror_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
+    on = b.mentors.live.mirror.st["on"]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏸ Не повторять" if on else "🟢 Повторять на демо", callback_data="mn:mtoggle"),
+         InlineKeyboardButton(text="🔄 Обновить", callback_data="mn:mirror")],
+        [InlineKeyboardButton(text="🎥 Стримы", callback_data="mn:live")]])
 
 
 async def live_now(b: ArbitrageBot, chat_id: int, login: str) -> None:
@@ -578,6 +594,8 @@ def register(b: ArbitrageBot) -> None:
             await b._send(chat_id, mt.live.text(), live_kb(b))
         elif action == "lhelp":
             await b._send(chat_id, LIVE_HOW, live_kb(b))
+        elif action == "mirror":
+            await b._send(chat_id, mt.live.mirror.text(), mirror_kb(b))
         elif action == "gcheck":
             await b._send(chat_id, "⏳ Проверяю ключ Gemini…")
             await b._send(chat_id, await gemini_check_text(b), keyboard(b))
@@ -609,6 +627,12 @@ def register(b: ArbitrageBot) -> None:
             mt._changed()
             b.save_copy()
             await b._send(chat_id, mt.live.text(), live_kb(b))
+        elif action == "mtoggle":
+            mst = mt.live.mirror.st
+            mst["on"] = not mst["on"]
+            mt._changed()
+            b.save_copy()
+            await b._send(chat_id, mt.live.mirror.text(), mirror_kb(b))
         elif action == "shist":
             await scout_history(b, chat_id)
         elif action == "stoggle":

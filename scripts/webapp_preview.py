@@ -445,6 +445,54 @@ def build():
                             "direction": "long", "at": now - 300000, "horizon_h": 24, "path": [r], "done": True,
                             "ret": r, "price0": 150.0, "kind": "cex", "live": True, "tags": tags})
 
+    # 🔎 мелкие детали на экране и 🪞 повтор на демо
+    lv.st["sessions"]["decu"]["details"] = [
+        {"at": now - 900, "type": "insider_chat", "text": "в углу экрана Telegram-чат «alpha»: кинули GOAT и адрес",
+         "who": "alpha calls", "asset": "GOAT", "contract": ""},
+        {"at": now - 400, "type": "wallet_tracker", "text": "Cielo: кошелёк «whale 3» купил GOAT на 40 SOL",
+         "who": "Cielo", "asset": "GOAT", "contract": ""},
+        {"at": now - 200, "type": "token_stats", "text": "панель Axiom: топ-10 31%, dev 0%, бандлы 4%",
+         "who": "", "asset": "GOAT", "contract": ""}]
+    mr = lv.mirror.st
+    for name, rets in (("exact", [-31.0, 12.5, -18.2, 22.0, -9.5]), ("smart", [12.5, 22.0, -6.0])):
+        bk = mr["books"][name]
+        cash = 10.0
+        for r in rets:
+            usd = round(cash * 0.2, 2)
+            cash += usd * r / 100
+        bk.update(cash=round(cash, 4), n=len(rets), wins=sum(r > 0 for r in rets), rets=rets, pnl=round(cash - 10, 4))
+        mr["by"].setdefault("decu", {"name": "decu", "exact": [], "smart": []})[name] = rets
+    mr["books"]["smart"]["positions"]["m9"] = {"id": "m9", "login": "decu", "name": "decu", "key": "GOAT", "asset": "GOAT",
+                                              "kind": "sol", "side": 1, "usd": 2.2, "units": 1, "price0": 1, "now": 8.4,
+                                              "path": [0, 8.4], "stop": 0.3, "tp": None, "at": now - 1500,
+                                              "until": now + 80000, "late": None, "adds": 0, "tags": []}
+    mr["books"]["smart"]["cash"] -= 2.2
+    mr["skipped"] = 2
+    # ⚡ пульс рынка: стратегии на бумаге и выводы
+    pl = b.pulse.st
+    for name, rets in (("safe", [14.0, -35.0, 22.0, 8.0, -12.0, 41.0, -35.0, 18.0, 6.0, 25.0, -9.0]),
+                       ("all", [-35.0, -35.0, 12.0, -35.0, 60.0, -35.0, -20.0, 8.0, -35.0, 15.0, -35.0]),
+                       ("strict", [22.0, 9.0, -14.0, 31.0])):
+        bk = pl["books"][name]
+        cash = 10.0
+        for r in rets:
+            cash += round(cash * 0.2, 2) * r / 100
+        bk.update(cash=round(cash, 4), n=len(rets), wins=sum(r > 0 for r in rets), rets=rets, pnl=round(cash - 10, 4))
+    pl["active"] = "safe"
+    pl["avoid"] = ["bundler:hi"]
+    pl["scans"] = 64
+    import random as _r
+    rr = _r.Random(3)
+    for k in range(40):
+        bad = k % 3 == 0
+        path = [0.0, rr.uniform(-60, -30) if bad else rr.uniform(-20, 70)]
+        pl["done"].append({"mint": f"d{k}", "symbol": f"T{k}", "at": now - 200000, "path": path, "marks": {}, "max": max(path),
+                           "f": {"bundler": 0.45 if bad else 0.05, "top10": 0.6 if bad else 0.2, "src": ["trend"]}})
+    for k, sym in enumerate(("GOAT", "CHILLGUY", "PNUT")):
+        pl["picks"][f"p{k}"] = {"id": f"p{k}", "mint": f"p{k}", "symbol": sym, "at": now - 900 * (k + 1), "price0": 1,
+                                "f": {"src": ["stretch", "smart"] if k == 0 else ["trend"]}, "path": [0.0, 12.0 - k * 9],
+                                "marks": {}, "max": 18.0, "who": "", "until": now + 80000}
+
     b.opps._get_json = opps_json
     b.opps.news = opps_news
 

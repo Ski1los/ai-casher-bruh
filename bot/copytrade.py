@@ -397,7 +397,7 @@ def new_state() -> dict:
             "lessons": [], "mistakes": {}, "candidates": {}, "graveyard": [], "discovered_at": 0.0,
             "signal_log": {}, "stats": {"copies": 0, "skipped_stale": 0, "no_pair": 0}, "real": {},
             "mentors": {}, "calib": {"rts": [], "cost": None}, "profit": {},
-            "autonomy": {}}
+            "autonomy": {}, "pulse": {}}
 
 
 # ---------------------------------------------------------------------------
