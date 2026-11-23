@@ -486,7 +486,8 @@ class WebApp:
         top = [{k: e[k] for k in ("icon", "title", "verdict", "n", "mean", "day_pct", "kind")} for e in d["engines"][:3]]
         p = d["plan"]
         return {"top": top, "count": len(d["engines"]), "guard": d["guard"], "paused": list(d["paused"]),
-                "proven": p["proven"], "amount": p["amount"], "d30": p["d30"]}
+                "proven": p["proven"], "amount": p["amount"], "d30": p["d30"],
+                "auto": self.b.autonomy.on, "auto_real": bool(self.b.autonomy.st["real"])}
 
     def _mentors_brief(self) -> dict:
         mt = self.b.mentors
@@ -1203,6 +1204,10 @@ class WebApp:
             amount = max(1.0, min(amount, 1_000_000.0))
         d = self.b.profit.status_dict(amount)
         d["owner"] = bool(request[OWNER])
+        try:
+            d["autonomy"] = self.b.autonomy.status_dict()
+        except Exception as e:
+            log.warning("Автомат: %s", e)
         return d
 
     async def profit_set(self, request: web.Request) -> dict:
@@ -1225,6 +1230,23 @@ class WebApp:
             self.b.save_trading()
         if body.get("unmute"):
             done.append(p.unmute(str(body["unmute"])))
+        a = self.b.autonomy
+        if "auto" in body:  # ♾ полный автомат; настоящие деньги разрешаются только в Telegram (двойное подтверждение)
+            a.set_on(bool(body["auto"]))
+            done.append("♾ Автомат " + ("включён" if a.on else "выключен"))
+        if "auto_every" in body:
+            from .autonomy import EVERY_CHOICES
+            try:
+                h = int(body["auto_every"])
+            except (TypeError, ValueError):
+                raise ApiError("auto_every — число часов") from None
+            if h not in EVERY_CHOICES:
+                raise ApiError("отчёт: раз в 3, 6, 12, 24 ч или 0 — выключить")
+            a.st["every_h"] = h
+            done.append(f"«Результат» раз в {h} ч" if h else "«Результат» выключен")
+        if body.get("auto_real") is False:
+            done.append(a.allow_real(False))
+            self.b.save_trading()
         p._changed()
         self.b.save_copy()
         out = await self.profit(request)
