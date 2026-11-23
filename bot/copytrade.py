@@ -50,9 +50,10 @@ MAX_HOLD_SEC = 48 * 3600
 STALE_SEC = 15 * 60  # покупку старше 15 минут копировать поздно
 RUG_LIQ_DROP = 0.3  # ликвидность упала до 30% от входа — выходим (похоже на слив пула)
 
-STEP_SEC = 90
+STEP_SEC = 30  # шаг копирования: чем быстрее заметили покупку кошелька, тем ближе наша цена к его цене
+MAX_STEP_SEC = 180  # узел Solana просит подождать — шаг растёт до 3 минут и сам возвращается к 30 с
 MAX_ACTIVE = 15  # сколько кошельков отслеживать одновременно (бесплатный узел Solana не любит лишних запросов)
-POLL_PER_STEP = 8  # сколько кошельков проверять за один шаг (по кругу)
+POLL_PER_STEP = MAX_ACTIVE  # проверяем все кошельки каждый шаг: 15 лёгких запросов за 30 с — далеко от лимитов узла
 NEW_TX_PER_WALLET = 8
 DISCOVER_EVERY_SEC = 2 * 3600
 EARLY_TX = 40  # сколько первых сделок пула разбирать при поиске ранних покупателей
@@ -303,10 +304,16 @@ PATH_MAX = 60
 
 
 def add_path(path: list, pct: float) -> list:
-    """Путь цены копии в % от входа. Длиннее PATH_MAX — прореживаем через одну (первая и последняя остаются)."""
+    """Путь цены копии в % от входа. Длиннее PATH_MAX — сжимаем пары соседних точек в одну (первая и последняя
+    остаются). Из пары берём более далёкую от входа: провал под стоп и пик над тейком не теряются, иначе подбор
+    стопа/тейка учился бы на сглаженных путях и считал, что стоп «не сработал бы»."""
     path.append(round(pct, 1))
     if len(path) > PATH_MAX:
-        path[:] = path[:-1:2] + path[-1:]
+        mid = path[1:-1]
+        merged = [a if abs(a) >= abs(b) else b for a, b in zip(mid[::2], mid[1::2])]
+        if len(mid) % 2:
+            merged.append(mid[-1])
+        path[:] = path[:1] + merged + path[-1:]
     return path
 
 
@@ -447,7 +454,7 @@ class CopyTrader:
         self.rpc = rpc or SolanaRpc()
         self.st = new_state()
         self.last_error: str | None = None
-        self.last_step = 0.0
+        self.step_sec = STEP_SEC  # текущая пауза между шагами (растёт, если узел Solana просит подождать)
         self.changes = 0  # растёт при каждом изменении: пора сохранить в бэкап
         self._sol_usd: tuple[float, float] = (0.0, 0.0)
         self._busy = asyncio.Lock()
@@ -588,7 +595,6 @@ class CopyTrader:
             return []
         async with self._busy:
             now = time.time() if now is None else now
-            self.last_step = now
             self.opened_now, self.closed_now = [], []  # для реальной торговли (bot/memetrade.py)
             events: list[dict] = []
             try:
@@ -597,12 +603,22 @@ class CopyTrader:
                 self.last_error = f"DexScreener: {e}"
                 return []
             order = sorted(self.active(), key=lambda a: self.st["wallets"][a]["checked"])[:POLL_PER_STEP]
-            for addr in order:
+            # 1) сеть — параллельно: новые подписи всех кошельков сразу (узел ограничен семафором SolanaRpc)
+            found = await asyncio.gather(*(self._signatures(a, 15, until=self.st["wallets"][a]["cursor"])
+                                           for a in order), return_exceptions=True)
+            throttled = 0
+            # 2) разбор — по очереди, чтобы позиции и лимиты не перепутались
+            for addr, sigs in zip(order, found):
                 try:
-                    await self._poll(addr, now, sol, events)
+                    if isinstance(sigs, BaseException):
+                        raise sigs
+                    await self._poll(addr, now, sol, events, sigs)
                 except Exception as e:
+                    throttled += "подождать" in str(e) or "429" in str(e)
                     self.last_error = f"кошелёк {short(addr)}: {e}"
                     log.info("Копитрейдинг %s: %s", addr, e)
+            # узел душит запросы — реже ходим, всё в порядке — возвращаемся к быстрому шагу
+            self.step_sec = min(MAX_STEP_SEC, self.step_sec * 2) if throttled else STEP_SEC
             try:
                 await self._mark(now, events)
             except DexError as e:
@@ -610,9 +626,10 @@ class CopyTrader:
             self._sleepers(now, events)
             return events
 
-    async def _poll(self, addr: str, now: float, sol_usd: float, events: list[dict]) -> None:
+    async def _poll(self, addr: str, now: float, sol_usd: float, events: list[dict], sigs: list | None = None) -> None:
         w = self.st["wallets"][addr]
-        sigs = await self._signatures(addr, 15, until=w["cursor"])
+        if sigs is None:
+            sigs = await self._signatures(addr, 15, until=w["cursor"])
         w["checked"] = now
         first_time = not w.get("primed")
         if first_time:

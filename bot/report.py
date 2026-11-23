@@ -57,7 +57,7 @@ class ScanStats:
         self.__init__()
         self.started_at = started
 
-    def text(self, exchanges_total: int, trade_amount: float) -> str:
+    def text(self, trade_amount: float) -> str:
         hours = (time.time() - self.period_start) / 3600
         uptime_h = (time.time() - self.started_at) / 3600
         avg = self.total_duration / self.scans if self.scans else 0

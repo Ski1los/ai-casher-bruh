@@ -24,7 +24,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, write_atomic
 from .demo import DEMO_FILE, REASONS, DemoAccount, DemoEngine, DemoTrade, account_from_dict
 from .scanner import Scanner, ScanResult, short_error
 from .triangular import TriOpportunity, path_min_order_ok, simulate_path
@@ -281,8 +281,7 @@ class DemoManager:
     def save(self) -> None:
         if self.path is None:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.export(), ensure_ascii=False), "utf-8")
+        write_atomic(self.path, json.dumps(self.export(), ensure_ascii=False))
 
     def restore(self, raw: dict) -> None:
         self._load_dict(raw)

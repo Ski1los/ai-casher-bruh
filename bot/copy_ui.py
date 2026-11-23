@@ -194,7 +194,7 @@ def register(b: ArbitrageBot) -> None:
         elif action in ("on", "off"):
             b.copy.st["on"] = action == "on"
             b.save_copy()
-            await b._send(chat_id, ("🟢 Копитрейдинг включён. Проверяю кошельки каждые 1,5 минуты." if action == "on"
+            await b._send(chat_id, ("🟢 Копитрейдинг включён. Проверяю кошельки каждые 30 секунд." if action == "on"
                                     else "⏸ Копитрейдинг выключен.") + "\n\n" + b.copy.text(), keyboard(b))
             if action == "on" and not b.copy.st["wallets"]:
                 _spawn(find_now(b, chat_id))
@@ -267,7 +267,7 @@ async def copy_loop(b: ArbitrageBot) -> None:
             await copy_tick(b)
         except Exception:
             log.exception("Ошибка копитрейдинга")
-        await asyncio.sleep(STEP_SEC)
+        await asyncio.sleep(getattr(b.copy, "step_sec", STEP_SEC))
 
 
 def short_line(b: ArbitrageBot) -> str:

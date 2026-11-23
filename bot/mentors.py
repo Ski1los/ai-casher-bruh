@@ -33,7 +33,7 @@ from typing import Awaitable, Callable
 
 import aiohttp
 
-from .ai import GEMINI_ENV_ALIASES, clean_key, is_gemini_key
+from .ai import GEMINI_ENV_ALIASES, THINK_ROOM, clean_key, is_gemini_key
 from .copytrade import (EXIT_GAIN, EXIT_MIN, EXIT_STOPS, EXIT_TPS, FILTER_GRID, LEARN_GAIN, LEARN_SUBSET, _passes,
                         add_path, exit_net, simulate_exit, tp_text)
 from .dex import fmt_usd
@@ -287,8 +287,6 @@ def gemini_key(env: dict | None = None) -> str:
 class GeminiVideo:
     """Gemini «смотрит» публичный ролик YouTube по ссылке (звук + кадр в секунду, первые 20 минут)."""
 
-    PREFER = ("flash",)
-
     def __init__(self, key: str, session_factory, model: str | None = None):
         self.key = key
         self._session = session_factory
@@ -358,7 +356,7 @@ class GeminiVideo:
                                                                     "end_offset": f"{VIDEO_MAX_SEC}s"}},
                 {"text": PROMPT + (f"\nНазвание ролика: {title}" if title else "")}]}],
                 "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2,
-                                     "maxOutputTokens": 3000, "mediaResolution": "MEDIA_RESOLUTION_LOW"}}
+                                     "maxOutputTokens": 3000 + THINK_ROOM, "mediaResolution": "MEDIA_RESOLUTION_LOW"}}
             async with http.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=body,
                                  headers={"x-goog-api-key": self.key},
                                  timeout=aiohttp.ClientTimeout(total=240)) as r:
@@ -407,7 +405,7 @@ async def analyze_by_text(ai_client, title: str, description: str) -> dict:
     messages = [{"role": "system", "content": PROMPT + "\nВидео недоступно: суди по названию и описанию, "
                                                        "в summary напиши, что это по описанию."},
                 {"role": "user", "content": f"Название: {title}\nОписание:\n{description[:1500]}"}]
-    return clean_analysis(parse_json(await ai_client.chat(messages, max_tokens=900)))
+    return clean_analysis(parse_json(await ai_client.chat(messages, max_tokens=900, background=True)))
 
 
 # ---------------------------------------------------------------------------

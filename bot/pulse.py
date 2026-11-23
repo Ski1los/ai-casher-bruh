@@ -1,7 +1,7 @@
 """⚡ Пульс рынка (/pulse): бот сам смотрит GMGN и «Axiom Pulse», торгует кандидатами на бумаге и учится,
 какие признаки токена на самом деле ведут к прибыли, а какие — к сливу.
 
-Откуда кандидаты (раз в 10 минут):
+Откуда кандидаты (раз в 3 минуты):
   * GMGN (нужен бесплатный GMGN_API_KEY с gmgn.ai/ai): тренды за 5 минут; «окопы» — новые токены, почти
     завершившие bonding curve и только что вышедшие на DEX (это ровно три колонки Pulse в Axiom: New Pairs,
     Final Stretch, Migrated); сделки «умных» кошельков и KOL; свежие коллы.
@@ -11,7 +11,7 @@
 Что бот делает с кандидатом:
   1. Запоминает цену (DexScreener) и все признаки: ликвидность, капитализация, возраст, холдеры, топ-10,
      доля разработчика, снайперы, бандлы, инсайдеры, риск rug, сколько умных денег и KOL, откуда пришёл.
-  2. Следит за ценой 24 часа (каждые 5 минут).
+  2. Следит за ценой 24 часа (каждую минуту).
   3. 9 стратегий-фильтров (как пресеты в Axiom/GMGN: «безопасные», «умные деньги», «строгий», Final Stretch,
      Migrated, импульс, коллы KOL, «выученный») торгуют им на своих бумажных $10: стоп, тейк, комиссии и
      сеть Solana учтены. Это честная проверка: виден итог каждого фильтра, а не красивые скриншоты.
@@ -34,11 +34,11 @@ from .gmgn import GmgnClient, GmgnError
 
 log = logging.getLogger(__name__)
 
-SCAN_SEC = 600             # раз в 10 минут ищем кандидатов
-UPDATE_SEC = 300           # раз в 5 минут обновляем цены
+SCAN_SEC = 180             # раз в 3 минуты ищем кандидатов: вход ближе к началу движения
+UPDATE_SEC = 60            # раз в минуту обновляем цены (4 запроса DexScreener): стоп и тейк срабатывают вовремя
 HOLD_H = 24                # каждого кандидата ведём сутки
 MAX_TRACK = 120            # одновременно ведём не больше 120 кандидатов (4 запроса DexScreener)
-MAX_NEW = 12               # новых за один поиск
+MAX_NEW = 4                # новых за один поиск (≈80 в час, как раньше, но каждый — свежее)
 SEEN_SEC = 24 * 3600       # тот же токен снова кандидат не раньше чем через сутки
 MIN_LIQ = 5_000            # меньше — продать почти нельзя, не берём даже на бумагу
 DONE_KEEP = 300
@@ -179,6 +179,14 @@ def exit_point(path: list[float], stop: float | None, tp: float | None) -> tuple
 def net_pct(p: float, usd: float, cost: float, network_usd: float = 0.01) -> float:
     """Чистый % сделки с мемкоином: комиссия/проскальзывание с двух сторон + сеть Solana за 2 транзакции."""
     return ((1 + p / 100) * (1 - cost) / (1 + cost) - 1) * 100 - 2 * network_usd / max(usd, 0.5) * 100
+
+
+def split_insights(ins: list[dict], k: int = 3) -> tuple[list[dict], list[dict]]:
+    """(что теряет, что работает) — по k худших с минусом и k лучших с плюсом. Один признак не попадает в оба
+    списка, и плюсовой признак не помечается ❌, даже если выводов меньше 2·k или все они в плюсе."""
+    losers = [x for x in ins if x["avg"] < 0][:k]
+    winners = [x for x in reversed(ins) if x["avg"] > 0][:k]
+    return losers, winners
 
 
 def new_book() -> dict:
@@ -394,8 +402,10 @@ class Pulse:
         st["source"] = " + ".join(sources)
         fresh = [(m, c) for m, c in cands.items() if m not in st["seen"] and m not in st["picks"]]
         fresh.sort(key=lambda mc: self._priority(mc[1]))
-        room = max(0, MAX_TRACK - len(st["picks"]))
-        fresh = fresh[:min(MAX_NEW, room)]
+        room = min(MAX_NEW, max(0, MAX_TRACK - len(st["picks"])))
+        # проверяем с запасом (одним запросом DexScreener, до 30 токенов): мусор (honeypot, пустой пул)
+        # не должен занимать места хороших кандидатов
+        fresh = fresh[:min(room * 3, 30)]
         if not fresh:
             self._changed()
             return []
@@ -409,6 +419,8 @@ class Pulse:
         no_gmgn = []
         added = []
         for mint, c in fresh:
+            if len(added) >= room:
+                break  # остальные не помечаем просмотренными — возьмём в следующий поиск
             pair = pairs.get(mint)
             st["seen"][mint] = now
             if not pair or not pair.price_usd or (pair.liquidity_usd or 0) < MIN_LIQ:
@@ -728,14 +740,15 @@ class Pulse:
 
     def ai_context(self) -> dict:
         d = self.status_dict()
+        loses, works = split_insights(d["insights"], 4)
         return {"how": "⚡ пульс рынка: GMGN (тренды, окопы = Axiom Pulse, умные деньги, KOL, коллы) + DexScreener; "
                        "кандидатов торгует на бумаге 9 стратегий-фильтров, бот учится, какие признаки токена дают плюс",
                 "gmgn_key": d["gmgn"]["configured"], "tracking": d["tracking"], "closed": d["done"],
                 "best_strategy": d["active_title"], "exit_rule": d["rule"],
                 "strategies": [{"name": b["title"], "trades": b["n"], "avg_pct": b["avg"], "verdict": b["verdict"]}
                                for b in d["books"]],
-                "what_works": [{"what": x["label"], "tokens": x["n"], "avg_pct": x["avg"]} for x in d["insights"][-4:]],
-                "what_loses": [{"what": x["label"], "tokens": x["n"], "avg_pct": x["avg"]} for x in d["insights"][:4]],
+                "what_works": [{"what": x["label"], "tokens": x["n"], "avg_pct": x["avg"]} for x in works],
+                "what_loses": [{"what": x["label"], "tokens": x["n"], "avg_pct": x["avg"]} for x in loses],
                 "avoid_learned": d["avoid"]}
 
     def text(self) -> str:
@@ -764,11 +777,10 @@ class Pulse:
         ins = d["insights"]
         if ins:
             lines.append("\n<b>Чему научился на рынке</b> (средний итог токенов с этим признаком):")
-            for x in ins[:3]:
-                lines.append(f"❌ {html.escape(x['label'])}: {x['n']} шт., <b>{x['avg']:+.0f}%</b>, в плюс {x['win']}%")
-            for x in ins[-3:][::-1]:
-                if x["avg"] > 0:
-                    lines.append(f"✅ {html.escape(x['label'])}: {x['n']} шт., <b>{x['avg']:+.0f}%</b>, в плюс {x['win']}%")
+            loses, works = split_insights(ins)
+            for mark, group in (("❌", loses), ("✅", works)):
+                for x in group:
+                    lines.append(f"{mark} {html.escape(x['label'])}: {x['n']} шт., <b>{x['avg']:+.0f}%</b>, в плюс {x['win']}%")
         else:
             lines.append(f"\n🧠 Выводы появятся, когда закроется хотя бы {INSIGHT_MIN} токенов с одним признаком "
                          f"(каждого веду {HOLD_H} ч).")
@@ -791,5 +803,5 @@ class Pulse:
         return "\n".join(lines)
 
 
-__all__ = ["Pulse", "PRESETS", "passes", "is_safe", "bucket_ids", "bucket_label", "net_pct", "new_state",
+__all__ = ["Pulse", "PRESETS", "passes", "split_insights", "is_safe", "bucket_ids", "bucket_label", "net_pct", "new_state",
            "SCAN_SEC", "UPDATE_SEC", "HOLD_H"]

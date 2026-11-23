@@ -17,6 +17,18 @@ SUPPORTED_EXCHANGES = ("bybit", "bingx")
 DEFAULT_EXCHANGES = ",".join(SUPPORTED_EXCHANGES)
 
 
+def write_atomic(path, text: str) -> None:
+    """Записать файл целиком или никак: сначала во временный рядом, потом мгновенная подмена.
+    Если бота перезапустят посреди записи (деплой, сон Render), старый файл останется целым,
+    а не обрезанным JSON, из-за которого пропала бы вся история обучения."""
+    from pathlib import Path
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, "utf-8")
+    os.replace(tmp, path)
+
+
 def exchanges_from_env() -> list[str]:
     """EXCHANGES из окружения, но только поддерживаемые. Пусто или мусор → Bybit и BingX."""
     wanted = [x.lower() for x in _list("EXCHANGES", DEFAULT_EXCHANGES)]

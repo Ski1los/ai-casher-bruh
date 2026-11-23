@@ -71,6 +71,10 @@ SKIP_MODELS = ("whisper", "tts", "guard", "embed", "image", "vision", "audio", "
 MAX_CONTEXT_CHARS = 9_000  # ≈3 тыс. токенов: вместе с ответом влезает в бесплатный лимит Groq 8K токенов/мин
 HISTORY_TURNS = 3  # сколько последних вопросов-ответов помнить в чате
 REQUEST_TIMEOUT = 90
+# Запас выходных токенов на «размышления» Gemini 2.5+/3: они считаются в maxOutputTokens. Без запаса модель
+# обрывает мысль → пустой или обрезанный ответ → повторный запрос (вдвое дольше и минус из дневного лимита).
+# Лишние токены не тратятся: платим (и ждём) только за то, что модель реально сгенерировала.
+THINK_ROOM = 6000
 
 
 class AIError(Exception):
@@ -178,6 +182,7 @@ class LLMClient:
         self.daily_limit = daily_limit
         self._session: aiohttp.ClientSession | None = None
         self._lock = asyncio.Lock()  # по одному запросу за раз: бережём лимит токенов в минуту
+        self._bg_lock = asyncio.Lock()  # фоновые разборы — своя очередь: вопрос владельца не ждёт их
         self.day = time.strftime("%Y-%m-%d", time.gmtime())
         self.requests_today = 0
         self.tokens_today = 0
@@ -273,8 +278,8 @@ class LLMClient:
             else:
                 contents.append({"role": role, "parts": [{"text": m["content"]}]})
         body = {"contents": contents or [{"role": "user", "parts": [{"text": "…"}]}],
-                # «размышления» новых моделей тоже тратят выходные токены — даём запас
-                "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens * 2}}
+                # «размышления» новых моделей тоже тратят выходные токены — даём запас, чтобы мысль не обрывалась
+                "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens + THINK_ROOM}}
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         return body
@@ -293,7 +298,7 @@ class LLMClient:
                     parts = (cand.get("content") or {}).get("parts") or []
                     content = clean_answer("".join(p.get("text", "") for p in parts if not p.get("thought")))
                     if not content:
-                        if cand.get("finishReason") == "MAX_TOKENS" and max_tokens < 4000:
+                        if cand.get("finishReason") == "MAX_TOKENS" and max_tokens < 8000:
                             max_tokens *= 2
                             continue
                         block = (data.get("promptFeedback") or {}).get("blockReason") or cand.get("finishReason")
@@ -363,10 +368,12 @@ class LLMClient:
                 raise AIError(f"{ep.title}: ошибка {r.status}: {text[:160]}")
         raise AIError(f"{ep.title}: не удалось получить ответ")
 
-    async def chat(self, messages: list[dict], max_tokens: int = 1200) -> str:
+    async def chat(self, messages: list[dict], max_tokens: int = 1200, background: bool = False) -> str:
+        """background=True — фоновая задача (разбор роликов): идёт своей очередью, чтобы вопрос в чате
+        не ждал за ней до полутора минут. Одновременно максимум 2 запроса: лимиты бесплатных тарифов выдерживают."""
         if not self.endpoints:
             raise AIError("ИИ не подключён: в Render нет ключа (GEMINI_API_KEY или AI_API_KEY)")
-        async with self._lock:
+        async with self._bg_lock if background else self._lock:
             self._count_day()
             self.requests_today += 1
             errors: list[str] = []

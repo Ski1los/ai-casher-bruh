@@ -350,7 +350,6 @@ class Scalper:
         self._sig: dict[tuple[str, str], tuple[int, list]] = {}  # (биржа, пара) -> (номер 5-минутки, свечи)
         self._lab_period: dict[str, int] = {}  # биржа -> номер 5-минутки, на которой лаборатория уже отработала
         self.lab_changes = 0  # растёт с каждой закрытой бумажной сделкой: пора сохранить в бэкап
-        self.last_step = 0.0
 
     @property
     def last_reason(self) -> str:
@@ -529,7 +528,6 @@ class Scalper:
     async def step(self, now: float | None = None) -> list[str]:
         """Один шаг: следим за позицией или ищем вход. Возвращает сообщения для владельца."""
         now = time.time() if now is None else now
-        self.last_step = now
         if not self.on:
             return []
         names = self.exchanges()

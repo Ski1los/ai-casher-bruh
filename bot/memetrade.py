@@ -527,7 +527,7 @@ class MemeTrader:
                 self._changed()
                 if pos["sell_fails"] in (1, 3) or pos["sell_fails"] % 10 == 0:
                     return {"text": (f"⚠️ <b>Не смог продать {html.escape(pos['symbol'])}</b> ({html.escape(why)}): "
-                                     f"{html.escape(str(e))[:200]}. Пробую снова каждые 1,5 мин. Можно продать "
+                                     f"{html.escape(str(e))[:200]}. Пробую снова каждые 30 с. Можно продать "
                                      "вручную: Phantom → аккаунт «Бот»."),
                             "buttons": [("👻 Продать в Phantom", buy_links(mint)["phantom_sell"])]}
                 return None

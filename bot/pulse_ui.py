@@ -23,7 +23,7 @@ TICK_SEC = 60
 
 HOW = f"""⚡ <b>Как работает Пульс рынка</b>
 
-<b>Что смотрит</b> (раз в 10 минут):
+<b>Что смотрит</b> (раз в 3 минуты):
 • <b>GMGN</b> — тренды за 5 минут, «окопы» (новые токены, почти завершившие bonding curve, только что вышедшие \
 на DEX — это ровно три колонки Pulse в Axiom: New Pairs, Final Stretch, Migrated), сделки умных кошельков и KOL, \
 свежие коллы. Нужен бесплатный ключ: gmgn.ai/ai → API key → Render → Environment → <code>GMGN_API_KEY</code>. \
@@ -125,7 +125,7 @@ async def pulse_tick(b: ArbitrageBot) -> None:
 
 
 async def pulse_loop(b: ArbitrageBot) -> None:
-    await asyncio.sleep(120)
+    await asyncio.sleep(60)
     while True:
         b._beats["pulse"] = time.time()
         try:

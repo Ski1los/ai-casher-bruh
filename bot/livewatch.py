@@ -38,6 +38,8 @@ from typing import Any
 
 import aiohttp
 
+from .ai import THINK_ROOM
+
 log = logging.getLogger(__name__)
 
 TWITCH_GQL = "https://gql.twitch.tv/gql"
@@ -634,7 +636,7 @@ class LiveGemini:
         return body
 
     def _body(self, b64: bytes, mime: str, prompt: str) -> bytes:
-        cfg: dict = {"responseMimeType": "application/json", "temperature": 0.1, "maxOutputTokens": 2000}
+        cfg: dict = {"responseMimeType": "application/json", "temperature": 0.1, "maxOutputTokens": 2000 + THINK_ROOM}
         if self.res:
             cfg["mediaResolution"] = self.res
         meta = b',"videoMetadata":{"fps":' + str(self.fps).encode() + b"}" if self.fps and mime.startswith("video/") else b""
