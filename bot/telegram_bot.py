@@ -29,11 +29,13 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import autonomy, copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, trading_ui, updater
+from . import autonomy, copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, pulse_ui, trading_ui, updater
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
 from .mentors import Mentors
 from .profit import ProfitCenter
+from .gmgn import GmgnClient
+from .pulse import Pulse
 from .autonomy import Autonomy
 from .solkey import looks_like_secret
 from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
@@ -158,7 +160,7 @@ HELP_TEXT = """\
 /earn — как заработать сейчас: акции Bybit (Launchpool, аирдропы), проценты, план на $5
 /scalp — состояние автопилота (режим $5) · /lab — лаборатория: проверка стратегий вживую
 /copy — 🐋 копитрейдинг кошельков Solana · /meme — 💸 мемкоины (🧪 демо)
-/mentors 🎓 трейдеры · /stream 🎥 эфиры · /scout 🔭 поиск · /train 🏋️ демо · /news
+/mentors 🎓 трейдеры · /stream 🎥 эфиры · /scout 🔭 · /train 🏋️ · /pulse ⚡ GMGN/Axiom · /news
 
 <b>Сигналы</b>
 /scan — просканировать прямо сейчас
@@ -516,6 +518,11 @@ class ArbitrageBot:
         # 🎓 учёба у трейдеров YouTube/Twitch (bot/mentors.py); состояние — в copy.st["mentors"]
         self.mentors = Mentors(self.copy, self.meme, self.ai.client, price_of=self._public_prices,
                                candles_of=lambda coin, since: extras_ui.public_candles(self, coin, since))
+        # ⚡ Пульс рынка: GMGN (= Axiom Pulse) + DexScreener + токены со стримов, стратегии-фильтры на бумаге и
+        # выводы (bot/pulse.py); состояние — в copy.st["pulse"]. Ключ GMGN только читает рынок.
+        self.gmgn = GmgnClient()
+        self.pulse = Pulse(self.copy, self.gmgn)
+        self.mentors.live.pulse = self.pulse  # 🎥 токены, мелькнувшие на стримах, проверяются и ведутся Пульсом
         # 💰 Профит-центр: результаты всех способов по фактам, план денег, Страж прибыли (bot/profit.py);
         # состояние — в copy.st["profit"]
         self.profit = ProfitCenter(self)
@@ -805,12 +812,20 @@ class ArbitrageBot:
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
             "api_keys": keys,
             "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
-                                "/hot", "/radar", "/tinvest", "/mentors", "/stream", "/train", "/profit"],
+                                "/hot", "/radar", "/tinvest", "/mentors", "/stream", "/train", "/profit", "/pulse"],
             "tinvest": self._tinvest_context(),
             "memecoin_radar_on": bool(self.radar_chats),
             "copytrading_solana": self._copy_context(),
             "traders_youtube_twitch": self.mentors.ai_context(),
+            "market_pulse_gmgn_axiom": self._pulse_context(),
         }
+
+    def _pulse_context(self) -> dict:
+        try:
+            return self.pulse.ai_context()
+        except Exception as e:
+            log.warning("Пульс для ИИ: %s", e)
+            return {}
 
     def _profit_context(self) -> dict:
         try:
@@ -1448,6 +1463,7 @@ class ArbitrageBot:
         meme_ui.register(self)
         mentors_ui.register(self)
         profit_ui.register(self)
+        pulse_ui.register(self)
         autonomy.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
@@ -1869,6 +1885,7 @@ class ArbitrageBot:
                     BotCommand(command="meme", description="💸 Мемкоины: бот торгует сам"),
                     BotCommand(command="mentors", description="🎓 Учусь у трейдеров YouTube и Twitch"),
                     BotCommand(command="stream", description="🎥 Смотрю стримы: действия, ошибки и плюсы"),
+                    BotCommand(command="pulse", description="⚡ Пульс рынка: GMGN, Axiom Pulse, учусь на рынке"),
                     BotCommand(command="train", description="🏋️ Тренировка: сам торгую выученным на демо"),
                     BotCommand(command="scout", description="🔭 Разведчик: сам ищу прибыльных трейдеров"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
@@ -1903,6 +1920,7 @@ class ArbitrageBot:
             tasks.append(self._spawn("copy", lambda: copy_ui.copy_loop(self)))
             tasks.append(self._spawn("mentors", lambda: mentors_ui.mentors_loop(self)))
             tasks.append(self._spawn("profit", lambda: profit_ui.profit_loop(self)))
+            tasks.append(self._spawn("pulse", lambda: pulse_ui.pulse_loop(self)))
             tasks.append(self._spawn("autonomy", lambda: autonomy.autonomy_loop(self)))
             tasks.append(self._spawn("scan", self._auto_loop))
             tasks.append(self._spawn("scalp", self._scalp_loop))
@@ -1934,5 +1952,6 @@ class ArbitrageBot:
             await self.copy.rpc.close()
             await self.meme.jup.close()
             await self.mentors.close()
+            await self.gmgn.close()
             await self.tinvest.close()
             await self.bot.session.close()

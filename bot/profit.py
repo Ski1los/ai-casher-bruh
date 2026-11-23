@@ -221,8 +221,27 @@ def collect(b, now: float | None = None) -> list[dict]:
             out.append(_engine("arb", "🔺", "Арбитраж — демо-счета", "demo", "cex", "/demo", rets, first, now, "tri",
                                1.0, 20, b.demo.active, "в проверке уже учтены настоящие комиссии и стаканы"))
 
+    def pulse():
+        p = getattr(b, "pulse", None)
+        if p is None:
+            return
+        title, rets, first = p.engine_rets()
+        if rets:
+            out.append(_engine("pulse", "⚡", f"Пульс рынка GMGN/Axiom («{title}», без денег)", "demo", "sol", "/pulse",
+                               rets, first, now, None, 0.2, 10, bool(p.st["on"]),
+                               "бумажные сделки по кандидатам GMGN и DexScreener"))
+
+    def mirror():
+        mr = b.mentors.live.mirror.st
+        bk = mr["books"].get("smart") or {}
+        if bk.get("rets"):
+            out.append(_engine("mirror", "🪞", "Повтор стримеров на демо («умная копия»)", "demo", "cex", "/stream",
+                               bk["rets"], mr.get("started") or None, now, None, 0.2, 6, bool(mr["on"]),
+                               "сделки стримеров, повторённые по живой цене с опозданием"))
+
     for name, fn in (("автопилот", pilot_real), ("тест", pilot_test), ("лаборатория", lab), ("копитрейдинг", copy),
-                     ("мемы демо", meme_demo), ("мемы", meme_real), ("тренировка", train), ("арбитраж", arb)):
+                     ("мемы демо", meme_demo), ("мемы", meme_real), ("тренировка", train), ("арбитраж", arb),
+                     ("пульс", pulse), ("повтор стримеров", mirror)):
         _part(fn, name)
     out.sort(key=lambda e: (ORDER[e["verdict"]], -e["day_pct"], -e["n"]))
     return out

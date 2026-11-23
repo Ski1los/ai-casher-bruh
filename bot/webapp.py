@@ -1091,6 +1091,8 @@ class WebApp:
         d["videos_per_day"] = VIDEOS_PER_DAY
         d["train"] = mt.train.status_dict()
         d["live"] = mt.live.status_dict()
+        pulse = getattr(self.b, "pulse", None)
+        d["pulse"] = pulse.status_dict() if pulse is not None else None
         return d
 
     async def mentors_set(self, request: web.Request) -> dict:
@@ -1121,6 +1123,13 @@ class WebApp:
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 done.append("Считаю историю прогнозов — рейтинг придёт в чат")
+        pl = body.get("pulse")
+        pulse = getattr(self.b, "pulse", None)
+        if isinstance(pl, dict) and pulse is not None:  # ⚡ пульс рынка: {on} / {notify}
+            for k in ("on", "notify"):
+                if k in pl:
+                    pulse.st[k] = bool(pl[k])
+            pulse._changed()
         lv = body.get("live")
         if isinstance(lv, dict):  # 🎥 стримы вживую: {on} / {every_min} / {notify} / {now: ник}
             from .livewatch import INTERVALS, NOTIFY_MODES
@@ -1139,6 +1148,8 @@ class WebApp:
                 if lv["notify"] not in NOTIFY_MODES:
                     raise ApiError("неизвестный режим сообщений")
                 lst["notify"] = lv["notify"]
+            if "mirror" in lv:  # 🪞 повтор стримеров на демо
+                mt.live.mirror.st["on"] = bool(lv["mirror"])
             login = str(lv.get("now") or "").lower()[:25]
             if login and login in lst["sessions"] and self.b.owner_id and not mt.live.lock.locked():
                 from . import mentors_ui

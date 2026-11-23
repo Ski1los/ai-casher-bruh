@@ -38,14 +38,14 @@ HARD_DAILY_LOSS = 2.0
 REVERT_COOLDOWN = 3 * 24 * 3600  # вернул в тест после убытков — 3 дня не включает снова
 MEM_SOFT_MB = 430            # из 512 МБ Render: выше — уборка памяти
 MEM_EVERY_SEC = 1800
-STALE_SEC = {"scan": 900, "scalp": 1200}  # цикл не отмечался так долго — завис, перезапускаем
+STALE_SEC = {"scan": 900, "scalp": 1200, "pulse": 1800}  # цикл не отмечался так долго — завис, перезапускаем
 FIXES_KEEP = 40
 
 LOOP_NAMES = {
     "scan": "сканер и демо", "scalp": "автопилот и лаборатория", "alerts": "ценовые алерты", "radar": "радар мемкоинов",
     "opps": "акции и новости", "copy": "копитрейдинг", "mentors": "учёба у трейдеров", "profit": "Профит-центр",
     "equity": "график баланса", "report": "ежедневный отчёт", "update": "самообновление", "keys": "проверка ключей",
-    "ping": "не-засыпание в облаке",
+    "ping": "не-засыпание в облаке", "pulse": "пульс рынка GMGN/Axiom",
 }
 
 
@@ -145,6 +145,14 @@ class Autonomy:
         if m.gemini.configured and not m.live.st.get("on"):
             m.live.st["on"] = True
             done.append("🎥 эфиры вживую")
+        pulse = getattr(b, "pulse", None)
+        if pulse is not None and not pulse.st.get("on"):
+            pulse.st["on"] = True
+            done.append("⚡ пульс рынка")
+        mirror = m.live.mirror.st
+        if not mirror.get("on"):
+            mirror["on"] = True
+            done.append("🪞 повтор стримеров на демо")
         if self._pilot_test_ok():
             b.scalper.turn_on()
             done.append("🤖 автопилот в тесте (без денег)")
@@ -479,6 +487,9 @@ class Autonomy:
             ("🔭 Разведчик", bool(m.scout.st.get("on")), ""),
             ("🎥 Эфиры вживую", bool(m.live.st.get("on")) and m.gemini.configured,
              "" if m.gemini.configured else "нужен ключ Gemini"),
+            ("🪞 Повтор стримеров на демо", bool(m.live.mirror.st.get("on")), ""),
+            ("⚡ Пульс рынка", bool(getattr(b, "pulse", None) and b.pulse.st.get("on")),
+             "" if getattr(b, "gmgn", None) is None or b.gmgn.configured else "без ключа GMGN — только DexScreener"),
             ("🧪 Лаборатория", True, "на публичных свечах" if not t.working else ""),
             ("🤖 Автопилот", b.scalper.on, pilot_note),
         ]
