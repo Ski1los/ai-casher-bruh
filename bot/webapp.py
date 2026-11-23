@@ -760,7 +760,7 @@ class WebApp:
         if not q:
             raise ApiError("пустой вопрос")
         if not self.b.ai.configured:
-            raise ApiError("ИИ не подключён: добавь AI_API_KEY в Render (бесплатный ключ Groq)")
+            raise ApiError("ИИ не подключён: добавь в Render GEMINI_API_KEY (ключ AQ.…) или AI_API_KEY (Groq)")
         uid = request[USER]["id"]
         await self.b._refresh_balances()
         try:
