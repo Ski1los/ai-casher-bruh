@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import math
 import os
 import re
 import secrets
@@ -487,6 +488,195 @@ class Transfers:
         while len(self.plans) > 20:
             self.plans.popitem(last=False)
 
+    # --- 🧪 проверка вывода без перевода -------------------------------------------------------------------
+
+    async def address_book(self, ex_name: str, coin: str) -> list[dict] | None:
+        """Адресная книга вывода (только Bybit отдаёт её через API). None — проверить нельзя."""
+        if ex_name != "bybit":
+            return None
+        ex = self.wd_ex(ex_name)
+        rows, cursor = [], None
+        for _ in range(4):
+            params = {"coin": coin, "limit": 50, **({"cursor": cursor} if cursor else {})}
+            res = await ex.privateGetV5AssetWithdrawQueryAddress(params)
+            r = (res or {}).get("result") or {}
+            rows += [x for x in r.get("rows") or [] if isinstance(x, dict)]
+            cursor = r.get("nextPageCursor")
+            if not cursor:
+                break
+        # универсальные адреса (coin=baseCoin) тоже годятся для любой монеты сети
+        try:
+            res = await ex.privateGetV5AssetWithdrawQueryAddress({"coin": "baseCoin", "limit": 50})
+            rows += [x for x in ((res or {}).get("result") or {}).get("rows") or [] if isinstance(x, dict)]
+        except Exception as e:
+            log.debug("Универсальные адреса Bybit: %s", e)
+        return rows
+
+    async def withdrawable(self, ex_name: str, coin: str) -> tuple[float, float] | None:
+        """Bybit: (можно вывести, заморожено в $) — после пополнения часть денег бывает заморожена."""
+        if ex_name != "bybit":
+            return None
+        res = await self.wd_ex(ex_name).privateGetV5AssetWithdrawWithdrawableAmount({"coin": coin})
+        r = (res or {}).get("result") or {}
+        amounts = r.get("withdrawableAmount") or {}
+        can = sum(float((v or {}).get("withdrawableAmount") or 0) for v in amounts.values() if isinstance(v, dict))
+        return can, float(r.get("limitAmountUsd") or 0)
+
+    async def selftest(self, coin: str = "USDT") -> list[dict]:
+        """Проверка вывода в обе стороны без перевода денег: что готово, что исправить, какой пробный перевод."""
+        coin = coin.upper()
+        names = [n for n in self.b.scanner.exchanges if n in self.b.trader.creds]
+        if len(names) < 2:
+            have = ", ".join(self.name(n) for n in names) or "ни одной"
+            return [{"src": "", "dst": "", "title": "Ключи", "ready": False,
+                     "checks": [("bad", f"нужны ключи обеих бирж (сейчас: {have}) — /keys")], "test_amount": None}]
+        ip, _ = await self.check_ip()
+        out = []
+        for src, dst in ((names[0], names[1]), (names[1], names[0])):
+            out.append(await self._selftest_one(coin, src, dst, ip))
+        self.b.save_trading()
+        return out
+
+    async def _selftest_one(self, coin: str, src: str, dst: str, ip: str | None) -> dict:
+        checks: list[tuple[str, str]] = []
+        add = (lambda st, t: checks.append((st, t)))
+        res = {"src": src, "dst": dst, "title": f"{self.name(src)} → {self.name(dst)}", "checks": checks,
+               "ready": False, "test_amount": None, "network": "", "address": ""}
+        t = self.b.trader
+        for n in (src, dst):
+            if t.key_status.get(n, "ok") != "ok":
+                add("bad", f"торговый ключ {self.name(n)} не работает: {t.key_status[n]}")
+                return res
+        # 1. ключ вывода и IP
+        if src in self.wd_creds:
+            info = await self.wd_info(src, force=True)
+            if info.get("error"):
+                add("bad", f"ключ вывода {self.name(src)}: " + (
+                    f"биржа не принимает IP сервера {ip or ''} — добавь его в белый список ключа (/transfer ip)"
+                    if info.get("ip_error") else info["error"]))
+                return res
+            if not info.get("withdraw"):
+                add("bad", f"у ключа вывода {self.name(src)} нет права Withdraw")
+                return res
+            add("ok", f"ключ вывода {self.name(src)} принят биржей с IP {ip or 'сервера'}, право Withdraw есть")
+        else:
+            perm = self.can_withdraw_key(src)
+            if not perm:
+                add("bad", f"у {self.name(src)} нет ключа с правом вывода — добавь {WD_ENV[0].format(up=src.upper())} и "
+                           f"{WD_ENV[1].format(up=src.upper())} в Render (/transfer help)")
+                return res
+            add("ok" if t.key_info.get(src, {}).get("ip_bound") else "warn",
+                f"вывод идёт торговым ключом {self.name(src)}" + ("" if t.key_info.get(src, {}).get("ip_bound") else
+                                                                  " без привязки к IP — лучше отдельный ключ вывода"))
+        # 2. статус монеты и сеть
+        try:
+            cs, cd = await asyncio.gather(self.currency(src, coin, True), self.currency(dst, coin, True))
+        except Exception as e:
+            add("bad", f"биржа не отдала статус {coin}: {human_error(e)}")
+            return res
+        if cs.get("withdraw") is False or cs.get("active") is False:
+            add("bad", f"вывод {coin} с {self.name(src)} закрыт самой биржей")
+            return res
+        if cd.get("deposit") is False or cd.get("active") is False:
+            add("bad", f"ввод {coin} на {self.name(dst)} закрыт самой биржей")
+            return res
+        ns, nd = cs.get("nets") or {}, cd.get("nets") or {}
+        good = [n for n in ns if n in nd and ns[n].get("withdraw") is not False and nd[n].get("deposit") is not False
+                and ns[n].get("active") is not False and nd[n].get("active") is not False]
+        if not good:
+            add("bad", f"нет общей открытой сети для {coin} между {self.name(src)} и {self.name(dst)}")
+            return res
+        good.sort(key=lambda n: (ns[n].get("fee") is None, float(ns[n].get("fee") or 0)))
+        net = good[0]
+        fee = float(ns[net].get("fee") or 0)
+        mn = float(ns[net].get("min") or 0)
+        res["network"] = net
+        add("ok", f"{coin}: вывод и ввод открыты, сеть {net} (комиссия {fmt(fee)} {coin}"
+                  + (f", минимум {fmt(mn)}" if mn else "") + ")")
+        # 3. адрес пополнения получателя
+        try:
+            addr, tag = await self.deposit_address(dst, coin, nd[net]["key"])
+        except Exception as e:
+            add("bad", f"{self.name(dst)} не выдала адрес пополнения в сети {net}: {human_error(e)}")
+            return res
+        res["address"] = addr
+        add("ok", f"адрес пополнения {self.name(dst)} ({net}): {addr}" + (f", мемо {tag}" if tag else ""))
+        # 4. адресная книга источника
+        try:
+            book = await self.address_book(src, coin)
+        except Exception as e:
+            book = None
+            add("warn", f"адресную книгу {self.name(src)} прочитать не смог ({human_error(e)}) — проверь вручную")
+        else:
+            if book is None:
+                add("info", f"{self.name(src)} не показывает адресную книгу через API: если там включён белый список "
+                            f"адресов, убедись, что адрес выше добавлен")
+        if book is not None:
+            mine = [x for x in book if str(x.get("address") or "").strip().lower() == addr.lower()
+                    and (not x.get("chain") or canon_net(x.get("chain")) == net)]
+            if not mine:
+                add("bad", f"адреса {addr} ({net}) нет в адресной книге {self.name(src)} — через API Bybit выводит "
+                           f"только на адреса из неё. Активы → Вывод → Управление адресами → добавить")
+            elif all(str(x.get("status")) == "1" for x in mine):
+                add("warn", f"адрес в книге {self.name(src)} новый: биржа разрешит вывод на него через 24 часа после добавления")
+            else:
+                add("ok", f"адрес есть в адресной книге {self.name(src)}")
+        # 5. деньги
+        try:
+            free = await self.free_coin(src, coin)
+        except Exception as e:
+            add("warn", f"баланс {coin} не прочитан: {human_error(e)}")
+            free = None
+        try:
+            wa = await self.withdrawable(src, coin)
+        except Exception as e:
+            wa = None
+            log.info("Сумма к выводу %s: %s", src, e)
+        # пробная сумма — самая маленькая, которую пропустит анализ: минимум сети и комиссия не больше 5%
+        test = max(mn, fee * 100 / MAX_FEE_PCT if fee else 0, 1.0 if coin in STABLES else 0)
+        test = math.ceil(test * 100) / 100 if coin in STABLES else float(f"{test:.6g}")
+        if wa is not None:
+            can, frozen_usd = wa
+            free = can if free is None else min(free, can)
+            if frozen_usd > 0:
+                add("info", f"на {self.name(src)} часть денег временно заморожена для вывода (≈${frozen_usd:.2f}) — "
+                            "так бывает после пополнения")
+        price = 1.0 if coin in STABLES else await self.price_usd(src, coin)
+        if price and test * price > self.st["max_usd"] + 1e-9:
+            add("warn", f"пробный перевод ≈${test * price:.2f} больше лимита ${self.st['max_usd']:g} за раз — "
+                        "подними лимит: /transfer limit")
+        if free is not None:
+            if free + 1e-9 < test + fee:
+                add("warn", f"для пробного перевода нужно {fmt(test + fee)} {coin} на {self.name(src)} "
+                            f"({fmt(test)} + комиссия {fmt(fee)}), свободно {fmt(free)}")
+            else:
+                add("ok", f"можно вывести до {fmt(free)} {coin}")
+                res["test_amount"] = test
+        # 6. разрешение
+        if not self.st["allowed"]:
+            add("warn", "переводы ещё не разрешены — /transfer → «🔓 Разрешить переводы»")
+        res["ready"] = not any(st == "bad" for st, _ in checks)
+        return res
+
+    def selftest_text(self, rows: list[dict], coin: str = "USDT") -> str:
+        icon = {"ok": "✅", "warn": "⚠️", "bad": "⛔", "info": "ℹ️"}
+        lines = [f"🧪 <b>Проверка вывода {html.escape(coin)}</b> — без перевода денег"]
+        for r in rows:
+            lines.append(f"\n<b>{html.escape(r['title'])}</b> — " + ("✅ готово" if r["ready"] else "⛔ не готово"))
+            for st, t in r["checks"]:
+                t = html.escape(t)
+                if r.get("address") and html.escape(r["address"]) in t:
+                    t = t.replace(html.escape(r["address"]), f"<code>{html.escape(r['address'])}</code>")
+                lines.append(f"{icon.get(st, '•')} {t}")
+            if r["ready"] and r.get("test_amount") and self.st["allowed"]:
+                lines.append(f"👉 Пробный перевод: <code>/transfer {html.escape(coin)} {fmt(r['test_amount'] + 0)} "
+                             f"{r['src']} {r['dst']}</code>")
+        if all(r["ready"] for r in rows):
+            lines.append("\nВсё готово к переводам в обе стороны. Начни с маленького пробного перевода.")
+        else:
+            lines.append("\nИсправь пункты с ⛔ и запусти проверку снова: <code>/transfer test</code>")
+        return "\n".join(lines)
+
     # --- вывод -------------------------------------------------------------------------------------------------
 
     async def execute(self, plan_id: str, actor: int | None = None) -> dict:
@@ -680,6 +870,7 @@ class Transfers:
                   "<code>/transfer USDT all bingx bybit</code> — всё, что свободно",
                   "<code>/transfer check LUNA</code> — открыт ли вывод/ввод монеты на обеих биржах",
                   "<code>/transfer limit 30 100</code> — лимиты за раз и в сутки",
+                  "<code>/transfer test</code> — 🧪 проверить вывод в обе стороны без перевода",
                   "<code>/transfer ip</code> — IP сервера для белого списка ключа",
                   "<code>/transfer help</code> — как дать ключу право вывода безопасно"]
         return "\n".join(lines)
@@ -697,6 +888,7 @@ HELP_TEXT = (
     "(для Bybit — <code>BYBIT_WITHDRAW_API_KEY</code> и <code>BYBIT_WITHDRAW_API_SECRET</code>) → Save.\n"
     "<b>4. Адресная книга</b> (главная защита): на бирже-источнике добавь адрес пополнения второй биржи "
     "(бот покажет его в проверке перевода) и включи «только адреса из списка».\n\n"
+    "<b>5.</b> <code>/transfer test</code> — 🧪 бот проверит всё в обе стороны без перевода денег и подскажет пробную сумму.\n\n"
     "Если бот напишет «🌐 новый IP» — добавь его в белый список ключа вывода (до 20 адресов). "
     "Торговому ключу IP не ставь, если не уверен, что Render не сменит адрес."
 )
@@ -775,7 +967,8 @@ def parse_args(b: ArbitrageBot, args: list[str]) -> tuple[str, float | str, str,
 
 def panel_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
     st = b.transfers.st
-    rows = [[InlineKeyboardButton(text="🔒 Запретить переводы" if st["allowed"] else "🔓 Разрешить переводы",
+    rows = [[InlineKeyboardButton(text="🧪 Проверить вывод (без перевода)", callback_data="xf:test")],
+            [InlineKeyboardButton(text="🔒 Запретить переводы" if st["allowed"] else "🔓 Разрешить переводы",
                                   callback_data="xf:deny" if st["allowed"] else "xf:allow")],
             [InlineKeyboardButton(text=f"⚖️ Автобаланс: {'выключить' if st['auto'] else 'включить'}",
                                   callback_data="xf:auto")],
@@ -847,6 +1040,21 @@ def register(b: ArbitrageBot) -> None:
         head = args[0].lower()
         if head in ("help", "помощь"):
             await b._answer(message, HELP_TEXT)
+            return
+        if head in ("test", "тест", "проверка", "проверить", "selftest"):
+            coin = (args[1] if len(args) > 1 else "USDT").upper()
+            if not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
+                await message.answer("Напиши так: /transfer test USDT")
+                return
+            await message.answer("🧪 Проверяю вывод в обе стороны: ключи, IP, сеть, адреса, адресная книга, баланс… "
+                                 "Деньги никуда не уходят.")
+            try:
+                rows = await tf.selftest(coin)
+            except Exception as e:
+                log.exception("Проверка вывода")
+                await message.answer(f"❌ Проверка прервалась: {html.escape(human_error(e))}")
+                return
+            await b._answer(message, tf.selftest_text(rows, coin))
             return
         if head in ("ip", "айпи"):
             ip, _new = await tf.check_ip()
@@ -962,6 +1170,16 @@ def register(b: ArbitrageBot) -> None:
         if action == "help":
             await cb.answer()
             await b._send(chat, HELP_TEXT)
+            return
+        if action == "test":
+            await cb.answer("Проверяю… деньги никуда не уходят")
+            try:
+                rows = await tf.selftest("USDT")
+            except Exception as e:
+                log.exception("Проверка вывода")
+                await b._send(chat, f"❌ Проверка прервалась: {html.escape(human_error(e))}")
+                return
+            await b._send(chat, tf.selftest_text(rows, "USDT"))
             return
         if action in ("cancel", "no"):
             if len(parts) > 2:
