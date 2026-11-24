@@ -669,3 +669,71 @@ def test_ip_bound_trading_key_counts_for_ip_alerts(bot_env):
     setup(b)
     b.trader.key_info["bingx"]["ip_bound"] = False
     assert b.transfers.ip_bound_keys() == ["торговый ключ Bybit"]
+
+
+def test_bingx_key_rights_in_both_documented_formats():
+    from bot.trading import parse_bingx_key
+
+    # формат из docs-v3: список номеров
+    old = parse_bingx_key({"apiKey": "k", "permissions": [2, 5], "ipAddresses": ["74.220.51.10"]})
+    assert old["known"] and old["withdraw"] and old["read"] and old["spot_trade"] is False and old["ip_bound"]
+    # формат с флагами (описание BingX для ИИ-навыков)
+    new = parse_bingx_key({"ipRestrict": True, "enableReading": True, "enableWithdrawals": True,
+                           "enableSpotAndMarginTrading": False, "createTime": 1})
+    assert new["known"] and new["withdraw"] and new["read"] and not new["spot_trade"] and new["ip_bound"]
+    assert not new["inactive_rule"]
+    assert parse_bingx_key({"permissions": "2,5"})["withdraw"]  # строкой через запятую
+    odd = parse_bingx_key({"apiKey": "secret", "rights": "x"})
+    assert odd["known"] is False and odd["fields"] == ["apiKey", "rights"] and "secret" not in str(odd)
+    assert "вывод ⛔" in tr.perms_seen(parse_bingx_key({"permissions": [2]}))
+    assert "незнакомом" in tr.perms_seen(odd)
+
+
+def test_withdraw_key_flags_format_is_ready(bot_env, monkeypatch):
+    """Ключ вывода BingX, права которого биржа сообщает флагами, — «готово», а не «нет права Withdraw»."""
+    b, _ = bot_env
+    _, bingx, made = wd_setup(b, monkeypatch)
+
+    def make_flags(name):
+        ex = Wallet("BingX", bingx.nets, BINGX_ADDR, {})
+        ex.balance = bingx.balance
+
+        async def perms_api(params=None):
+            return {"code": 0, "data": {"ipRestrict": True, "enableReading": True, "enableWithdrawals": True,
+                                        "enableSpotAndMarginTrading": False}}
+
+        ex.accountV1PrivateGetAccountApiPermissions = perms_api
+        return ex
+
+    b.transfers.make_ex = make_flags
+    rows = asyncio.run(b.transfers.selftest())
+    back = next(r for r in rows if r["src"] == "bingx")
+    assert back["ready"], back["checks"]
+    assert any("право Withdraw есть" in t for _, t in back["checks"])
+
+
+def test_withdraw_key_unknown_rights_do_not_block(bot_env, monkeypatch):
+    b, _ = bot_env
+    _, bingx, _ = wd_setup(b, monkeypatch)
+
+    def make_odd(name):
+        ex = Wallet("BingX", bingx.nets, BINGX_ADDR, {})
+        ex.balance = bingx.balance
+
+        async def perms_api(params=None):
+            return {"code": 0, "data": {"somethingNew": 1}}
+
+        ex.accountV1PrivateGetAccountApiPermissions = perms_api
+        return ex
+
+    b.transfers.make_ex = make_odd
+    back = next(r for r in asyncio.run(b.transfers.selftest()) if r["src"] == "bingx")
+    assert back["ready"] and any("непонятно" in t and "somethingNew" in t for st, t in back["checks"] if st == "warn")
+
+
+def test_withdraw_key_really_without_withdraw_shows_what_exchange_said(bot_env, monkeypatch):
+    b, _ = bot_env
+    wd_setup(b, monkeypatch, perms=(2,))
+    back = next(r for r in asyncio.run(b.transfers.selftest()) if r["src"] == "bingx")
+    bad = " ".join(t for st, t in back["checks"] if st == "bad")
+    assert not back["ready"] and "чтение ✅" in bad and "вывод ⛔" in bad and "IP ✅" in bad
