@@ -103,6 +103,16 @@ def canon_net(name: str | None) -> str:
     return _NET_ALIASES.get(key, key)
 
 
+def perms_seen(info: dict) -> str:
+    """Что биржа сообщила о правах ключа — чтобы было видно, совпадает ли с тем, что ты включил."""
+    if info.get("known") is False:
+        return "биржа ответила в незнакомом виде (поля: " + (", ".join(info.get("fields") or []) or "нет") + ")"
+    marks = [("чтение", "read"), ("спот", "spot_trade"), ("вывод", "withdraw"), ("переводы", "transfer")]
+    parts = [f"{t} {'✅' if info.get(k) else '⛔'}" for t, k in marks if k in info]
+    parts.append(f"IP {'✅' if info.get('ip_bound') else '⛔'}")
+    return ", ".join(parts)
+
+
 def mask(addr: str) -> str:
     return addr if len(addr) <= 12 else f"{addr[:6]}…{addr[-4:]}"
 
@@ -281,7 +291,7 @@ class Transfers:
     def can_withdraw_key(self, ex: str) -> bool | None:
         if ex in self.wd_creds:
             hit = self._wd_info.get(ex)
-            if not hit or hit[1].get("error"):
+            if not hit or hit[1].get("error") or hit[1].get("known") is False:
                 return None
             return bool(hit[1].get("withdraw"))
         info = self.b.trader.key_info.get(ex) or {}
@@ -402,8 +412,12 @@ class Transfers:
                 plan.add("bad", f"ключ вывода {self.name(src)} биржа не приняла: " + (
                     f"IP сервера{ip} не в белом списке ключа — добавь его (/transfer ip)" if info.get("ip_error")
                     else info["error"]))
+            elif info.get("known") is False:
+                plan.add("warn", f"права ключа вывода {self.name(src)} биржа сообщила непонятно — "
+                                 "если права нет, биржа откажет при выводе и бот покажет причину")
             elif not info.get("withdraw") and info:
-                plan.add("bad", f"у ключа вывода {self.name(src)} нет права Withdraw — включи его в настройках ключа")
+                plan.add("bad", f"у ключа вывода {self.name(src)} нет права Withdraw — включи его в настройках ключа "
+                                f"(биржа сообщила: {perms_seen(info)})")
             else:
                 plan.add("ok", f"отдельный ключ вывода {self.name(src)}: вывод разрешён, биржа принимает IP сервера")
         else:
@@ -595,9 +609,13 @@ class Transfers:
                 add("bad", f"ключ вывода {self.name(src)}: " + (
                     f"биржа не принимает IP сервера {ip or ''} — добавь его в белый список ключа (/transfer ip)"
                     if info.get("ip_error") else info["error"]))
+            elif info.get("known") is False:
+                add("warn", f"ключ вывода {self.name(src)} принят биржей с IP {ip or 'сервера'}, но права она сообщила "
+                            f"непонятно: {perms_seen(info)}. Пробный перевод покажет точно")
             elif not info.get("withdraw"):
                 key_ok = False
-                add("bad", f"у ключа вывода {self.name(src)} нет права Withdraw")
+                add("bad", f"у ключа вывода {self.name(src)} нет права Withdraw. Биржа сообщила: {perms_seen(info)}. "
+                           "Открой ключ на бирже → Edit → отметь Withdraw → сохрани (нужен белый список IP)")
             else:
                 add("ok", f"ключ вывода {self.name(src)} принят биржей с IP {ip or 'сервера'}, право Withdraw есть")
         else:

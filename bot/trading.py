@@ -116,6 +116,7 @@ def parse_bybit_key(r: dict, now: float | None = None) -> dict:
         "read_only": str(r.get("readOnly")) == "1",
         "ip_bound": bool(ips) and ips != ["*"],
         "unified": str(r.get("uta") or r.get("unified") or "0") not in ("0", "False", "false"),
+        "known": isinstance(r.get("permissions"), dict),
     }
     expired = str(r.get("expiredAt") or "").strip()
     if expired:
@@ -136,24 +137,49 @@ def parse_bybit_key(r: dict, now: float | None = None) -> dict:
 BINGX_PERMS = {1: "spot_trade", 2: "read", 3: "futures", 4: "transfer", 5: "withdraw", 7: "sub_transfer"}
 
 
+BINGX_FLAGS = {"enableSpotAndMarginTrading": "spot_trade", "enableReading": "read", "enableFutures": "futures",
+               "permitsUniversalTransfer": "transfer", "enableWithdrawals": "withdraw",
+               "enableInternalTransfer": "sub_transfer"}
+
+
+def _flag(v) -> bool:
+    return v is True or str(v).strip().lower() in ("true", "1", "yes")
+
+
 def parse_bingx_key(data) -> dict:
     """Ответ BingX /openApi/v1/account/apiPermissions → права ключа.
 
-    Формат: {"apiKey", "permissions": [1, 2, ...], "ipAddresses": [...], "note"}, где
-    1 — спот, 2 — чтение, 3 — фьючерсы, 4 — переводы, 5 — ВЫВОД, 7 — переводы субаккаунтов.
+    BingX описывает ответ двумя способами (в разных официальных документах), понимаем оба:
+    * {"apiKey", "permissions": [1, 2, ...], "ipAddresses": [...]}, где
+      1 — спот, 2 — чтение, 3 — фьючерсы, 4 — переводы, 5 — ВЫВОД, 7 — переводы субаккаунтов;
+    * {"enableReading": true, "enableSpotAndMarginTrading": true, "enableWithdrawals": true, "ipRestrict": true, ...}.
+    "known": False — биржа ответила в незнакомом виде, права НЕИЗВЕСТНЫ (а не «нет»).
     """
     data = data if isinstance(data, dict) else {}
     out: dict = {}
-    for p in data.get("permissions") or []:
-        try:
-            name = BINGX_PERMS.get(int(p))
-        except (TypeError, ValueError):
-            continue
-        if name:
-            out[name] = True
-    ips = [ip for ip in (data.get("ipAddresses") or []) if ip]
-    out["ip_bound"] = bool(ips)
-    out["inactive_rule"] = not ips  # ключ без IP BingX удаляет после 14 дней без запросов
+    raw = data.get("permissions")
+    if isinstance(raw, str):
+        raw = [x for x in re.split(r"[^0-9]+", raw) if x]
+    if isinstance(raw, list):
+        for name in BINGX_PERMS.values():
+            out[name] = False
+        for p in raw:
+            try:
+                name = BINGX_PERMS.get(int(p))
+            except (TypeError, ValueError):
+                continue
+            if name:
+                out[name] = True
+    flags = {k: v for k, v in data.items() if k in BINGX_FLAGS}
+    for k, v in flags.items():
+        out[BINGX_FLAGS[k]] = out.get(BINGX_FLAGS[k]) or _flag(v)
+    out["known"] = isinstance(raw, list) or bool(flags)
+    ips = data.get("ipAddresses")
+    ips = [ip for ip in ips if ip] if isinstance(ips, list) else [x for x in re.split(r"[,\s]+", str(ips or "")) if x]
+    out["ip_bound"] = bool(ips) or _flag(data.get("ipRestrict"))
+    out["inactive_rule"] = not out["ip_bound"]  # ключ без IP BingX удаляет после 14 дней без запросов
+    if not out["known"]:  # для диагностики: какие поля прислала биржа (без значений — там может быть ключ)
+        out["fields"] = sorted(str(k) for k in data)[:15]
     return out
 
 

@@ -142,8 +142,13 @@ async def _withdraw_key_checks(b: ArbitrageBot, name: str) -> list[Check]:
             return [Check("Ключи", title, "bad", f"биржа не принимает IP сервера {ip or ''}: добавь его в белый список "
                                                  "ключа вывода (/transfer ip). Торговля это не задевает")]
         return [Check("Ключи", title, "bad", info["error"])]
+    if info.get("known") is False:
+        return [Check("Ключи", title, "warn", "ключ принят, но права биржа сообщила в незнакомом виде — "
+                                              "пробный перевод покажет точно")]
     if not info.get("withdraw"):
-        return [Check("Ключи", title, "bad", "у ключа нет права Withdraw — включи его в настройках ключа")]
+        from .transfers import perms_seen
+        return [Check("Ключи", title, "bad", f"у ключа нет права Withdraw (биржа сообщила: {perms_seen(info)}) — "
+                                             "включи его в настройках ключа")]
     return [Check("Ключи", title, "ok", "работает: право вывода есть, IP сервера принят"
                   + ("" if tf.st["allowed"] else ". Переводы пока выключены: /transfer → «🔓 Разрешить»"))]
 

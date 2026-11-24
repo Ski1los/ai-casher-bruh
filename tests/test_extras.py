@@ -114,7 +114,7 @@ def test_parse_bingx_key_finds_withdraw():
     assert info["spot_trade"] and info["read"] and not info.get("withdraw") and info["inactive_rule"]
     info = parse_bingx_key({"permissions": ["2", 5], "ipAddresses": ["1.2.3.4"]})
     assert info["withdraw"] and not info.get("spot_trade") and info["ip_bound"] and not info["inactive_rule"]
-    assert parse_bingx_key(None) == {"ip_bound": False, "inactive_rule": True}
+    assert parse_bingx_key(None) == {"ip_bound": False, "inactive_rule": True, "known": False, "fields": []}
 
 
 def test_inspect_keys_and_warnings():
