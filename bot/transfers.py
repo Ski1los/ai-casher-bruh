@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import re
 import secrets
 import time
@@ -35,7 +36,7 @@ from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from .trading import STABLES, TradeError, human_error
+from .trading import STABLES, TradeError, human_error, parse_bingx_key, parse_bybit_key
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -53,7 +54,30 @@ TRACK_SEC = 120
 SLOW_SEC = 6 * 3600      # дольше — пишем, что перевод задерживается
 KEEP_ITEMS = 25
 DEFAULTS = {"allowed": False, "auto": False, "max_usd": 30.0, "day_usd": 100.0, "day": "", "day_sent": 0.0,
-            "items": [], "last_auto": 0.0}
+            "items": [], "last_auto": 0.0, "ips": {}}
+IP_CHECK_SEC = 3600
+IPS_KEEP = 20            # BingX принимает до 20 IP на ключ
+WD_INFO_SEC = 600
+# Отдельный ключ ТОЛЬКО для вывода (рекомендуется): торговый ключ остаётся без IP-привязки и не ломается,
+# если сервер сменит IP; ключ вывода бот использует только для самой отправки.
+WD_ENV = "{up}_WITHDRAW_API_KEY", "{up}_WITHDRAW_API_SECRET"
+
+
+def withdraw_creds_from_env(names, env=None) -> dict[str, dict]:
+    env = os.environ if env is None else env
+    out = {}
+    for name in names:
+        up = name.upper()
+        key = (env.get(WD_ENV[0].format(up=up)) or "").strip()
+        secret = (env.get(WD_ENV[1].format(up=up)) or "").strip()
+        if key and secret:
+            out[name] = {"apiKey": key, "secret": secret}
+    return out
+
+
+def is_ip_error(e: BaseException | str) -> bool:
+    text = str(e).lower()
+    return bool(re.search(r"\bip\b|unmatched ip|100419|\b10010\b|白名单", text))
 LIMIT_MAX = 100_000.0
 
 # одинаковые сети у разных бирж называются по-разному
@@ -125,6 +149,11 @@ class Transfers:
         self._cur: dict[tuple[str, str], tuple[float, dict]] = {}
         self._addr: dict[tuple[str, str, str], tuple[str, str | None]] = {}
         self._lock = asyncio.Lock()
+        self.env = None                       # для тестов: свой словарь вместо os.environ
+        self.make_ex = None                   # для тестов: фабрика биржи для ключа вывода
+        self._wd: dict[str, object] = {}      # биржа → ccxt-экземпляр с ключом вывода
+        self._wd_info: dict[str, tuple[float, dict]] = {}
+        self.ip_now: str | None = None
 
     # --- состояние ---------------------------------------------------------------------------------
 
@@ -134,7 +163,7 @@ class Transfers:
         if not isinstance(st, dict):
             st = self.b.trader.state.transfers = {}
         for k, v in DEFAULTS.items():
-            st.setdefault(k, list(v) if isinstance(v, list) else v)
+            st.setdefault(k, type(v)(v) if isinstance(v, (list, dict)) else v)
         today = self.b.trader._today()
         if st["day"] != today:
             st["day"], st["day_sent"] = today, 0.0
@@ -147,7 +176,84 @@ class Transfers:
         rest = [n for n in self.b.scanner.exchanges if n != ex]
         return rest[0] if len(rest) == 1 else None
 
+    @property
+    def wd_creds(self) -> dict[str, dict]:
+        return withdraw_creds_from_env(self.b.scanner.exchanges, self.env)
+
+    def wd_ex(self, name: str):
+        """Биржа с отдельным ключом вывода (или торговый ключ, если отдельного нет)."""
+        cred = self.wd_creds.get(name)
+        main = self.b.trader._ex(name)
+        if not cred:
+            return main
+        ex = self._wd.get(name)
+        if ex is None or getattr(ex, "apiKey", None) != cred["apiKey"]:
+            if self.make_ex is not None:
+                ex = self.make_ex(name)
+            else:
+                from .scanner import make_exchange
+                ex = make_exchange(name)
+            for k, v in cred.items():
+                setattr(ex, k, v)
+            self._wd[name] = ex
+        # рынки и монеты берём у основного экземпляра — ключу вывода не нужно грузить их заново
+        if getattr(main, "markets", None) and not getattr(ex, "markets", None):
+            if hasattr(ex, "set_markets"):
+                ex.set_markets(main.markets, getattr(main, "currencies", None))
+            else:
+                ex.markets = main.markets
+        cur = getattr(main, "currencies", None)
+        if cur:
+            ex.currencies = cur
+        return ex
+
+    async def wd_info(self, name: str, force: bool = False) -> dict:
+        """Права отдельного ключа вывода (и принимает ли биржа наш IP). {} — отдельного ключа нет."""
+        if name not in self.wd_creds:
+            return {}
+        hit = self._wd_info.get(name)
+        if hit and not force and time.time() - hit[0] < WD_INFO_SEC:
+            return hit[1]
+        ex = self.wd_ex(name)
+        try:
+            if name == "bybit":
+                res = await ex.privateGetV5UserQueryApi()
+                info = parse_bybit_key((res or {}).get("result") or {})
+            elif name == "bingx":
+                res = await ex.accountV1PrivateGetAccountApiPermissions()
+                info = parse_bingx_key((res or {}).get("data"))
+            else:
+                info = {}
+        except Exception as e:
+            info = {"error": human_error(e), "ip_error": is_ip_error(e)}
+        self._wd_info[name] = (time.time(), info)
+        return info
+
+    async def check_ip(self, now: float | None = None) -> tuple[str | None, bool]:
+        """Узнать IP сервера и запомнить. Возвращает (ip, новый ли он)."""
+        now = time.time() if now is None else now
+        ip = await outbound_ip()
+        if not ip:
+            return None, False
+        self.ip_now = ip
+        ips = self.st["ips"]
+        new = ip not in ips
+        ips[ip] = [ips[ip][0] if not new else now, now]
+        if len(ips) > IPS_KEEP:  # забываем самые давние
+            for old in sorted(ips, key=lambda k: ips[k][1])[:len(ips) - IPS_KEEP]:
+                ips.pop(old, None)
+        return ip, new
+
+    def ip_list(self) -> list[str]:
+        ips = self.st["ips"]
+        return sorted(ips, key=lambda k: ips[k][0])
+
     def can_withdraw_key(self, ex: str) -> bool | None:
+        if ex in self.wd_creds:
+            hit = self._wd_info.get(ex)
+            if not hit or hit[1].get("error"):
+                return None
+            return bool(hit[1].get("withdraw"))
         info = self.b.trader.key_info.get(ex) or {}
         if not info or info.get("error"):
             return None
@@ -259,13 +365,25 @@ class Transfers:
                 plan.add("bad", f"{self.name(ex_name)} ({role}): ключ не работает — {t.key_status[ex_name]}")
         if any(s == "bad" for s, _ in plan.checks):
             return plan
-        perm = self.can_withdraw_key(src)
-        if perm is False:
-            plan.add("bad", f"у ключа {self.name(src)} нет права вывода (Withdraw). Как включить безопасно: /transfer help")
-        elif perm is None:
-            plan.add("warn", f"права ключа {self.name(src)} неизвестны — проверю при выводе")
+        if src in self.wd_creds:
+            info = await self.wd_info(src, force=force)
+            if info.get("error"):
+                ip = f" ({self.ip_now})" if self.ip_now else ""
+                plan.add("bad", f"ключ вывода {self.name(src)} биржа не приняла: " + (
+                    f"IP сервера{ip} не в белом списке ключа — добавь его (/transfer ip)" if info.get("ip_error")
+                    else info["error"]))
+            elif not info.get("withdraw") and info:
+                plan.add("bad", f"у ключа вывода {self.name(src)} нет права Withdraw — включи его в настройках ключа")
+            else:
+                plan.add("ok", f"отдельный ключ вывода {self.name(src)}: вывод разрешён, биржа принимает IP сервера")
         else:
-            plan.add("ok", f"ключ {self.name(src)}: вывод разрешён")
+            perm = self.can_withdraw_key(src)
+            if perm is False:
+                plan.add("bad", f"у ключа {self.name(src)} нет права вывода (Withdraw). Как включить безопасно: /transfer help")
+            elif perm is None:
+                plan.add("warn", f"права ключа {self.name(src)} неизвестны — проверю при выводе")
+            else:
+                plan.add("ok", f"ключ {self.name(src)}: вывод разрешён")
         try:
             cs, cd = await asyncio.gather(self.currency(src, coin, force), self.currency(dst, coin, force))
         except Exception as e:
@@ -380,7 +498,7 @@ class Transfers:
             if not plan.ok:
                 bad = "; ".join(t for s, t in plan.checks if s == "bad")
                 raise TradeError(f"перед выводом проверил ещё раз — нельзя: {bad}")
-            ex = self.b.trader._ex(plan.src)
+            ex = self.wd_ex(plan.src)
             params: dict = {"network": plan.src_net}
             if plan.tag:
                 params["tag"] = plan.tag
@@ -389,7 +507,10 @@ class Transfers:
             try:
                 res = await ex.withdraw(plan.coin, plan.amount, plan.address, params)
             except Exception as e:
-                raise TradeError(withdraw_error(plan, e)) from None
+                if is_ip_error(e):
+                    await self.check_ip()
+                    self._wd_info.pop(plan.src, None)
+                raise TradeError(withdraw_error(plan, e, self.ip_now)) from None
             st = self.st
             st["day_sent"] = round(st["day_sent"] + (plan.usd or 0), 4)
             item = {"id": str((res or {}).get("id") or ""), "at": time.time(), "coin": plan.coin, "amount": plan.amount,
@@ -412,7 +533,11 @@ class Transfers:
             title = f"{fmt(it['amount'])} {it['coin']} {self.name(it['src'])} → {self.name(it['dst'])}"
             try:
                 if it["status"] == "sent":
-                    wd = await self.b.trader._ex(it["src"]).fetch_withdrawals(it["coin"], int(it["at"] * 1000) - 120_000)
+                    since = int(it["at"] * 1000) - 120_000
+                    try:
+                        wd = await self.b.trader._ex(it["src"]).fetch_withdrawals(it["coin"], since)
+                    except Exception:  # торговому ключу могут не дать историю выводов — спросим ключом вывода
+                        wd = await self.wd_ex(it["src"]).fetch_withdrawals(it["coin"], since)
                     mine = next((w for w in wd or [] if str(w.get("id")) == it["id"]), None)
                     if mine:
                         it["txid"] = mine.get("txid") or it.get("txid")
@@ -535,10 +660,13 @@ class Transfers:
                  "",
                  f"Разрешено: {'🔓 да' if st['allowed'] else '🔒 нет'} · ⚖️ автобаланс: {'вкл' if st['auto'] else 'выкл'}",
                  f"Лимиты: ${st['max_usd']:g} за перевод, ${st['day_usd']:g} в сутки (сегодня ${st['day_sent']:.2f})"]
+        wd = self.wd_creds
         for n in t.creds:
             perm = self.can_withdraw_key(n)
-            lines.append(f"• ключ {html.escape(self.name(n))}: вывод "
-                         + ("✅ разрешён" if perm else "⛔ не разрешён — /transfer help" if perm is False else "❔ не проверен"))
+            kind = "отдельный ключ вывода" if n in wd else "ключ"
+            lines.append(f"• {kind} {html.escape(self.name(n))}: вывод "
+                         + ("✅ разрешён" if perm else "⛔ не разрешён — /transfer help" if perm is False else
+                            "❔ проверю при первом переводе"))
         items = self.st["items"][-5:][::-1]
         if items:
             lines.append("\n<b>Последние переводы:</b>")
@@ -558,21 +686,20 @@ class Transfers:
 
 
 HELP_TEXT = (
-    "🔑 <b>Как дать ключу право вывода — безопасно</b>\n\n"
-    "<b>1. IP сервера.</b> Биржи дают вывод только ключам с привязкой к IP. Render → сервис бота → кнопка "
-    "<b>Connect</b> → вкладка <b>Outbound</b>: там адреса, с которых бот ходит в интернет. Впиши их все "
-    "через запятую. Какой адрес сейчас — покажет <code>/transfer ip</code>.\n\n"
-    "<b>2. Bybit</b>: API → ключ → Edit → галочки <b>Withdraw</b> и <b>Transfer</b> (раздел Assets/Wallet), "
-    "IP из шага 1. Потом Активы → Вывод → <b>Управление адресами</b> → добавь адрес пополнения BingX "
-    "(бот покажет его в проверке) и включи «только адреса из списка».\n\n"
-    "<b>3. BingX</b>: API management → ключ → <b>Withdraw</b> и <b>Transfer</b>, белый список IP из шага 1. "
-    "В адресах вывода добавь адрес пополнения Bybit.\n\n"
-    "<b>Честно о защите.</b> Бесплатные IP Render общие для сервисов в регионе, так что привязка к IP — "
-    "защита средняя. Главная — <b>адресная книга</b>: даже с украденным ключом вывести можно только на твою "
-    "вторую биржу. Поэтому не пропускай шаги с адресами. Render менять не надо — новые права бот увидит "
-    "при проверке ключей (раз в час или /doctor)."
+    "🔑 <b>Как включить вывод — безопасно</b>\n\n"
+    "Биржи дают вывод через API только ключам с привязкой к IP. Бесплатный Render выходит в интернет с адресов "
+    "из своих диапазонов и может сменить IP. Поэтому лучше <b>два ключа</b>: торговый (как сейчас, без IP) и "
+    "<b>отдельный ключ только для вывода</b> с IP. Сменится IP — не пройдёт только перевод, торговля продолжит работать.\n\n"
+    "<b>1.</b> Отправь <code>/transfer ip</code> — бот покажет IP, с которых выходит (список копируется).\n"
+    "<b>2. BingX</b>: API → <b>создать новый ключ</b> → права только <b>Чтение</b> и <b>Withdraw</b> (без торговли), "
+    "в белый список IP вставь список из шага 1. <b>Bybit</b> — так же: новый ключ, Assets → <b>Withdraw</b>, IP из шага 1.\n"
+    "<b>3.</b> Render → Environment: <code>BINGX_WITHDRAW_API_KEY</code> и <code>BINGX_WITHDRAW_API_SECRET</code> "
+    "(для Bybit — <code>BYBIT_WITHDRAW_API_KEY</code> и <code>BYBIT_WITHDRAW_API_SECRET</code>) → Save.\n"
+    "<b>4. Адресная книга</b> (главная защита): на бирже-источнике добавь адрес пополнения второй биржи "
+    "(бот покажет его в проверке перевода) и включи «только адреса из списка».\n\n"
+    "Если бот напишет «🌐 новый IP» — добавь его в белый список ключа вывода (до 20 адресов). "
+    "Торговому ключу IP не ставь, если не уверен, что Render не сменит адрес."
 )
-
 
 async def outbound_ip() -> str | None:
     """С какого IP бот ходит в интернет (для белого списка ключа). None — не удалось узнать."""
@@ -599,9 +726,12 @@ ALLOW_WARNING = (
 )
 
 
-def withdraw_error(plan: TransferPlan, e: BaseException) -> str:
+def withdraw_error(plan: TransferPlan, e: BaseException, ip: str | None = None) -> str:
     text = str(e).lower()
     base = human_error(e)
+    if is_ip_error(e):
+        return (f"биржа не принимает IP сервера{' ' + ip if ip else ''}: добавь его в белый список ключа вывода "
+                f"{plan.src} (/transfer ip). ({base})")
     if "whitelist" in text or "address book" in text or "131002" in text or "not in" in text and "address" in text:
         return (f"биржа не пускает вывод на этот адрес: добавь {mask(plan.address)} в адресную книгу "
                 f"{plan.src} (Активы → Вывод → Управление адресами). ({base})")
@@ -663,9 +793,22 @@ def plan_kb(plan: TransferPlan) -> InlineKeyboardMarkup | None:
 
 async def transfers_loop(b: ArbitrageBot) -> None:
     await asyncio.sleep(90)
-    last_auto = 0.0
+    last_auto = last_ip = 0.0
     while True:
         try:
+            now = time.time()
+            if now - last_ip >= IP_CHECK_SEC:
+                last_ip = now
+                tf = b.transfers
+                had = bool(tf.st["ips"])
+                ip, new = await tf.check_ip(now)
+                if ip and new and had and tf.wd_creds:
+                    tf._wd_info.clear()
+                    await b.notify(
+                        f"🌐 <b>Сервер вышел в интернет с нового IP</b> <code>{html.escape(ip)}</code>.\n"
+                        "Добавь его в белый список ключа вывода, иначе переводы не пройдут (торговля работает). "
+                        "Весь список для копирования: /transfer ip", urgent=True)
+                b.save_trading()
             if b.transfers.st["items"]:
                 for text in await b.transfers.track():
                     await b.notify(text, urgent=True)
@@ -706,12 +849,23 @@ def register(b: ArbitrageBot) -> None:
             await b._answer(message, HELP_TEXT)
             return
         if head in ("ip", "айпи"):
-            ip = await outbound_ip()
-            await message.answer(
-                (f"🌐 Сейчас бот выходит в интернет с IP <code>{html.escape(ip)}</code>.\n" if ip else
-                 "🌐 Не смог узнать IP (сайты проверки не ответили).\n")
-                + "Render может использовать несколько адресов: полный список — Render → сервис → Connect → Outbound. "
-                  "Впиши все в белый список ключа.")
+            ip, _new = await tf.check_ip()
+            b.save_trading()
+            ips = tf.ip_list()
+            lines = [f"🌐 Сейчас бот выходит в интернет с IP <code>{html.escape(ip)}</code>" if ip else
+                     "🌐 Не смог узнать IP сейчас (сайты проверки не ответили)"]
+            if ips:
+                lines += [f"\nВсе IP, с которых бот выходил ({len(ips)}), — скопируй и вставь в белый список "
+                          f"<b>ключа вывода</b> (BingX принимает до 20 через запятую):",
+                          f"<code>{html.escape(','.join(ips))}</code>"]
+            lines.append("\nВ Render → Connect → Outbound указаны целые диапазоны (вида …0/24 — это 256 адресов), "
+                         "а BingX принимает только отдельные IP, до 20. Поэтому бот сам собирает адреса, "
+                         "с которых реально выходит.")
+            lines.append("Render может сменить IP после перезапуска. "
+                         "Бот проверяет IP раз в час и сразу напишет, если появится новый. "
+                         "Поэтому IP привязывай к <b>отдельному ключу для вывода</b>, а торговый ключ оставь без IP — "
+                         "тогда смена IP не сломает торговлю. Как: /transfer help")
+            await b._answer(message, "\n".join(lines))
             return
         if head in ("limit", "лимит", "limits"):
             if not is_main_owner(b, uid):

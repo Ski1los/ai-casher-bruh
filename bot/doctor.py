@@ -126,6 +126,28 @@ def _key_info_checks(b: ArbitrageBot, name: str, info: dict, now: float) -> list
     return out
 
 
+async def _withdraw_key_checks(b: ArbitrageBot, name: str) -> list[Check]:
+    """🔁 Отдельный ключ вывода (BINGX_WITHDRAW_API_KEY …): права и принимает ли биржа IP сервера."""
+    tf = getattr(b, "transfers", None)
+    if tf is None or name not in tf.wd_creds:
+        return []
+    title = f"{b.scanner.display_name(name)}: ключ вывода"
+    try:
+        info = await asyncio.wait_for(tf.wd_info(name, force=True), EXCHANGE_TIMEOUT)
+    except Exception as e:
+        return [Check("Ключи", title, "warn", f"не проверил: {human_error(e)}")]
+    if info.get("error"):
+        if info.get("ip_error"):
+            ip, _ = await tf.check_ip()
+            return [Check("Ключи", title, "bad", f"биржа не принимает IP сервера {ip or ''}: добавь его в белый список "
+                                                 "ключа вывода (/transfer ip). Торговля это не задевает")]
+        return [Check("Ключи", title, "bad", info["error"])]
+    if not info.get("withdraw"):
+        return [Check("Ключи", title, "bad", "у ключа нет права Withdraw — включи его в настройках ключа")]
+    return [Check("Ключи", title, "ok", "работает: право вывода есть, IP сервера принят"
+                  + ("" if tf.st["allowed"] else ". Переводы пока выключены: /transfer → «🔓 Разрешить»"))]
+
+
 async def run_doctor(b: ArbitrageBot) -> list[Check]:
     checks: list[Check] = []
     now = time.time()
@@ -172,6 +194,7 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
             except Exception as e:
                 checks.append(Check("Ключи", title, "warn", f"ключ принят, но баланс не прочитан: {human_error(e)}"))
             checks += _key_info_checks(b, name, t.key_info.get(name, {}), now)
+            checks += await _withdraw_key_checks(b, name)
             hint = await _funding_hint(b, name)
             if hint:
                 checks.append(hint)

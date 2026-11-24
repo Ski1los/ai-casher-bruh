@@ -83,6 +83,16 @@ services:
         sync: false
       - key: BINGX_API_SECRET
         sync: false
+      # 🔁 Переводы между биржами (необязательно): ОТДЕЛЬНЫЙ ключ только для вывода (Чтение + Withdraw)
+      # с белым списком IP сервера (/transfer ip). Торговый ключ выше при этом остаётся без IP.
+      - key: BYBIT_WITHDRAW_API_KEY
+        sync: false
+      - key: BYBIT_WITHDRAW_API_SECRET
+        sync: false
+      - key: BINGX_WITHDRAW_API_KEY
+        sync: false
+      - key: BINGX_WITHDRAW_API_SECRET
+        sync: false
       # Кошелёк Phantom: только ПУБЛИЧНЫЙ адрес Solana (просмотр баланса). Сид-фразу НИКОГДА.
       # Можно не заполнять, а прислать боту командой /phantom АДРЕС.
       - key: PHANTOM_ADDRESS

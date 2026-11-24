@@ -426,3 +426,100 @@ def test_deposit_address_fallback_by_network_name(bot_env):
     bingx.fetch_deposit_addresses_by_network = by_network
     plan = asyncio.run(b.transfers.analyze("USDT", 20, "bybit", "bingx"))
     assert plan.ok and plan.address == "TFallback000000000000000009"
+
+
+# --- отдельный ключ вывода и IP сервера -------------------------------------------------------------------
+
+
+def wd_setup(b, monkeypatch, ip_ok=True, perms=(2, 5)):
+    bybit, bingx = setup(b)
+    b.trader.key_info["bingx"] = {"spot_trade": True, "ip_bound": False}  # торговый ключ — без вывода и без IP
+    b.transfers.env = {"BINGX_WITHDRAW_API_KEY": "wk", "BINGX_WITHDRAW_API_SECRET": "ws"}
+    made = {}
+
+    def make_ex(name):
+        ex = Wallet("BingX", bingx.nets, BINGX_ADDR, {})
+        ex.balance = bingx.balance  # тот же счёт, другой ключ
+
+        async def perms_api(params=None):
+            if not ip_ok:
+                raise Exception('bingx {"code":100419,"msg":"your current request IP is not in the whitelist"}')
+            return {"code": 0, "data": {"permissions": list(perms), "ipAddresses": ["74.220.51.10"]}}
+
+        ex.accountV1PrivateGetAccountApiPermissions = perms_api
+        made[name] = ex
+        return ex
+
+    b.transfers.make_ex = make_ex
+
+    async def fake_ip():
+        return "74.220.51.10"
+
+    monkeypatch.setattr(tr, "outbound_ip", fake_ip)
+    bingx.balance["USDT"] = 50.0
+    return bybit, bingx, made
+
+
+def test_separate_withdraw_key_is_used_only_for_sending(bot_env, monkeypatch):
+    b, _ = bot_env
+    bybit, bingx, made = wd_setup(b, monkeypatch)
+
+    async def run():
+        plan = await b.transfers.analyze("USDT", 20, "bingx", "bybit")
+        assert plan.ok, plan.checks
+        assert any("отдельный ключ вывода" in t for t in checks(plan, "ok"))
+        b.transfers.keep(plan)
+        await b.transfers.execute(plan.id)
+        assert bingx.withdrawn == []  # торговый ключ не выводит
+        assert made["bingx"].withdrawn[0][:3] == ("USDT", 20.0, BYBIT_ADDR)
+        assert made["bingx"].apiKey == "wk"
+        assert made["bingx"].markets is not None  # рынки взяты у основного экземпляра
+
+    asyncio.run(run())
+    assert b.transfers.can_withdraw_key("bingx") is True
+
+
+def test_withdraw_key_ip_not_whitelisted_is_explained(bot_env, monkeypatch):
+    b, session = bot_env
+    _, _, made = wd_setup(b, monkeypatch, ip_ok=False)
+
+    async def run():
+        await b.transfers.check_ip()
+        plan = await b.transfers.analyze("USDT", 20, "bingx", "bybit")
+        bad = " ".join(checks(plan, "bad"))
+        assert not plan.ok and "74.220.51.10" in bad and "белом списке" in bad
+        from bot.doctor import _withdraw_key_checks
+        rows = await _withdraw_key_checks(b, "bingx")
+        assert rows[0].status == "bad" and "74.220.51.10" in rows[0].text and "Торговля" in rows[0].text
+
+    asyncio.run(run())
+    assert tr.is_ip_error("retCode 10010 Unmatched IP") and not tr.is_ip_error("insufficient balance")
+
+
+def test_withdraw_key_without_withdraw_permission(bot_env, monkeypatch):
+    b, _ = bot_env
+    wd_setup(b, monkeypatch, perms=(2,))
+    plan = asyncio.run(b.transfers.analyze("USDT", 20, "bingx", "bybit"))
+    assert any("нет права Withdraw" in t for t in checks(plan, "bad"))
+
+
+def test_server_ips_are_remembered_for_whitelist(bot_env, monkeypatch):
+    b, session = bot_env
+    setup(b)
+    seq = iter(["74.220.51.10", "74.220.51.10", "74.220.59.3"])
+
+    async def fake_ip():
+        return next(seq)
+
+    monkeypatch.setattr(tr, "outbound_ip", fake_ip)
+
+    async def run():
+        assert await b.transfers.check_ip() == ("74.220.51.10", True)
+        assert await b.transfers.check_ip() == ("74.220.51.10", False)
+        await send(b, "/transfer ip")
+        text = session.sent[-1][1]
+        assert "74.220.51.10,74.220.59.3" in text and "отдельному ключу" in text
+
+    asyncio.run(run())
+    # другой экземпляр не делит список IP через DEFAULTS
+    assert tr.DEFAULTS["ips"] == {} and tr.DEFAULTS["items"] == []
