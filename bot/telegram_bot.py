@@ -29,7 +29,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import autonomy, copy_ui, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, pulse_ui, trading_ui, updater
+from . import (autonomy, copy_ui, council, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, pulse_ui, trading_ui,
+               updater, users_ui)
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
 from .mentors import Mentors
@@ -54,7 +55,6 @@ from .scalper import STEP_SEC as SCALP_STEP_SEC
 from .scalper import Scalper
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
 from .solana import PhantomWatcher
-from .tinvest import TInvestClient
 from .trading import Trader, days_left, key_trade_problem, new_auto_stats
 from .triangular import TriOpportunity
 from .webapp import WebApp
@@ -196,7 +196,8 @@ HELP_TEXT = """\
 /ai — полный разбор: комиссии, демо, что поменять
 /ai вопрос — спросить, например <code>/ai почему на $5 нет сделок?</code>
 Можно просто писать вопрос обычным сообщением, а также просить: «купи эфира на 5$ на байбите».
-Под сигналами есть кнопка «🤖 Разбор». Советы по настройкам применяются только твоей кнопкой.
+/council — 🧠 консилиум: несколько ИИ сразу, итог по согласию
+Под сигналами — кнопка «🤖 Разбор». Советы ИИ применяются только твоей кнопкой.
 
 <b>Анализ без ИИ</b>
 /analysis — комиссии, безубыточность, узкие места, рекомендации
@@ -210,17 +211,16 @@ HELP_TEXT = """\
 <code>/phantom АДРЕС</code> — 👻 баланс кошелька Phantom (только просмотр, сид-фразу не нужно!)
 /clean — 🧹 освободить память
 
-<b>Мемкоины и брокер</b> 🦎
+<b>Мемкоины</b> 🦎
 <code>/dex BONK</code> или <code>/dex АДРЕС</code> — токен с DexScreener: цена, ликвидность, риски, ссылки GMGN/Axiom
 <code>/rug АДРЕС</code> — 🛡 проверка токена Solana на скам (RugCheck)
 /hot — тренды Solana · <code>/radar on</code> — присылать новые токены, прошедшие фильтры
-/tinvest — 🏦 портфель Т-Инвестиций (токен «только чтение»)
 
 <b>Прочее</b>
-/report — отчёт о работе прямо сейчас (он же приходит каждый день)
+/report — отчёт о работе сейчас (он же приходит каждый день)
 /status — последний скан и состояние бота
 /settings — настройки, /set — изменить, например <code>/set tri_min 0.1</code>
-/myid — твой Telegram ID
+/myid — твой Telegram ID · /users — 👥 пригласить друга
 
 ⚠️ Прибыль не гарантирована: треугольники живут доли секунды, их забирают профессиональные боты. \
 Торгуй только деньгами, которые не жалко потерять."""
@@ -455,6 +455,9 @@ class ArbitrageBot:
         self.settings = settings
         owner = next(iter(allowed_ids), None) if isinstance(allowed_ids, list) else None
         self.allowed_ids = set(allowed_ids)
+        self.env_ids = set(allowed_ids)  # из ALLOWED_USER_IDS — постоянные, убрать можно только в Render
+        self.users: dict[str, dict] = {}  # 👥 приглашённые ссылкой (bot/users_ui.py): полный доступ, как у владельца
+        self.invites: dict[str, float] = {}  # одноразовые коды приглашений → до какого времени действуют
         self.scanner = Scanner(settings)
         self.subscribers = SubscriberStore()
         self.sent_alerts: dict[tuple[str, str, str], tuple[float, float]] = {}
@@ -462,6 +465,9 @@ class ArbitrageBot:
         self.stats = ScanStats()
         self.owner_id = owner
         self.ai = AIAssistant.from_env()
+        self.council_last: dict | None = None  # 🧠 последний итог консилиума ИИ (коротко)
+        self._council_lock = asyncio.Lock()  # один консилиум за раз: бережём бесплатные лимиты
+        self._council_q: dict[int, str] = {}  # чат → вопрос «второе мнение» о сделке, которую предложил ИИ
         self._explain_items: OrderedDict[str, dict] = OrderedDict()
         self._explain_seq = 0
         self._changed: dict[str, float] = {}  # что меняли через /set и кнопки
@@ -469,7 +475,6 @@ class ArbitrageBot:
         self.alerts = AlertBook()  # ценовые алерты (/alert)
         self.phantom = PhantomWatcher(os.getenv("PHANTOM_ADDRESS", "") or os.getenv("SOLANA_ADDRESS", ""))
         self.dex = DexClient()  # мемкоины: DexScreener + RugCheck (публичные API, без ключей)
-        self.tinvest = TInvestClient.from_env()  # Т-Инвестиции: портфель (только чтение, TINVEST_TOKEN)
         self.radar_chats: set[int] = set()  # кому слать радар мемкоинов (/radar on)
         self.radar_seen: dict[str, float] = {}  # о каких токенах радар уже писал
         self.opps = OpportunityHub()  # «Как заработать сейчас»: акции Bybit, Earn, новости (/earn)
@@ -570,9 +575,12 @@ class ArbitrageBot:
     # --- сохранение настроек ------------------------------------------------
 
     def _settings_state(self) -> dict:
-        return {"values": dict(self._changed), "fees": dict(self._fee_changes),
-                "alerts": self.alerts.export(), "phantom": self.phantom.address,
-                "radar": sorted(self.radar_chats), "opps_notify": self.opps_notify}
+        out = {"values": dict(self._changed), "fees": dict(self._fee_changes),
+               "alerts": self.alerts.export(), "phantom": self.phantom.address,
+               "radar": sorted(self.radar_chats), "opps_notify": self.opps_notify}
+        if self.users or self.invites:  # 👥 приглашённые: пишем, только если они есть
+            out["people"] = users_ui.export(self)
+        return out
 
     def _apply_saved_settings(self, raw: dict) -> None:
         for key, value in (raw.get("values") or {}).items():
@@ -604,6 +612,8 @@ class ArbitrageBot:
             self.opps_notify = raw["opps_notify"]
         if isinstance(raw.get("radar"), list):
             self.radar_chats = {int(c) for c in raw["radar"] if str(c).lstrip("-").isdigit()}
+        if "people" in raw:
+            users_ui.restore(self, raw.get("people"))
 
     async def save_extras(self) -> None:
         """Алерты и адрес кошелька: в файл и в резервную копию."""
@@ -808,9 +818,9 @@ class ArbitrageBot:
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
             "api_keys": keys,
             "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
-                                "/hot", "/radar", "/tinvest", "/mentors", "/stream", "/train", "/profit", "/pulse"],
-            "tinvest": self._tinvest_context(),
+                                "/hot", "/radar", "/council", "/mentors", "/stream", "/train", "/profit", "/pulse"],
             "memecoin_radar_on": bool(self.radar_chats),
+            "ai_council_last": self.council_last,
             "copytrading_solana": self._copy_context(),
             "traders_youtube_twitch": self.mentors.ai_context(),
             "market_pulse_gmgn_axiom": self._pulse_context(),
@@ -858,19 +868,6 @@ class ArbitrageBot:
                                                    for p in d["positions"]],
                 "stats": d["stats"], "today_usd": d["day_pnl_usd"],
                 "last_decisions": [x["symbol"] + ": " + x["text"] for x in d["decisions"][:4]]}
-
-    def _tinvest_context(self) -> dict:
-        if not self.tinvest.configured:
-            return {"connected": False, "how": "/tinvest (токен «только чтение» в Render как TINVEST_TOKEN)"}
-        snap = self.tinvest.snapshot or {}
-        return {"connected": True, "read_only_view": True, "error": snap.get("error"),
-                "total_rub": round(snap.get("total") or 0, 2),
-                "accounts": [{"name": a.get("name"), "total": round(a.get("total") or 0, 2),
-                              "yield_pct": round(a.get("yield_pct") or 0, 2),
-                              "top": [{"ticker": p["ticker"], "value": round(p["value"], 2),
-                                       "yield_pct": round(p["yield_pct"], 2) if p.get("yield_pct") is not None else None}
-                                      for p in (a.get("positions") or [])[:8]]}
-                             for a in snap.get("accounts", [])[:5]]}
 
     def _auto_context(self) -> dict:
         st = self.trader.auto_status_dict()
@@ -969,13 +966,20 @@ class ArbitrageBot:
             text += "\n\n" + proposals_text(answer.proposals, self.settings)
         kb = proposals_keyboard(answer.proposals)
         if answer.orders:
-            if self.owner_id is not None and chat_id == self.owner_id:
+            if self.is_owner(chat_id):
                 orders_text, rows = await trading_ui.plans_from_intents(self, answer.orders)
                 text += "\n\n" + orders_text
                 if rows:
                     kb = InlineKeyboardMarkup(inline_keyboard=rows + (kb.inline_keyboard if kb else []))
             else:
                 text += "\n\n⛔ Ордера через ИИ может подтверждать только владелец бота."
+            if len(self.ai.client.endpoints) >= 2:  # второе мнение перед сделкой: спросить остальные ИИ
+                self._council_q[chat_id] = "Стоит ли сейчас сделать эти сделки: " + "; ".join(
+                    f"{o.side} {o.amount} {o.coin} на {o.exchange}" + (f" по {o.price:g}" if o.price else "")
+                    for o in answer.orders[:3]) + "? Учитывай комиссии и доказанные результаты бота."
+                rows = (kb.inline_keyboard if kb else []) + [[InlineKeyboardButton(
+                    text="🧠 Второе мнение: консилиум ИИ", callback_data="cn:order")]]
+                kb = InlineKeyboardMarkup(inline_keyboard=rows)
         parts = split_message(text)
         try:
             await wait.edit_text(parts[0], reply_markup=kb if len(parts) == 1 else None)
@@ -1080,6 +1084,12 @@ class ArbitrageBot:
     def _allowed_user(self, user_id: int | None) -> bool:
         return not self.allowed_ids or user_id in self.allowed_ids
 
+    def is_owner(self, user_id: int | None) -> bool:
+        """Права владельца: главный владелец или приглашённый с полным доступом (/users)."""
+        if user_id is None or self.owner_id is None:
+            return False
+        return user_id == self.owner_id or str(user_id) in self.users
+
     # --- команды ------------------------------------------------------------
 
     def _register_handlers(self) -> None:
@@ -1094,7 +1104,7 @@ class ArbitrageBot:
 
         @dp.callback_query(F.data == "up:go")
         async def cb_update(cb: CallbackQuery) -> None:
-            if self.owner_id is None or cb.from_user.id != self.owner_id:
+            if not self.is_owner(cb.from_user.id):
                 await cb.answer("Только владелец", show_alert=True)
                 return
             hook = updater.hook_url()
@@ -1115,14 +1125,16 @@ class ArbitrageBot:
             await message.answer(f"Твой Telegram ID: <code>{uid}</code>")
 
         @dp.message(Command("start", "help"))
-        async def cmd_start(message: Message) -> None:
+        async def cmd_start(message: Message, command: CommandObject) -> None:
+            if await users_ui.handle_start_invite(self, message, command.args):
+                return
             if not self._allowed(message):
                 await message.answer("⛔ Доступ закрыт. Твой ID: /myid")
                 return
             rows = list((self.app_markup() or InlineKeyboardMarkup(inline_keyboard=[])).inline_keyboard)
             rows.insert(0, [InlineKeyboardButton(text="💡 Как заработать сейчас (акции, проценты, новости)",
                                                  callback_data="op:show")])
-            if message.from_user and message.from_user.id == self.owner_id:
+            if message.from_user and self.is_owner(message.from_user.id):
                 rows.insert(0, [InlineKeyboardButton(text="🚀 С чего начать: готовность к торговле", callback_data="su:again")])
             await message.answer(HELP_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
@@ -1155,7 +1167,7 @@ class ArbitrageBot:
                 await wait.edit_text(f"Ошибка сканирования: {html.escape(str(e))[:300]}")
                 return
             parts = split_message(format_scan(result, self.scanner, self.settings))
-            is_owner = message.from_user is not None and message.from_user.id == self.owner_id
+            is_owner = message.from_user is not None and self.is_owner(message.from_user.id)
             kb = self._signal_markup(result.opportunities, result.triangles, trade_buttons=is_owner)
             await wait.edit_text(parts[0], reply_markup=kb if len(parts) == 1 else None)
             for i, part in enumerate(parts[1:], 2):
@@ -1303,7 +1315,7 @@ class ArbitrageBot:
                 await message.answer("Значение должно быть числом, например <code>0.5</code>")
                 return
             attr, desc = EDITABLE[args[0]]
-            if args[0] in RISK_KEYS and (message.from_user is None or message.from_user.id != self.owner_id):
+            if args[0] in RISK_KEYS and (message.from_user is None or not self.is_owner(message.from_user.id)):
                 await message.answer("⛔ Лимиты торговли меняет только владелец бота.")
                 return
             err = self.apply_setting(args[0], value)
@@ -1387,6 +1399,46 @@ class ArbitrageBot:
                 return
             await self._answer(message, self.ai.status_text() if self.ai.configured else NO_AI_TEXT)
 
+        async def run_council(chat_id: int, question: str | None) -> None:
+            if self._council_lock.locked():
+                await self._send(chat_id, "🧠 Консилиум уже совещается, ответ будет через несколько секунд.")
+                return
+
+            async def make() -> Answer:
+                async with self._council_lock:
+                    res = await council.run(self.ai, self.ai_context(), question)
+                self.council_last = res.brief()
+                return council.as_answer(res)
+
+            wait = await self.bot.send_message(
+                chat_id, f"🧠 Собираю консилиум: спрашиваю {min(len(self.ai.client.endpoints), 5)} ИИ одновременно, "
+                         "до минуты…") if self.ai.configured else None
+            await self._ai_respond(chat_id, make, wait=wait)
+
+        @dp.message(Command("council", "консилиум", "ais"))
+        async def cmd_council(message: Message, command: CommandObject) -> None:
+            if not self._allowed(message):
+                return
+            arg = (command.args or "").strip()
+            if arg.lower() in ("keys", "ключи", "add", "добавить") or not self.ai.configured:
+                await self._answer(message, council.keys_text(self.ai) if self.ai.configured else NO_AI_TEXT)
+                return
+            await run_council(message.chat.id, arg or None)
+
+        @dp.callback_query(F.data.startswith("cn:"))
+        async def cb_council(cb: CallbackQuery) -> None:
+            if not self._allowed_user(cb.from_user.id):
+                await cb.answer("Нет доступа", show_alert=True)
+                return
+            chat_id = cb.message.chat.id if cb.message else cb.from_user.id
+            action = (cb.data or "").split(":", 1)[1]
+            if action == "keys":
+                await cb.answer()
+                await self._send(chat_id, council.keys_text(self.ai))
+                return
+            await cb.answer("Спрашиваю консилиум…")
+            await run_council(chat_id, self._council_q.pop(chat_id, None) if action == "order" else None)
+
         @dp.message(Command("ai_reset"))
         async def cmd_ai_reset(message: Message) -> None:
             if not self._allowed(message):
@@ -1466,6 +1518,7 @@ class ArbitrageBot:
         profit_ui.register(self)
         pulse_ui.register(self)
         autonomy.register(self)
+        users_ui.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1595,7 +1648,7 @@ class ArbitrageBot:
             self.sent_alerts[o.key] = (time.time(), o.net_percent)
         text = "\n\n".join(blocks)
         for chat_id in list(self.subscribers.chats):
-            kb = self._signal_markup(fresh_cross, fresh_tri, trade_buttons=chat_id == self.owner_id)
+            kb = self._signal_markup(fresh_cross, fresh_tri, trade_buttons=self.is_owner(chat_id))
             await self._send(chat_id, text, kb)
 
     def cleanup(self, everything: bool = False) -> dict:
@@ -1870,6 +1923,7 @@ class ArbitrageBot:
                     BotCommand(command="orders", description="Открытые ордера"),
                     BotCommand(command="stop", description="🛑 Остановить торговлю"),
                     BotCommand(command="ai", description="🧠 ИИ: разбор и вопросы"),
+                    BotCommand(command="council", description="🧠 Консилиум: несколько ИИ сразу"),
                     BotCommand(command="doctor", description="🩺 Проверить всё"),
                     BotCommand(command="clean", description="🧹 Освободить память"),
                     BotCommand(command="price", description="💲 Цена на Bybit и BingX"),
@@ -1896,7 +1950,7 @@ class ArbitrageBot:
                     BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
                     BotCommand(command="rug", description="🛡 Проверка токена на скам"),
                     BotCommand(command="radar", description="📡 Радар новых мемкоинов"),
-                    BotCommand(command="tinvest", description="🏦 Т-Инвестиции: портфель"),
+                    BotCommand(command="users", description="👥 Пользователи: пригласить по ссылке"),
                     BotCommand(command="analysis", description="Анализ: комиссии и узкие места"),
                     BotCommand(command="fees", description="Комиссии бирж"),
                     BotCommand(command="report", description="Отчёт о работе"),
@@ -1954,5 +2008,4 @@ class ArbitrageBot:
             await self.meme.jup.close()
             await self.mentors.close()
             await self.gmgn.close()
-            await self.tinvest.close()
             await self.bot.session.close()

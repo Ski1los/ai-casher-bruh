@@ -151,7 +151,7 @@ def register(b: ArbitrageBot) -> None:
             return
         action = cb.data.split(":", 1)[1]
         chat_id = cb.message.chat.id if cb.message else cb.from_user.id
-        owner = b.owner_id is not None and cb.from_user.id == b.owner_id
+        owner = b.is_owner(cb.from_user.id)
         p = b.pulse
         if action in ("toggle", "notify", "scan") and not owner:
             await cb.answer("Это может менять только владелец бота", show_alert=True)

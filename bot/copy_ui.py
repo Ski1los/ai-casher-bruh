@@ -131,7 +131,7 @@ def register(b: ArbitrageBot) -> None:
     dp = b.dp
 
     async def owner_only(uid: int | None, chat_id: int) -> bool:
-        if b.owner_id is None or uid != b.owner_id:
+        if not b.is_owner(uid):
             await b._send(chat_id, "⛔ Управлять копитрейдингом может только владелец бота.")
             return False
         return True

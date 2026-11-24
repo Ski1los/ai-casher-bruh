@@ -212,7 +212,7 @@ def register(b: ArbitrageBot) -> None:
         action = cb.data.split(":", 1)[1]
         chat_id = cb.message.chat.id if cb.message else cb.from_user.id
         if action == "notify":
-            if b.owner_id is not None and cb.from_user.id != b.owner_id:
+            if b.owner_id is not None and not b.is_owner(cb.from_user.id):
                 await cb.answer("Только владелец", show_alert=True)
                 return
             b.opps_notify = not b.opps_notify

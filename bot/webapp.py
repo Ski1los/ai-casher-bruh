@@ -254,7 +254,6 @@ class WebApp:
             ("GET", "/api/dex/hot"): self.dex_hot,
             ("GET", "/api/dex/rug"): self.dex_rug,
             ("POST", "/api/radar"): self.radar,
-            ("GET", "/api/tinvest"): self.tinvest,
             ("GET", "/api/opps"): self.opps,
             ("POST", "/api/opps/notify"): self.opps_notify,
             ("GET", "/api/copy"): self.copy,
@@ -285,7 +284,7 @@ class WebApp:
             return web.json_response({"error": "Доступ закрыт. Попроси владельца добавить твой ID в ALLOWED_USER_IDS"},
                                      status=403)
         request[USER] = user
-        request[OWNER] = self.b.owner_id is not None and uid == self.b.owner_id
+        request[OWNER] = self.b.is_owner(uid)
         return await handler(request)
 
     def _wrap(self, handler):
@@ -1270,14 +1269,6 @@ class WebApp:
         self.b.opps_notify = bool(body.get("on"))
         await self.b.save_extras()
         return {"notify": self.b.opps_notify}
-
-    async def tinvest(self, request: web.Request) -> dict:
-        self._owner(request)
-        ti = self.b.tinvest
-        if not ti.configured:
-            return {"configured": False}
-        snap = await ti.get(force=request.query.get("force") == "1")
-        return {"configured": True, **(snap or {})}
 
     async def set_setting(self, request: web.Request) -> dict:
         body = await self._body(request)

@@ -3,9 +3,7 @@
 
 import asyncio
 import copy
-import hashlib
 import json
-import ssl
 import time
 
 import pytest
@@ -17,13 +15,12 @@ from bot.config import Settings
 from bot.dex import (DexClient, Pair, best_pairs, fmt_token_price, is_address, links, pair_text, parse_rug, risk_flags,
                      verdict)
 from bot.doctor import run_doctor
-from bot.tinvest import CA_FILE, TInvestClient, money, parse_portfolio, ssl_context, token_from_env
 from bot.trading import Trader, key_trade_problem
 from bot.triangular import path_min_amount, path_min_order_ok
 from bot.webapp import WebApp
 from tests import fake_market_api as fm
 from tests.fake_exchange import tri_exchange
-from tests.test_telegram_flow import OWNER, STRANGER, send
+from tests.test_telegram_flow import OWNER, send
 from tests.test_trading import FakeScanner, make_trader, run, triangle_opp
 from tests.test_webapp import TOKEN, auth
 
@@ -228,7 +225,7 @@ def test_doctor_shows_autotrade_and_read_only_is_bad_in_live(bot_env):
     by_title = {c.title: c for c in checks}
     assert by_title["ExA: права"].status == "bad" and "Read-Write" in by_title["ExA: права"].text
     assert by_title["ExA: деньги"].status == "warn"
-    assert "Автоторговля" in by_title and "Т-Инвестиции" in by_title and "Радар мемкоинов" in by_title
+    assert "Автоторговля" in by_title and "Т-Инвестиции" not in by_title and "Радар мемкоинов" in by_title
 
 
 # ---------------------------------------------------------------------------
@@ -334,61 +331,6 @@ def test_radar_chats_survive_restart(market_env):
 
 
 # ---------------------------------------------------------------------------
-# Т-Инвестиции
-# ---------------------------------------------------------------------------
-
-
-def test_tinvest_parsing_and_ca_bundle():
-    assert money({"units": "12", "nano": 500000000}) == 12.5
-    assert money({"units": "-3", "nano": -250000000}) == -3.25
-    assert money(None) == 0
-    p = parse_portfolio(fm.TI_PORTFOLIOS["2000111"])
-    assert p["total"] == pytest.approx(65395.12) and p["yield_pct"] == pytest.approx(6.84)
-    sber = next(x for x in p["positions"] if x["ticker"] == "SBER")
-    assert sber["value"] == pytest.approx(60 * 301.25) and sber["yield_pct"] == pytest.approx(1971 / (60 * 268.4) * 100)
-    assert p["by_type"]["share"] == pytest.approx(48210.5) and "futures" not in p["by_type"]
-    assert token_from_env({"TINKOFF_TOKEN": " t "}) == "t" and token_from_env({}) == ""
-    # корневой сертификат Минцифры: проверяем, что в репозитории именно он (отпечаток SHA-256)
-    der = ssl.PEM_cert_to_DER_cert(CA_FILE.read_text())
-    assert hashlib.sha256(der).hexdigest().upper() == "D26D2D0231B7C39F92CC738512BA54103519E4405D68B5BD703E9788CA8ECF31"
-    ctx = ssl_context()
-    assert any("Russian Trusted Root CA" in str(c.get("subject")) for c in ctx.get_ca_certs())
-
-
-def test_tinvest_client_and_command(market_env, monkeypatch):
-    b, session = market_env
-
-    async def flow():
-        server = TestServer(fm.make_app())
-        await server.start_server()
-        base = str(server.make_url("")).rstrip("/")
-        try:
-            b.tinvest = TInvestClient("")
-            await send(b, "/tinvest")
-            assert "TINVEST_TOKEN" in session.sent[-1][1] and "Только чтение" in session.sent[-1][1]
-
-            fm.wire(b, base)
-            b.allowed_ids.add(STRANGER)
-            await send(b, "/tinvest", user=STRANGER)
-            assert "только владелец" in session.sent[-1][1]
-            await send(b, "/tinvest")
-            text = session.sent[-1][1]
-            assert "Брокерский счёт" in text and "ИИС" in text and "SBER" in text and "Закрытый" not in text
-            assert "65 395.12 ₽" in text and "Всего" in text and "−" not in text
-            assert b.tinvest.snapshot["read_only"]
-
-            fm.wire(b, base, token="bad")
-            b.tinvest.token = "wrong"
-            snap = await b.tinvest.get(force=True)
-            assert "токен не подходит" in snap["error"]
-        finally:
-            await b.tinvest.close()
-            await server.close()
-
-    asyncio.run(flow())
-
-
-# ---------------------------------------------------------------------------
 # Mini App
 # ---------------------------------------------------------------------------
 
@@ -442,18 +384,11 @@ def test_webapp_new_endpoints(market_env, monkeypatch):
             st, r = await post("/api/radar", {"on": True}, uid=friend)
             assert r["radar"] and friend in b.radar_chats
 
-            st, r = await get("/api/tinvest")
-            assert st == 200 and r["configured"] and len(r["accounts"]) == 2
-            st, _ = await get("/api/tinvest", uid=friend)
-            assert st == 403
-            await b.tinvest.close()
-            b.tinvest = TInvestClient("")
-            st, r = await get("/api/tinvest")
-            assert r == {"configured": False}
+            r = await client.get("/api/tinvest", headers=auth(OWNER))  # Т-Инвестиции убраны из бота (v37)
+            assert r.status == 404
         finally:
             await client.close()
             await b.dex.close()
-            await b.tinvest.close()
             await fake.close()
 
     asyncio.run(main())
@@ -466,7 +401,8 @@ def test_ai_context_has_autotrade_and_extras(market_env):
     ctx = b._trading_context()
     assert "autotrade_status" in ctx and ctx["autotrade_status"]["stats"]["checks"] == 1
     extras = b._extras_context()
-    assert extras["tinvest"]["connected"] is False and "/dex" in extras["useful_commands"]
+    assert "tinvest" not in extras and "/dex" in extras["useful_commands"]
+    assert "/tinvest" not in extras["useful_commands"]
     json.dumps(ctx, ensure_ascii=False)
     json.dumps(extras, ensure_ascii=False)
 

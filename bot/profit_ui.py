@@ -100,7 +100,7 @@ def register(b: ArbitrageBot) -> None:
     dp = b.dp
 
     async def owner_only(uid: int | None, chat_id: int) -> bool:
-        if b.owner_id is None or uid != b.owner_id:
+        if not b.is_owner(uid):
             await b._send(chat_id, "⛔ Это может менять только владелец бота.")
             return False
         return True
@@ -135,7 +135,7 @@ def register(b: ArbitrageBot) -> None:
             await b._send(chat_id, HOW, keyboard(b))
         elif action == "plan" and len(parts) > 2:
             amount = float(parts[2])
-            if b.owner_id is not None and cb.from_user.id == b.owner_id:
+            if b.is_owner(cb.from_user.id):
                 p.st["amount"] = amount
                 p._changed()
                 b.save_copy()

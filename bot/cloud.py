@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 BACKUP_FILENAME = "bot_state.json"
 BACKUP_CAPTION = "💾 Резервная копия бота (демо-счёт и настройки). Не открепляй это сообщение."
 SELF_PING_SEC = 10 * 60
-BOT_VERSION = "36"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
+BOT_VERSION = "37"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
 
 
 def version_text() -> str:
@@ -60,7 +60,6 @@ ENV_SHOWN = (
     ("BINGX_API_SECRET", "секрет BingX", False),
     ("AI_API_KEY", "ключ ИИ (Groq, или Gemini в GEMINI_API_KEY)", False),
     ("PHANTOM_ADDRESS", "адрес Phantom", False),
-    ("TINVEST_TOKEN", "токен Т-Инвестиций", False),
     ("RENDER_DEPLOY_HOOK_URL", "ссылка Deploy Hook — бот обновляется сам", False),
 )
 
@@ -80,8 +79,8 @@ def _env_rows(env=None) -> list[tuple[str, str, bool, bool]]:
     for key, what, required in ENV_SHOWN:
         value = (env.get(key) or "").strip()
         if key == "AI_API_KEY" and not value:
-            value = (env.get("GROQ_API_KEY") or env.get("OPENROUTER_API_KEY") or env.get("GEMINI_API_KEY")
-                     or env.get("GOOGLE_API_KEY") or "").strip()
+            from .ai import ai_keys_present  # любой ключ ИИ (Groq, Gemini, Cerebras, Mistral, …)
+            value = "1" if ai_keys_present(env) else ""
         rows.append((key, what, bool(value), required))
     return rows
 

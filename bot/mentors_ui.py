@@ -400,7 +400,7 @@ def register(b: ArbitrageBot) -> None:
     dp = b.dp
 
     async def owner_only(uid: int | None, chat_id: int) -> bool:
-        if b.owner_id is None or uid != b.owner_id:
+        if not b.is_owner(uid):
             await b._send(chat_id, "⛔ Менять список может только владелец бота.")
             return False
         return True
@@ -437,7 +437,7 @@ def register(b: ArbitrageBot) -> None:
         cmd, rest = args[0].lower(), (args[1] if len(args) > 1 else "")
         if cmd in ("scout", "разведчик", "find", "найти"):
             if rest in ("now", "сейчас") or cmd in ("find", "найти"):
-                if b.owner_id is not None and message.from_user and message.from_user.id == b.owner_id:
+                if message.from_user and b.is_owner(message.from_user.id):
                     await scout_find(b, message.chat.id)
                     return
             await b._send(message.chat.id, b.mentors.scout.text(), scout_kb(b))
@@ -464,10 +464,10 @@ def register(b: ArbitrageBot) -> None:
             return
         uid = message.from_user.id if message.from_user else None
         arg = (command.args or "").strip().lower()
-        if arg in ("now", "сейчас", "find", "найти") and uid == b.owner_id:
+        if arg in ("now", "сейчас", "find", "найти") and b.is_owner(uid):
             await scout_find(b, message.chat.id)
             return
-        if arg in ("history", "история") and uid == b.owner_id:
+        if arg in ("history", "история") and b.is_owner(uid):
             await scout_history(b, message.chat.id)
             return
         if arg in ("rank", "top", "рейтинг", "топ"):

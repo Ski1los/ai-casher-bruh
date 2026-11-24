@@ -467,13 +467,13 @@ def register(b: ArbitrageBot) -> None:
         if b.owner_id is None:
             await message.answer("Торговля доступна только владельцу. Заполни ALLOWED_USER_IDS в Render.")
             return False
-        if uid != b.owner_id:
+        if not b.is_owner(uid):
             await message.answer("⛔ Торговать может только владелец бота.")
             return False
         return True
 
     async def cb_owner(cb: CallbackQuery) -> bool:
-        if b.owner_id is None or cb.from_user.id != b.owner_id:
+        if not b.is_owner(cb.from_user.id):
             await cb.answer("Торговать может только владелец", show_alert=True)
             return False
         return True

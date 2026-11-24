@@ -1,4 +1,4 @@
-"""Команды для мемкоинов (DexScreener, RugCheck, радар) и Т-Инвестиций."""
+"""Команды для мемкоинов (DexScreener, RugCheck, радар)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .dex import DEX_HELP, SOL_ADDRESS_RE, DexError, Pair, best_pairs, is_address, pair_text
-from .tinvest import TINVEST_HELP
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -175,17 +174,3 @@ def register(b: ArbitrageBot) -> None:
             on = chat_id in b.radar_chats
             await message.answer(f"📡 Радар мемкоинов: {'🟢 включён' if on else '⏸ выключен'}.\n"
                                  "<code>/radar on</code> · <code>/radar off</code> · разово: /hot")
-
-    @dp.message(Command("tinvest", "ti", "broker", "tbank"))
-    async def cmd_tinvest(message: Message, command: CommandObject) -> None:
-        if not b._allowed(message):
-            return
-        uid = message.from_user.id if message.from_user else None
-        if b.owner_id is not None and uid != b.owner_id:
-            await message.answer("Портфель Т-Инвестиций видит только владелец бота.")
-            return
-        if (command.args or "").strip().lower() in ("help", "помощь", "как") or not b.tinvest.configured:
-            await b._answer(message, TINVEST_HELP)
-            return
-        snap = await b.tinvest.get(force=True)
-        await b._answer(message, b.tinvest.text(snap))
