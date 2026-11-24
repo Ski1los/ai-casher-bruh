@@ -546,7 +546,7 @@ async def main():
 
     b = build()
     port = int(os.getenv("PORT", "8080"))
-    fm.wire(b, f"http://127.0.0.1:{port}/fake")  # мемкоины и Т-Инвестиции на ненастоящих данных
+    fm.wire(b, f"http://127.0.0.1:{port}/fake")  # мемкоины на ненастоящих данных
     await b.trader.inspect_keys()
     b.trader.state.auto = True
     await b._scan()

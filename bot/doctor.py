@@ -209,16 +209,6 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                         memory_line() + " бесплатного Render"
                         + ("" if mem < RENDER_RAM_MB * 0.75 else ". Нажми /clean, чтобы освободить кэши")))
 
-    if b.tinvest.configured:
-        snap = await b.tinvest.get(force=True)
-        if snap and snap.get("error"):
-            checks.append(Check("Сервис", "Т-Инвестиции", "bad", snap["error"]))
-        elif snap:
-            checks.append(Check("Сервис", "Т-Инвестиции", "ok",
-                                f"счетов: {len(snap['accounts'])}, портфель ≈ {snap['total']:,.0f} ₽ (только просмотр)".replace(",", " ")))
-    else:
-        checks.append(Check("Сервис", "Т-Инвестиции", "info", "не подключены (по желанию): /tinvest"))
-
     # --- Phantom и алерты ----------------------------------------------------
     if b.phantom.address:
         snap = await b.phantom_snapshot(force=True)

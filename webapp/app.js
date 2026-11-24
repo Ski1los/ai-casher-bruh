@@ -85,7 +85,7 @@ const ICON = {
   price: svg('<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>', 'style="color:#4f8cff"'),
   x: svg('<path d="M6 6l12 12M18 6 6 18"/>', 'style="color:var(--red)"'),
   dex: svg('<path d="M12 3c4 3 6 6 6 10a6 6 0 0 1-12 0c0-2 1-4 2-5 0 2 1 3 2 3 0-3 1-6 2-8z"/>', 'style="color:#ff7a45"'),
-  bank: svg('<path d="M3 10h18M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 20h18M12 3l9 5H3z"/>', 'style="color:var(--yellow)"'),
+  brain: svg('<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 3 3V4zM15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-3 3V4z"/>', 'style="color:var(--accent2)"'),
   pilot: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 12l4-3M12 7v1M7 12h1M16 12h1"/>', 'style="color:var(--accent2)"'),
   fire: svg('<path d="M4 17l5-5 4 4 7-7M14 9h6v6"/>', 'style="color:var(--green)"'),
   ghost: svg('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.5-2-2.3 2-2.2-2-2.2 2-2.3-2z"/><circle cx="9.5" cy="11" r="1"/><circle cx="14.5" cy="11" r="1"/>', 'style="color:#ab9ff2"'),
@@ -556,7 +556,7 @@ function renderHome() {
     <div class="grid4" style="margin-top:8px">
       <div class="action" data-act="dex" data-v="hot"><div class="ic">${ICON.dex}</div>Мемкоины</div>
       <div class="action" data-act="dex" data-v="search"><div class="ic">${ICON.fire}</div>DEX-поиск</div>
-      <div class="action" data-act="tinvest"><div class="ic">${ICON.bank}</div>Т-Инвест</div>
+      <div class="action" data-act="ai"><div class="ic">${ICON.brain}</div>ИИ</div>
       <div class="action" data-act="pilot"><div class="ic">${ICON.pilot}</div>Автопилот</div>
     </div>
     <div class="section-title">Лучшие сигналы <a data-act="goto" data-tab="signals">Все</a></div>
@@ -2028,42 +2028,6 @@ function openLink(url) {
   try { tg.openLink(url); } catch { window.open(url, "_blank", "noopener"); }
 }
 
-// ---------------------------------------------------------------------------
-// Т-Инвестиции (только просмотр)
-// ---------------------------------------------------------------------------
-
-const RUB = (v, cur = "rub") => `${groupInt(Math.round(v).toString())}${NB}${{ rub: "₽", usd: "$", eur: "€", cny: "¥" }[cur] || cur.toUpperCase()}`;
-const TI_TYPES = { share: "Акции", bond: "Облигации", etf: "Фонды", currency: "Валюта", futures: "Фьючерсы", option: "Опционы", sp: "Ноты" };
-
-async function tinvestSheet(force = false) {
-  Sheet.open("Т-Инвестиции", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Загружаю портфель…</div>`, { full: true });
-  try {
-    const r = await api("/api/tinvest" + (force ? "?force=1" : ""));
-    if (!Sheet.isOpen() || $("#sheetTitle").textContent !== "Т-Инвестиции") return;
-    if (!r.configured) {
-      Sheet.body().innerHTML = `<div class="card"><div class="b">Подключить портфель (только просмотр)</div><ol class="small" style="padding-left:18px;margin:8px 0 0;line-height:1.55">
-        <li>Т-Банк → Инвестиции → ⚙️ Настройки → «Токены T-Invest API»</li>
-        <li>«Создать токен» → доступ <b>«Только чтение»</b> → все счета → скопировать</li>
-        <li>Render → сервис → Environment → <b>TINVEST_TOKEN</b> = токен → Save</li>
-        <li>Через минуту открой этот экран снова</li></ol>
-        <div class="tiny muted" style="margin-top:10px">🔒 Токен не присылай в чат. «Только чтение» не даёт выставлять заявки и выводить деньги.</div></div>`;
-      return;
-    }
-    if (r.error) { Sheet.body().innerHTML = `<div class="banner red"><div>❌ ${esc(r.error)}</div></div>`; return; }
-    Sheet.body().innerHTML = `
-      ${r.accounts.length > 1 ? `<div class="stat"><div class="k">Всего</div><div class="v num">${RUB(r.total)}</div></div>` : ""}
-      ${r.accounts.map((a) => a.error ? `<div class="banner red" style="margin-top:10px"><div><b>${esc(a.name)}</b>: ${esc(a.error)}</div></div>` : `
-        <div class="card" style="margin-top:10px">
-          <div class="row between"><div><div class="b">${esc(a.name)}</div><div class="tiny muted">${esc(a.type || "")}</div></div>
-          <div style="text-align:right"><div class="b num">${RUB(a.total, a.currency)}</div><div class="small num ${cls(a.yield_pct)}">${pct(a.yield_pct)} всего${a.daily_yield != null ? ` · <span class="${cls(a.daily_yield)}">${a.daily_yield > 0 ? "+" : ""}${RUB(a.daily_yield, a.currency)} день</span>` : ""}</div></div></div>
-          ${Object.keys(a.by_type || {}).length ? `<div class="chips" style="margin-top:10px;flex-wrap:wrap">${Object.entries(a.by_type).map(([k, v]) => `<span class="chip">${esc(TI_TYPES[k] || k)} ${RUB(v, a.currency)}</span>`).join("")}</div>` : ""}
-        </div>
-        <div class="list" style="margin-top:8px">${a.positions.slice(0, 30).map((p) => `<div class="item">${coinIcon(p.ticker)}<div class="grow"><div class="t">${esc(p.ticker)} <span class="muted small">${esc(TI_TYPES[p.type] || p.type)}</span></div><div class="s num">${amount(p.quantity)} шт × ${price(p.price)}</div></div><div class="r"><div class="b num">${RUB(p.value, p.currency)}</div><div class="s num ${cls(p.yield)}">${p.yield ? (p.yield > 0 ? "+" : "") + RUB(p.yield, p.currency) + (p.yield_pct != null ? ` (${pct(p.yield_pct, 1)})` : "") : ""}</div></div></div>`).join("")}</div>`).join("")}
-      <button class="btn block ghost" style="margin-top:14px" data-act="tinvest-refresh">Обновить</button>
-      <div class="tiny muted center" style="margin-top:8px">Только просмотр. Заявки бот в Т-Инвестициях не выставляет.</div>`;
-  } catch (e) { Sheet.body().innerHTML = `<div class="banner red"><div>❌ ${esc(e.message)}</div></div>`; }
-}
-
 const RENDER = { home: renderHome, market: renderMarket, signals: renderSignals, demo: renderDemo, wallet: renderWallet };
 let lastSig = {};
 function renderActive(force = false) {
@@ -2179,8 +2143,6 @@ document.addEventListener("click", async (e) => {
     case "dex-q": $("#dexQ").value = d.v; loadDexSearch(); break;
     case "dex-rug": dexRug(d.v, el); break;
     case "open": haptic.tap(); openLink(d.url); break;
-    case "tinvest": haptic.tap(); tinvestSheet(); break;
-    case "tinvest-refresh": haptic.tap(); tinvestSheet(true); break;
     case "phantom-save": savePhantom(el); break;
     case "phantom-off": savePhantom(el, true); break;
     case "phantom-refresh": haptic.tap(); loadPhantom(true); break;

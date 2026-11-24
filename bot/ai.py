@@ -7,9 +7,16 @@
     https://aistudio.google.com/apikey. Gemini вызываем через родной адрес Google (заголовок x-goog-api-key):
     новые ключи AQ. на OpenAI-совместимом адресе Google часто отклоняет.
 
+  * Cerebras (очень быстрый): ключ csk-, https://cloud.cerebras.ai
+  * Mistral (бесплатный тариф Experiment): ключ без приставки → только MISTRAL_API_KEY, https://console.mistral.ai
+  * NVIDIA NIM (DeepSeek, Kimi, Qwen бесплатно для проб): ключ nvapi-, https://build.nvidia.com
+  * GitHub Models (GPT-4.1 бесплатно, ~50 запросов в день): токен github_pat_ с правом models:read
+  * DeepSeek (платный, но очень дешёвый): DEEPSEEK_API_KEY, https://platform.deepseek.com
+
 Достаточно одной переменной AI_API_KEY: провайдер определяется по началу ключа.
-Можно задать несколько ключей (GROQ_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY):
-если один упрётся в лимит или сломается, бот переключится на следующий.
+Можно задать несколько ключей (GROQ_API_KEY, GEMINI_API_KEY, CEREBRAS_API_KEY, MISTRAL_API_KEY, …):
+если один упрётся в лимит или сломается, бот переключится на следующий. А 🧠 консилиум (/council)
+спрашивает несколько ИИ сразу и показывает, в чём они сходятся.
 
 Модель выбирается автоматически из списка, который отдаёт провайдер (/models), поэтому,
 если провайдер уберёт модель, бот возьмёт другую. Свою модель можно задать в AI_MODEL.
@@ -63,7 +70,65 @@ PROVIDERS: dict[str, dict] = {
         "prefer": ["flash"],
         "fallback": ["gemini-2.5-flash"],
     },
+    # --- v37: ещё бесплатные «мозги». Все OpenAI-совместимые: тот же код, другой адрес. -----------------
+    "cerebras": {
+        "title": "Cerebras",
+        "base": "https://api.cerebras.ai/v1",
+        "env": "CEREBRAS_API_KEY",
+        "prefix": "csk-",
+        "prefer": ["gpt-oss-120b", "qwen-3-235b", "zai-glm", "llama-3.3-70b", "llama"],
+        "fallback": ["gpt-oss-120b"],
+        "signup": "https://cloud.cerebras.ai",
+        "free": "бесплатно, ~1 млн токенов в день, самый быстрый",
+    },
+    "mistral": {
+        "title": "Mistral",
+        "base": "https://api.mistral.ai/v1",
+        "env": "MISTRAL_API_KEY",
+        "prefix": None,  # ключ без приставки: узнаём только по имени переменной
+        "prefer": ["mistral-medium-latest", "mistral-large-latest", "magistral-medium-latest", "mistral-small-latest"],
+        "fallback": ["mistral-medium-latest", "mistral-small-latest"],
+        "signup": "https://console.mistral.ai/api-keys",
+        "free": "бесплатный тариф Experiment, без карты",
+    },
+    "nvidia": {
+        "title": "NVIDIA NIM",
+        "base": "https://integrate.api.nvidia.com/v1",
+        "env": "NVIDIA_API_KEY",
+        "prefix": "nvapi-",
+        "prefer": ["deepseek-v", "kimi-k2", "qwen3-235b", "llama-3.3-70b", "nemotron"],
+        "fallback": ["deepseek-ai/deepseek-v3.1", "meta/llama-3.3-70b-instruct"],
+        "signup": "https://build.nvidia.com",
+        "free": "бесплатно для проб: DeepSeek, Kimi, Qwen, ~40 запросов в минуту",
+    },
+    "github": {
+        "title": "GitHub Models",
+        "base": "https://models.github.ai/inference",
+        "env": "GITHUB_MODELS_TOKEN",
+        "prefix": ("github_pat_", "ghp_"),
+        "prefer": ["gpt-4.1", "gpt-4o", "deepseek-v3"],
+        # список моделей тут по другому адресу (/catalog/models), поэтому сразу берём известные
+        "fallback": ["openai/gpt-4.1", "openai/gpt-4o", "openai/gpt-4.1-mini"],
+        "signup": "https://github.com/settings/personal-access-tokens/new",
+        "free": "GPT-4.1 бесплатно, ~50 запросов в день",
+    },
+    "deepseek": {
+        "title": "DeepSeek",
+        "base": "https://api.deepseek.com/v1",
+        "env": "DEEPSEEK_API_KEY",
+        "prefix": None,  # sk-… как у многих: только по имени переменной
+        "prefer": ["deepseek-chat"],
+        "fallback": ["deepseek-chat"],
+        "signup": "https://platform.deepseek.com/api_keys",
+        "free": "платный, но копейки: ~$0.3 за 1000 вопросов",
+    },
 }
+for _name, _title, _url, _free in (("groq", "Groq", "https://console.groq.com/keys", "бесплатно, без карты"),
+                                   ("openrouter", "OpenRouter", "https://openrouter.ai/keys", "бесплатные модели :free"),
+                                   ("gemini", "Gemini", "https://aistudio.google.com/apikey", "бесплатно, ещё смотрит видео")):
+    PROVIDERS[_name].setdefault("signup", _url)
+    PROVIDERS[_name].setdefault("free", _free)
+EXTRA_ENV = {"github": ("GITHUB_MODELS_TOKEN", "GITHUB_MODELS_KEY")}  # синонимы имён переменных
 # Модели, которые не умеют в обычный чат
 SKIP_MODELS = ("whisper", "tts", "guard", "embed", "image", "vision", "audio", "live", "orpheus",
                "transcribe", "compound", "safeguard", "lite", "nano", "8b", "1b", "3b")
@@ -71,6 +136,8 @@ SKIP_MODELS = ("whisper", "tts", "guard", "embed", "image", "vision", "audio", "
 MAX_CONTEXT_CHARS = 9_000  # ≈3 тыс. токенов: вместе с ответом влезает в бесплатный лимит Groq 8K токенов/мин
 HISTORY_TURNS = 3  # сколько последних вопросов-ответов помнить в чате
 REQUEST_TIMEOUT = 90
+COUNCIL_MAX = 5  # сколько ИИ максимум спрашивает консилиум
+COUNCIL_TIMEOUT = 60
 # Запас выходных токенов на «размышления» Gemini 2.5+/3: они считаются в maxOutputTokens. Без запаса модель
 # обрывает мысль → пустой или обрезанный ответ → повторный запрос (вдвое дольше и минус из дневного лимита).
 # Лишние токены не тратятся: платим (и ждём) только за то, что модель реально сгенерировала.
@@ -169,9 +236,21 @@ def is_gemini_key(key: str) -> bool:
 
 def detect_provider(key: str) -> str | None:
     for name, p in PROVIDERS.items():
-        if key.startswith(p["prefix"]):
+        if p.get("prefix") and key.startswith(p["prefix"]):
             return name
     return None
+
+
+def provider_env_names(name: str) -> tuple[str, ...]:
+    if name == "gemini":
+        return GEMINI_ENV_ALIASES
+    return EXTRA_ENV.get(name) or (PROVIDERS[name]["env"],)
+
+
+def ai_keys_present(env=None) -> bool:
+    env = os.environ if env is None else env
+    return bool((env.get("AI_API_KEY") or "").strip()) or any(
+        (env.get(n) or "").strip() for name in PROVIDERS for n in provider_env_names(name))
 
 
 @dataclass
@@ -213,7 +292,7 @@ def endpoints_from_env(env: dict | None = None) -> list[Endpoint]:
         seen.add(main)
 
     for name, p in PROVIDERS.items():
-        names = GEMINI_ENV_ALIASES if name == "gemini" else (p["env"],)
+        names = provider_env_names(name)
         key = next((k for k in (clean_key(env.get(n)) for n in names) if k), "")
         if key and key not in seen:
             # своя модель применяется только к основному провайдеру
@@ -333,9 +412,10 @@ class LLMClient:
 
     def _payload(self, ep: Endpoint, model: str, messages: list[dict], max_tokens: int, extras: bool) -> dict:
         body = {"model": model, "messages": messages, "temperature": 0.3, "max_tokens": max_tokens}
-        if extras and ep.provider == "groq" and "gpt-oss" in model:
+        if extras and ep.provider in ("groq", "cerebras") and "gpt-oss" in model:
             body["reasoning_effort"] = "low"  # меньше «размышлений» = меньше токенов из лимита
-            body["include_reasoning"] = False
+            if ep.provider == "groq":
+                body["include_reasoning"] = False
         return body
 
     @staticmethod
@@ -495,6 +575,35 @@ class LLMClient:
                 log.warning("ИИ: %s", errors[-1])
             self.last_error = "; ".join(errors)
             raise AIError(self.last_error)
+
+
+    async def chat_each(self, messages: list[dict], max_tokens: int = 700,
+                        limit: int = COUNCIL_MAX) -> list[tuple[str, str | None, str | None, str | None]]:
+        """🧠 Консилиум: один и тот же вопрос — каждому ИИ отдельно и одновременно.
+        Возвращает [(провайдер, модель, ответ, ошибка)]. Каждый ответ считается в дневной лимит."""
+        if not self.endpoints:
+            raise AIError("ИИ не подключён: в Render нет ключа (GEMINI_API_KEY или AI_API_KEY)")
+        now = time.time()
+        ready = [e for e in self.endpoints if e.disabled_until <= now][:limit]
+        if not ready:
+            raise AIError("все ИИ на паузе из-за лимитов, попробуй через минуту")
+        self._count_day()
+        ready = ready[:max(1, self.daily_limit - self.requests_today)]
+        self.requests_today += len(ready)
+
+        async def one(ep: Endpoint):
+            try:
+                text = await asyncio.wait_for(self._call(ep, messages, max_tokens), COUNCIL_TIMEOUT)
+                return ep.title, ep.model, text, None
+            except AIError as e:
+                return ep.title, ep.model, None, str(e)
+            except asyncio.TimeoutError:
+                return ep.title, ep.model, None, f"{ep.title}: не успел за {COUNCIL_TIMEOUT} с"
+            except (aiohttp.ClientError, ValueError) as e:
+                ep.disabled_until = time.time() + 60
+                return ep.title, ep.model, None, f"{ep.title}: нет связи ({type(e).__name__})"
+
+        return list(await asyncio.gather(*(one(ep) for ep in ready)))
 
 
 def _retry_after(headers, body: str) -> float:
@@ -734,8 +843,8 @@ ads_videos — сколько роликов с рекламой. Опирайс
 verdict «принят» — бот уже так делает, «не подтвердился» — объясни, что на данных бота это было бы хуже. \
 Никогда не советуй покупать «потому что сказал блогер». training_demo (/train) — бот сам торгует идеями трейдеров \
 на виртуальных деньгах: 5 стратегий параллельно, active — лучшая по демо-сделкам (только её идеи приходят \
-сигналом), rules — стоп и тейк, которые бот подобрал сам. Это демо: реальный результат обычно хуже на 1–3%. Т-Инвестиции (/tinvest): только просмотр \
-портфеля по токену «только чтение» (extras.tinvest), заявки бот там не выставляет.
+сигналом), rules — стоп и тейк, которые бот подобрал сам. Это демо: реальный результат обычно хуже на 1–3%. \
+extras.ai_council_last — итог последнего консилиума нескольких ИИ (/council): verdict trade/careful/wait, agree из answered.
 
 Изменение настроек бота. Если по данным видно, что настройку стоит поменять, в самом конце ответа \
 добавь отдельные строки строго в формате:
@@ -883,6 +992,9 @@ NO_AI_TEXT = """\
 
 <b>Или Gemini:</b> ключ из <a href="https://aistudio.google.com/apikey">aistudio.google.com/apikey</a> (начинается с \
 <code>AQ.</code> или <code>AIza</code>) положи в <code>GEMINI_API_KEY</code>. Проверка ключа: /mentors gemini
+
+<b>Ещё бесплатные ИИ</b> (можно все сразу — для 🧠 консилиума): Cerebras → <code>CEREBRAS_API_KEY</code>, \
+Mistral → <code>MISTRAL_API_KEY</code>, NVIDIA → <code>NVIDIA_API_KEY</code>, GitHub → <code>GITHUB_MODELS_TOKEN</code>.
 
 Ключ никому не показывай и не присылай в чат.
 

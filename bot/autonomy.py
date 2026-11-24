@@ -6,6 +6,8 @@
 * **сторож** — перезапускает упавшие или зависшие циклы бота, чистит память, если её стало много;
 * **«Результат»** — раз в N часов присылает итог: деньги, чему научился, что починил, какой следующий шаг
   (ночью молчит; если ничего не произошло — не спамит);
+* **🧠 консилиум ИИ** (если подключено ≥2 ИИ): прежде чем включить деньги, автомат спрашивает несколько ИИ сразу.
+  Большинство говорит «ждать» — не включает (12 часов). Консилиум может только запретить, разрешить сверх правил — нет;
 * **настоящие деньги — только с разрешения хозяина** (одна кнопка с двойным подтверждением). Разрешил — автомат сам
   переводит на деньги только то, что ДОКАЗАЛО плюс без денег (вердикт «✅» Профит-центра), и только при безопасных
   лимитах. Начало терять — Страж ставит паузу, автомат возвращает способ в тест на 3 дня.
@@ -24,6 +26,7 @@ import time
 
 from . import updater
 from .memory import rss_mb
+from .council import FRESH_SEC, WAIT
 from .profit import ORDER, ROUTES, VERDICTS, route_evidence
 
 log = logging.getLogger(__name__)
@@ -52,7 +55,8 @@ LOOP_NAMES = {
 def new_state() -> dict:
     return {"on": True, "real": False, "every_h": 6, "welcomed": False, "pilot_hold": False,
             "last_digest": 0.0, "last_sent": 0.0, "last_tick": 0.0, "last_mem": 0.0,
-            "snap": {}, "fixes": [], "restarts": 0, "promoted": {}, "blocked": {}, "manual": []}
+            "snap": {}, "fixes": [], "restarts": 0, "promoted": {}, "blocked": {}, "manual": [],
+            "council": {}}
 
 
 def _money(x: float) -> str:
@@ -221,7 +225,39 @@ class Autonomy:
         until = float(self.st["blocked"].get(route) or 0)
         if until > now:
             return f"после убытков на деньгах — снова не раньше {time.strftime('%d.%m %H:%M', time.gmtime(until + 3 * 3600))}"
-        return None
+        return self.council_block(route, now)
+
+    # --- 🧠 консилиум ИИ: последнее слово «против» перед настоящими деньгами ------------------------------
+
+    def council_block(self, route: str, now: float) -> str | None:
+        c = self.st["council"].get(route) or {}
+        if c.get("verdict") != WAIT or int(c.get("answered") or 0) < 2 or now - float(c.get("at") or 0) > FRESH_SEC:
+            return None
+        why = f": {c['why']}" if c.get("why") else ""
+        return f"🧠 консилиум ИИ против ({c.get('agree')} из {c.get('answered')}){why}"[:300]
+
+    def council_due(self, now: float, engines: list[dict] | None = None) -> list[str]:
+        """Какие способы автомат вот-вот включит на деньги, а свежего мнения консилиума по ним нет."""
+        st, b = self.st, self.b
+        client = getattr(getattr(b, "ai", None), "client", None)
+        if not st["real"] or len(getattr(client, "endpoints", None) or []) < 2:
+            return []
+        ev = route_evidence(b.profit.engines(now) if engines is None else engines)
+        due = []
+        for route, running, block in (("pilot", b.trader.state.live and b.scalper.on, self.pilot_block),
+                                      ("meme", b.meme.on, self.meme_block)):
+            if running or block(ev, now) is not None:
+                continue
+            if now - float((st["council"].get(route) or {}).get("at") or 0) > FRESH_SEC:
+                due.append(route)
+        return due
+
+    def council_question(self, route: str, now: float) -> str:
+        e = route_evidence(self.b.profit.engines(now)).get(route) or {}
+        return (f"Автомат готов включить НАСТОЯЩИЕ деньги для «{ROUTES[route][0]}»: без денег он доказал "
+                f"{e.get('n', 0)} сделок, {float(e.get('mean') or 0):+.2f}% за сделку (даже при невезении "
+                f"{float(e.get('lcb') or 0):+.2f}%), лимиты маленькие (до ${HARD_MAX_TRADE:g} на сделку). Учитывая "
+                "текущий рынок и данные бота: включать (ТОРГОВАТЬ), включать осторожно (ОСТОРОЖНО) или подождать (ЖДАТЬ)?")
 
     def pilot_block(self, ev: dict, now: float) -> str | None:
         """Почему автопилот ещё не на настоящих деньгах (None — можно)."""
@@ -577,6 +613,8 @@ async def tick(b, now: float | None = None) -> None:
         await b._send(b.owner_id, "♾ Автомат включил обратно: " + ", ".join(enabled)
                       + ".\nЕсли выключал специально — сначала выключи автомат (/autonomy), иначе я держу обучение "
                         "включённым.")
+    for route in a.council_due(now):
+        await ask_council(b, route, now)
     try:
         events = a.money_step(now)
     except Exception:
@@ -596,6 +634,31 @@ async def tick(b, now: float | None = None) -> None:
         b.save_copy()
         if events or enabled:
             await b._backup_now()
+
+
+async def ask_council(b, route: str, now: float) -> None:
+    """🧠 Перед настоящими деньгами — мнение нескольких ИИ. Ошибка ИИ не мешает: решают обычные правила."""
+    from . import council
+    a = b.autonomy
+    try:
+        async with getattr(b, "_council_lock", None) or asyncio.Lock():
+            res = await council.run(b.ai, b.ai_context(), a.council_question(route, now), now=now)
+    except Exception as e:  # ИИ недоступны: доказанные правила работают и без консилиума
+        log.info("Консилиум для %s не собрался: %s", route, e)
+        a.st["council"][route] = {"at": now, "verdict": None, "answered": 0, "error": str(e)[:200]}
+        return
+    brief = res.brief()
+    a.st["council"][route] = brief
+    b.council_last = brief
+    title = ROUTES[route][0]
+    if a.council_block(route, now):
+        a._fix(f"🧠 консилиум против денег: {title}", now)
+        await b._send(b.owner_id, f"🧠 <b>Консилиум ИИ против включения денег: {html.escape(title)}</b>\n"
+                                  "Стратегия доказала плюс без денег, но большинство ИИ советует подождать. Не включаю "
+                                  "12 часов, обучение без денег продолжается.\n\n" + council.render(res))
+    else:
+        a._fix(f"🧠 консилиум: {council.LABEL.get(res.verdict or '', 'нет итога')} — {title}", now)
+    a._changed()
 
 
 async def autonomy_loop(b) -> None:
@@ -664,7 +727,7 @@ def register(b) -> None:
         action = cb.data.split(":", 1)[1]
         chat_id = cb.message.chat.id if cb.message else cb.from_user.id
         a = b.autonomy
-        if action not in ("show", "now", "hook") and (b.owner_id is None or cb.from_user.id != b.owner_id):
+        if action not in ("show", "now", "hook") and not b.is_owner(cb.from_user.id):
             await cb.answer("Менять может только владелец", show_alert=True)
             return
         await cb.answer()

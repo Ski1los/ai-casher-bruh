@@ -101,7 +101,8 @@ def bot_env(tmp_path, monkeypatch):
     monkeypatch.setattr(tb, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.setattr(tb, "TRADING_FILE", tmp_path / "trading.json")
     monkeypatch.setattr(tb, "COPY_FILE", tmp_path / "copytrade.json")
-    for var in ("AI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+    from bot.ai import PROVIDERS, provider_env_names
+    for var in ("AI_API_KEY", *(n for name in PROVIDERS for n in provider_env_names(name))):
         monkeypatch.delenv(var, raising=False)
 
     settings = Settings(exchanges=[], min_profit_percent=0.5, tri_min_profit_percent=0.1, demo_transfer_min=0)

@@ -215,7 +215,7 @@ def register(b: ArbitrageBot) -> None:
             )
             return
         uid = message.from_user.id if message.from_user else None
-        if args and b.owner_id is not None and uid != b.owner_id:
+        if args and b.owner_id is not None and not b.is_owner(uid):
             await message.answer("Менять кошелёк может только владелец бота.")
             return
         if args.lower() in ("off", "выкл", "удалить", "нет"):
