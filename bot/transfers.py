@@ -113,6 +113,17 @@ def perms_seen(info: dict) -> str:
     return ", ".join(parts)
 
 
+def floor_step(x: float, step) -> float:
+    """Вниз до шага точности (0.001 → 1.2345 станет 1.234). Без шага — до 8 знаков."""
+    try:
+        step = float(step or 0)
+    except (TypeError, ValueError):
+        step = 0.0
+    if 0 < step < 1:
+        return round(math.floor(x / step + 1e-9) * step, 10)
+    return math.floor(x * 1e8 + 1e-6) / 1e8
+
+
 def mask(addr: str) -> str:
     return addr if len(addr) <= 12 else f"{addr[:6]}…{addr[-4:]}"
 
@@ -319,9 +330,13 @@ class Transfers:
                 if not isinstance(n, dict):
                     continue
                 lim = ((n.get("limits") or {}).get("withdraw") or {})
+                info = n.get("info") if isinstance(n.get("info"), dict) else {}
                 nets[canon_net(n.get("network") or code)] = {
                     "key": code, "deposit": n.get("deposit"), "withdraw": n.get("withdraw"),
                     "active": n.get("active"), "fee": n.get("fee"), "min": lim.get("min"),
+                    "precision": n.get("precision"),
+                    # контракт токена (BingX сообщает): у разных бирж с одним тикером бывают РАЗНЫЕ токены
+                    "contract": str(info.get("contractAddress") or info.get("contract_address") or "").strip() or None,
                 }
             out["nets"] = nets
         # обновляем и то, что видит остальной бот (Trader.coin_wall), — только эту монету
@@ -389,7 +404,10 @@ class Transfers:
         return f"{self.name(ex_name)}: " + ("; ".join(parts) if parts else "сети не указаны")
 
     async def analyze(self, coin: str, amount: float | str, src: str, dst: str | None = None,
-                      source: str = "manual", force: bool = False) -> TransferPlan:
+                      source: str = "manual", force: bool = False, assume_free: float | None = None,
+                      paper: bool = False) -> TransferPlan:
+        """Анализ перед выводом. assume_free — «монет будет столько» (⚖️ спред проверяет перевоз ДО покупки);
+        paper — проверка для теста на бумаге: права вывода и разрешение переводов не нужны."""
         coin = coin.upper().strip()
         dst = dst or self.other(src) or ""
         plan = TransferPlan(secrets.token_hex(4), coin, 0.0, src, dst, source=source)
@@ -405,7 +423,9 @@ class Transfers:
                 plan.add("bad", f"{self.name(ex_name)} ({role}): ключ не работает — {t.key_status[ex_name]}")
         if any(s == "bad" for s, _ in plan.checks):
             return plan
-        if src in self.wd_creds:
+        if paper:
+            pass
+        elif src in self.wd_creds:
             info = await self.wd_info(src, force=force)
             if info.get("error"):
                 ip = f" ({self.ip_now})" if self.ip_now else ""
@@ -466,16 +486,17 @@ class Transfers:
         plan.add("ok", f"сеть {net}" + (f" (комиссия {fmt(plan.fee)} {coin})" if plan.fee is not None else
                                          " (комиссию биржа не сообщила)") + (f"; запасные: {', '.join(others)}" if others else ""))
         try:
-            free = await self.free_coin(src, coin)
+            free = await self.free_coin(src, coin) if assume_free is None else float(assume_free)
         except Exception as e:
             plan.add("bad", f"не смог узнать баланс {coin} на {self.name(src)}: {human_error(e)}")
             return plan
         fee = plan.fee or 0.0
         if isinstance(amount, str):
             amt = max(0.0, free - fee) if amount.lower() in ("all", "всё", "все", "max") else 0.0
+            # «всё» — вниз до точности сети: округление вверх дало бы «не хватает монет»
+            plan.amount = floor_step(amt, ns[net].get("precision"))
         else:
-            amt = float(amount)
-        plan.amount = float(f"{amt:.8f}")
+            plan.amount = float(f"{float(amount):.8f}")
         if plan.amount <= 0:
             plan.add("bad", f"на {self.name(src)} нет свободных {coin} для вывода" if free <= fee else "сумма должна быть больше 0")
             return plan
@@ -515,11 +536,11 @@ class Transfers:
                            + (" + мемо" if plan.tag else ""))
         except Exception as e:
             plan.add("bad", f"{self.name(dst)} не выдала адрес пополнения {coin} в сети {net}: {human_error(e)}")
-        if src == "bybit":
+        if src == "bybit" and source != "spread":  # ⚖️ спред сверяет адресную книгу сам
             plan.add("warn", "Bybit выводит через API только на адреса из адресной книги: один раз добавь "
                              + (f"{plan.address}" + (f" (мемо {plan.tag})" if plan.tag else "") if plan.address
                                 else "адрес BingX") + f" ({plan.network or 'сеть'}) в Активы → Вывод → Управление адресами")
-        if not st["allowed"]:
+        if not st["allowed"] and not paper:
             plan.add("bad", "переводы ещё не разрешены — /transfer → «🔓 Разрешить переводы»")
         return plan
 

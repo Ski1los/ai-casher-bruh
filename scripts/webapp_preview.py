@@ -165,6 +165,21 @@ def build():
                                                            "src": "bingx", "dst": "bybit", "network": "TRC20", "fee": 1.5,
                                                            "usd": 15.0, "status": "done", "source": "manual"}]}
     b.scanner.exchanges["bybit"].privateGetV5UserQueryApi = bybit_key_info
+    now = time.time()
+    b.trader.state.spread = {  # ⚖️ спред: пример итогов и проверок
+        "on": True, "paper": True,
+        "totals": {"test": [3, 0.214], "live": [0, 0.0]},
+        "checks": [{"at": now - 60, "coin": "SOL", "src": "bybit", "dst": "bingx", "gross": 1.84, "pct": 1.12, "reason": "",
+                    "why": ""},
+                   {"at": now - 120, "coin": "TON", "src": "bingx", "dst": "bybit", "gross": 0.92, "pct": -1.4,
+                    "reason": "fees", "why": ""},
+                   {"at": now - 180, "coin": "XRP", "src": "bybit", "dst": "bingx", "gross": 4.1, "pct": None,
+                    "reason": "wallet", "why": ""}],
+        "runs": [{"id": "a1", "mode": "test", "coin": "SOL", "src": "bybit", "dst": "bingx", "symbol": "SOL/USDT",
+                  "network": "SOL", "minutes": 3, "stage": "done", "opened": now - 900, "spent": 10.0, "bought": 0.0422,
+                  "sent": 0.0412, "fee": 0.001, "exp_usd": 10.11, "exp_pct": 1.1, "gross": 1.8, "eta": now - 700,
+                  "received": 10.09, "pnl": 0.09, "closed": now - 690, "arrived_at": now - 700, "note": ""}],
+    }
     b.scanner.exchanges["bingx"].accountV1PrivateGetAccountApiPermissions = bingx_key_info
 
     # Phantom: адрес-пример и снимок без обращения к сети Solana
