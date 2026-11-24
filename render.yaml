@@ -29,20 +29,30 @@ services:
       # Необязательно: если AI_API_KEY уже от Gemini (начинается с AQ. или AIza), этот ключ не нужен.
       - key: GEMINI_API_KEY
         sync: false
-      # 🧠 Ещё ИИ для консилиума (/council) — все необязательные, ключи только здесь, не в чате:
-      # Cerebras https://cloud.cerebras.ai · Mistral https://console.mistral.ai/api-keys ·
-      # NVIDIA https://build.nvidia.com · GitHub Models: токен github_pat_ с правом Models: read ·
+      # 🧠 Ещё ИИ для консилиума (/council) — все необязательные, ключи только здесь, не в чате.
+      # 🇷🇺 По номеру РФ: GigaChat (Сбер, бесплатно для физлиц) https://developers.sber.ru/studio →
+      #    проект GigaChat API → Настройки API → Получить ключ → «Authorization Key» сюда:
+      - key: GIGACHAT_AUTH_KEY
+        sync: false
+      # ✉️ Без телефона (вход через почту/Google/GitHub): Cerebras https://cloud.cerebras.ai ·
+      # GitHub Models: токен github_pat_ с правом Models: read · LLM7 https://token.llm7.io (по почте) ·
       # DeepSeek (платный, копейки) https://platform.deepseek.com
       - key: CEREBRAS_API_KEY
         sync: false
+      - key: GITHUB_MODELS_TOKEN
+        sync: false
+      - key: LLM7_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      # 📵 Нужен зарубежный номер телефона (РФ обычно не принимают): Mistral, NVIDIA
       - key: MISTRAL_API_KEY
         sync: false
       - key: NVIDIA_API_KEY
         sync: false
-      - key: GITHUB_MODELS_TOKEN
-        sync: false
-      - key: DEEPSEEK_API_KEY
-        sync: false
+      # 🟢 Без ключа вообще бот сам берёт OVHcloud и LLM7 (медленно, маленький лимит). Выключить: 0
+      - key: AI_KEYLESS
+        value: "1"
       # GMGN: ⚡ пульс рынка (/pulse) — тренды, новые токены, умные деньги. Ключ бесплатный и только ЧИТАЕТ рынок:
       # https://gmgn.ai/ai → API key. Необязательно: без него бот берёт данные с DexScreener.
       - key: GMGN_API_KEY

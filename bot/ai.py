@@ -33,9 +33,12 @@ import json
 import logging
 import os
 import re
+import ssl
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import aiohttp
 
@@ -79,7 +82,8 @@ PROVIDERS: dict[str, dict] = {
         "prefer": ["gpt-oss-120b", "qwen-3-235b", "zai-glm", "llama-3.3-70b", "llama"],
         "fallback": ["gpt-oss-120b"],
         "signup": "https://cloud.cerebras.ai",
-        "free": "бесплатно, ~1 млн токенов в день, самый быстрый",
+        "free": "самый быстрый; новым аккаунтам могут попросить карту (пробные $5)",
+        "access": "nophone",
     },
     "mistral": {
         "title": "Mistral",
@@ -90,6 +94,7 @@ PROVIDERS: dict[str, dict] = {
         "fallback": ["mistral-medium-latest", "mistral-small-latest"],
         "signup": "https://console.mistral.ai/api-keys",
         "free": "бесплатный тариф Experiment, без карты",
+        "access": "phone",
     },
     "nvidia": {
         "title": "NVIDIA NIM",
@@ -100,6 +105,7 @@ PROVIDERS: dict[str, dict] = {
         "fallback": ["deepseek-ai/deepseek-v3.1", "meta/llama-3.3-70b-instruct"],
         "signup": "https://build.nvidia.com",
         "free": "бесплатно для проб: DeepSeek, Kimi, Qwen, ~40 запросов в минуту",
+        "access": "phone",
     },
     "github": {
         "title": "GitHub Models",
@@ -111,6 +117,7 @@ PROVIDERS: dict[str, dict] = {
         "fallback": ["openai/gpt-4.1", "openai/gpt-4o", "openai/gpt-4.1-mini"],
         "signup": "https://github.com/settings/personal-access-tokens/new",
         "free": "GPT-4.1 бесплатно, ~50 запросов в день",
+        "access": "nophone",
     },
     "deepseek": {
         "title": "DeepSeek",
@@ -120,15 +127,88 @@ PROVIDERS: dict[str, dict] = {
         "prefer": ["deepseek-chat"],
         "fallback": ["deepseek-chat"],
         "signup": "https://platform.deepseek.com/api_keys",
-        "free": "платный, но копейки: ~$0.3 за 1000 вопросов",
+        "free": "платный, но копейки: ~$0.3 за 1000 вопросов (оплата зарубежной картой)",
+        "access": "nophone",
+    },
+    # --- v38: российские ИИ (вход по номеру РФ) ------------------------------------------------------------
+    "gigachat": {
+        "title": "GigaChat (Сбер)",
+        "base": "https://api.giga.chat/v1",
+        "env": "GIGACHAT_AUTH_KEY",
+        "prefix": None,  # «ключ авторизации» — base64, без приставки
+        "prefer": ["gigachat-2-max", "gigachat-2-pro", "gigachat-2", "gigachat-max", "gigachat-pro", "gigachat"],
+        "fallback": ["GigaChat-2-Max", "GigaChat-2-Pro", "GigaChat-2"],
+        "signup": "https://developers.sber.ru/studio",
+        "free": "бесплатно для физлиц (Freemium), вход по Сбер ID / номеру РФ",
+        "access": "ru",
+    },
+    "yandex": {
+        "title": "YandexGPT",
+        "base": "https://llm.api.cloud.yandex.net/v1",
+        "env": "YANDEX_API_KEY",
+        "prefix": None,
+        "prefer": [],
+        "fallback": [],  # модель зависит от каталога (YANDEX_FOLDER_ID) — задаётся при запуске
+        "signup": "https://aistudio.yandex.ru",
+        "free": "платный (карта РФ, рубли), нужен ещё YANDEX_FOLDER_ID",
+        "access": "ru",
+    },
+    # --- v38: работают вообще без ключа и без регистрации (включены сами; выключить: AI_KEYLESS=0) ----------
+    "ovh": {
+        "title": "OVHcloud",
+        "base": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+        "env": "OVH_AI_ENDPOINTS_ACCESS_TOKEN",
+        "prefix": None,
+        "prefer": ["gpt-oss-120b", "qwen3.5-397b", "llama-3_3-70b", "qwen"],
+        "fallback": ["gpt-oss-120b", "Meta-Llama-3_3-70B-Instruct"],
+        "signup": "https://endpoints.ai.cloud.ovh.net",
+        "free": "без ключа: GPT-OSS 120B, Qwen, Llama; ~2 запроса в минуту",
+        "access": "keyless",
+    },
+    "llm7": {
+        "title": "LLM7",
+        "base": "https://api.llm7.io/v1",
+        "env": "LLM7_API_KEY",
+        "prefix": None,
+        "prefer": ["gpt-oss", "deepseek", "qwen", "mistral", "llama"],
+        "fallback": ["gpt-oss:20b"],
+        "signup": "https://token.llm7.io",
+        "free": "без ключа; бесплатный токен по почте — больше лимит",
+        "access": "keyless",
     },
 }
-for _name, _title, _url, _free in (("groq", "Groq", "https://console.groq.com/keys", "бесплатно, без карты"),
-                                   ("openrouter", "OpenRouter", "https://openrouter.ai/keys", "бесплатные модели :free"),
-                                   ("gemini", "Gemini", "https://aistudio.google.com/apikey", "бесплатно, ещё смотрит видео")):
+ACCESS = {  # как получить: показываем в /council keys
+    "keyless": "🟢 без ключа и регистрации — уже работает",
+    "nophone": "✉️ без телефона (почта, Google или GitHub)",
+    "ru": "🇷🇺 по номеру РФ",
+    "google": "🌐 аккаунт Google; из РФ сайт открывается только через VPN",
+    "phone": "📵 нужен зарубежный номер телефона (РФ-номер обычно не принимают)",
+}
+KEYLESS_OFF = ("0", "false", "no", "off", "нет")
+for _name, _url, _free, _access in (
+        ("groq", "https://console.groq.com/keys", "бесплатно, без карты", "nophone"),
+        ("openrouter", "https://openrouter.ai/keys", "бесплатные модели :free", "nophone"),
+        ("gemini", "https://aistudio.google.com/apikey", "бесплатно, ещё смотрит видео", "google")):
     PROVIDERS[_name].setdefault("signup", _url)
     PROVIDERS[_name].setdefault("free", _free)
-EXTRA_ENV = {"github": ("GITHUB_MODELS_TOKEN", "GITHUB_MODELS_KEY")}  # синонимы имён переменных
+    PROVIDERS[_name].setdefault("access", _access)
+EXTRA_ENV = {  # синонимы имён переменных
+    "github": ("GITHUB_MODELS_TOKEN", "GITHUB_MODELS_KEY"),
+    "gigachat": ("GIGACHAT_AUTH_KEY", "GIGACHAT_CREDENTIALS", "GIGACHAT_API_KEY"),
+}
+GIGACHAT_AUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+RU_CA_FILE = Path(__file__).parent / "certs" / "russian_trusted_root_ca.pem"  # корневой сертификат Минцифры (Сбер)
+_RU_SSL: ssl.SSLContext | None = None
+
+
+def ru_ssl() -> ssl.SSLContext:
+    """Обычные корневые сертификаты + «Russian Trusted Root CA»: им подписаны адреса GigaChat."""
+    global _RU_SSL
+    if _RU_SSL is None:
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(cafile=str(RU_CA_FILE))
+        _RU_SSL = ctx
+    return _RU_SSL
 # Модели, которые не умеют в обычный чат
 SKIP_MODELS = ("whisper", "tts", "guard", "embed", "image", "vision", "audio", "live", "orpheus",
                "transcribe", "compound", "safeguard", "lite", "nano", "8b", "1b", "3b")
@@ -264,6 +344,12 @@ class Endpoint:
     busy: BusyModels = field(default_factory=BusyModels)  # перегруженные модели (503) — временно обходим
     stopgap: bool = False  # модель выбрана на время перегрузки: потом вернёмся к лучшей
     pinned: str | None = None  # модель из AI_MODEL: после перегрузки возвращаемся к ней
+    headers: dict = field(default_factory=dict)  # доп. заголовки (Яндекс: каталог)
+    fallback: list = field(default_factory=list)  # свои запасные модели (Яндекс: с каталогом в имени)
+    auth_url: str = ""  # GigaChat: ключ меняется на токен на 30 минут
+    scope: str = ""
+    token: str = ""
+    token_exp: float = 0.0
 
     def __post_init__(self) -> None:
         self.pinned = self.pinned or self.model
@@ -271,6 +357,10 @@ class Endpoint:
     @property
     def title(self) -> str:
         return PROVIDERS.get(self.provider, {}).get("title", self.provider)
+
+    @property
+    def keyless(self) -> bool:
+        return not self.key and self.provider != "gigachat"
 
 
 def endpoints_from_env(env: dict | None = None) -> list[Endpoint]:
@@ -285,6 +375,11 @@ def endpoints_from_env(env: dict | None = None) -> list[Endpoint]:
         provider = (env.get("AI_PROVIDER") or "").strip().lower() or detect_provider(main)
         if base:
             out.append(Endpoint(provider or "custom", base, main, model))
+        elif provider in ("yandex", "gigachat"):  # особая настройка — как у отдельной переменной
+            ep = (_yandex_endpoint(env, main) if provider == "yandex" else
+                  Endpoint("gigachat", PROVIDERS["gigachat"]["base"], main, model))
+            if ep:
+                out.append(ep)
         elif provider in PROVIDERS:
             out.append(Endpoint(provider, PROVIDERS[provider]["base"], main, model))
         else:
@@ -295,10 +390,41 @@ def endpoints_from_env(env: dict | None = None) -> list[Endpoint]:
         names = provider_env_names(name)
         key = next((k for k in (clean_key(env.get(n)) for n in names) if k), "")
         if key and key not in seen:
-            # своя модель применяется только к основному провайдеру
-            out.append(Endpoint(name, p["base"], key, model if not out else None))
             seen.add(key)
+            if name == "yandex":
+                ep = _yandex_endpoint(env, key)
+                if ep:
+                    out.append(ep)
+                continue
+            # своя модель применяется только к основному провайдеру
+            ep = Endpoint(name, p["base"], key, model if not out else None)
+            if name == "gigachat":
+                ep.base = (env.get("GIGACHAT_BASE_URL") or p["base"]).strip().rstrip("/")
+                ep.auth_url = (env.get("GIGACHAT_AUTH_URL") or GIGACHAT_AUTH_URL).strip()
+                ep.scope = (env.get("GIGACHAT_SCOPE") or "GIGACHAT_API_PERS").strip()
+            out.append(ep)
     return out
+
+
+def _yandex_endpoint(env, key: str) -> Endpoint | None:
+    folder = (env.get("YANDEX_FOLDER_ID") or "").strip()
+    if not folder:
+        log.warning("YANDEX_API_KEY задан, но нет YANDEX_FOLDER_ID (ID каталога в Yandex Cloud) — YandexGPT выключен")
+        return None
+    names = [(env.get("YANDEX_MODEL") or "").strip() or "yandexgpt/latest", "yandexgpt/latest", "yandexgpt-lite/latest"]
+    models = list(dict.fromkeys(f"gpt://{folder}/{m}" for m in names))
+    return Endpoint("yandex", PROVIDERS["yandex"]["base"], key, models[0], fallback=models[1:],
+                    headers={"OpenAI-Project": folder, "x-folder-id": folder})
+
+
+def keyless_endpoints(env=None, have: list[Endpoint] | None = None) -> list[Endpoint]:
+    """ИИ, которым не нужен ни ключ, ни регистрация. В конце списка: запасные и голоса в консилиуме."""
+    env = os.environ if env is None else env
+    if str(env.get("AI_KEYLESS", "1")).strip().lower() in KEYLESS_OFF:
+        return []
+    taken = {e.provider for e in (have or [])}
+    return [Endpoint(name, p["base"], "") for name, p in PROVIDERS.items()
+            if p.get("access") == "keyless" and name not in taken]
 
 
 def pick_model(provider: str, ids: list[str], dead: set | None = None) -> str | None:
@@ -364,11 +490,40 @@ class LLMClient:
     def _headers(self, ep: Endpoint) -> dict:
         if ep.provider == "gemini" and "/openai" not in ep.base:
             return {"x-goog-api-key": ep.key, "Content-Type": "application/json"}
-        h = {"Authorization": f"Bearer {ep.key}", "Content-Type": "application/json"}
+        h = {"Content-Type": "application/json", **ep.headers}
+        secret = ep.token if ep.provider == "gigachat" else ep.key
+        if secret:  # ИИ без ключа (OVHcloud, LLM7): заголовок не шлём совсем
+            h["Authorization"] = f"Bearer {secret}"
         if ep.provider == "openrouter":
             h["HTTP-Referer"] = "https://github.com/Ski1los/ai-casher-bruh"
             h["X-Title"] = "ai-casher-bot"
         return h
+
+    @staticmethod
+    def _tls(ep: Endpoint) -> dict:
+        return {"ssl": ru_ssl()} if ep.provider == "gigachat" else {}
+
+    async def _auth(self, ep: Endpoint, force: bool = False) -> None:
+        """GigaChat: «ключ авторизации» → токен доступа на 30 минут (обновляем заранее, за минуту до конца)."""
+        if ep.provider != "gigachat" or (ep.token and not force and ep.token_exp - time.time() > 60):
+            return
+        http = await self._http()
+        headers = {"Authorization": f"Basic {ep.key}", "RqUID": str(uuid.uuid4()), "Accept": "application/json",
+                   "Content-Type": "application/x-www-form-urlencoded"}
+        async with http.post(ep.auth_url or GIGACHAT_AUTH_URL, data={"scope": ep.scope or "GIGACHAT_API_PERS"},
+                             headers=headers, **self._tls(ep)) as r:
+            text = await r.text()
+            if r.status in (400, 401, 403):
+                raise AIError(f"{ep.title}: ключ авторизации не подходит (ошибка {r.status}). Скопируй заново "
+                              "«Authorization Key» в developers.sber.ru → GigaChat API → Настройки API.")
+            if r.status != 200:
+                raise AIError(f"{ep.title}: не выдал токен (ошибка {r.status}): {short_api_error(text)}")
+            data = json.loads(text)
+        ep.token = str(data.get("access_token") or "")
+        exp = float(data.get("expires_at") or 0)
+        ep.token_exp = exp / 1000 if exp > 1e11 else (exp or time.time() + 1800)  # Сбер присылает миллисекунды
+        if not ep.token:
+            raise AIError(f"{ep.title}: пустой токен")
 
     async def _model_for(self, ep: Endpoint) -> str:
         busy = ep.busy.now()
@@ -382,8 +537,9 @@ class LLMClient:
         try:
             http = await self._http()
             url = f"{ep.base}/models" + ("?pageSize=200" if self._native(ep) else "")
-            async with http.get(url, headers=self._headers(ep)) as r:
-                if r.status in (401, 403):
+            await self._auth(ep)
+            async with http.get(url, headers=self._headers(ep), **self._tls(ep)) as r:
+                if r.status in (401, 403) and not ep.keyless:  # без ключа список моделей могут не отдать — возьмём запасную
                     raise AIError(f"{ep.title}: ключ не подходит (ошибка {r.status}). Проверь AI_API_KEY.")
                 if r.status == 200:
                     data = await r.json(content_type=None)
@@ -398,7 +554,7 @@ class LLMClient:
             log.warning("ИИ: не смог получить список моделей %s: %s", ep.title, e)
         model = pick_model(ep.provider, ids, skip) if ids else None
         if model is None:
-            fallback = [m for m in PROVIDERS.get(ep.provider, {}).get("fallback", []) if m not in skip]
+            fallback = [m for m in (ep.fallback or PROVIDERS.get(ep.provider, {}).get("fallback", [])) if m not in skip]
             if not fallback and ep.busy.now():
                 ep.disabled_until = time.time() + 60  # все модели заняты: пусть ответит другой ИИ, если он есть
                 raise AIError(f"{ep.title}: " + BUSY_TEXT.format(status=503) + BUSY_ASK)
@@ -504,10 +660,13 @@ class LLMClient:
         http = await self._http()
         extras = True
         busy = 0
+        refreshed = False
         for attempt in range(6):
             model = await self._model_for(ep)
             body = self._payload(ep, model, messages, max_tokens, extras)
-            async with http.post(f"{ep.base}/chat/completions", json=body, headers=self._headers(ep)) as r:
+            await self._auth(ep)
+            async with http.post(f"{ep.base}/chat/completions", json=body, headers=self._headers(ep),
+                                 **self._tls(ep)) as r:
                 text = await r.text()
                 if r.status == 200:
                     data = json.loads(text)
@@ -523,18 +682,34 @@ class LLMClient:
                     self.last_model, self.last_provider = model, ep.title
                     return content
                 low = text.lower()
+                if r.status == 401 and ep.provider == "gigachat" and not refreshed:
+                    refreshed = True  # токен истёк раньше срока — берём новый
+                    await self._auth(ep, force=True)
+                    continue
                 if r.status in (401, 403):
+                    if ep.keyless:
+                        ep.disabled_until = time.time() + 3600
+                        raise AIError(f"{ep.title}: бесплатный доступ без ключа сейчас закрыт (ошибка {r.status})")
                     raise AIError(f"{ep.title}: ключ не подходит (ошибка {r.status}). Проверь ключ.")
+                if r.status == 402:  # на эту модель нет оплаченных/бесплатных токенов — пробуем попроще
+                    ep.dead_models.add(model)
+                    ep.model = None
+                    if ep.pinned == model:
+                        ep.pinned = None
+                    if len(ep.dead_models) >= 4:
+                        raise AIError(f"{ep.title}: закончились бесплатные токены (ошибка 402)")
+                    continue
                 if is_busy(r.status, text):
                     busy += 1
                     await self._busy(ep, model, r.status, busy)
                     continue
                 if r.status == 429:
                     wait = _retry_after(r.headers, text)
-                    if wait <= 20 and attempt == 0:
+                    if wait <= 20 and attempt == 0 and not ep.keyless:
                         await asyncio.sleep(wait + 0.5)
                         continue
-                    ep.disabled_until = time.time() + max(wait, 30)
+                    # без ключа лимит общий на IP сервера — не ждём, сразу отдаём вопрос другому ИИ
+                    ep.disabled_until = time.time() + max(wait, 60 if ep.keyless else 30)
                     raise AIError(f"{ep.title}: лимит бесплатного тарифа, подожди ~{max(wait, 30):.0f} с")
                 if r.status == 400 and extras and ("reasoning" in low or "unsupported" in low or "property" in low):
                     extras = False  # провайдер не знает доп. параметры, пробуем без них
@@ -908,7 +1083,8 @@ class AIAssistant:
     @classmethod
     def from_env(cls) -> AIAssistant:
         limit = int(float(os.getenv("AI_DAILY_LIMIT", "300") or 300))
-        return cls(LLMClient(endpoints_from_env(), daily_limit=limit))
+        eps = endpoints_from_env()
+        return cls(LLMClient(eps + keyless_endpoints(have=eps), daily_limit=limit))
 
     @property
     def configured(self) -> bool:
@@ -973,7 +1149,12 @@ class AIAssistant:
         lines = ["🤖 <b>ИИ-помощник</b>"]
         for ep in c.endpoints:
             state = "⏳ пауза из-за лимита" if ep.disabled_until > time.time() else "✅"
-            lines.append(f"  {html.escape(ep.title)}: {html.escape(ep.model or 'модель выберется при первом запросе')} {state}")
+            free = " (без ключа)" if ep.keyless else ""
+            lines.append(f"  {html.escape(ep.title)}{free}: "
+                         f"{html.escape(ep.model or 'модель выберется при первом запросе')} {state}")
+        if all(ep.keyless for ep in c.endpoints):
+            lines.append("Сейчас только бесплатные ИИ без ключа — медленно и с маленьким лимитом. "
+                         "Свой ключ без телефона (Groq) или по номеру РФ (GigaChat): /council keys")
         lines.append(f"Запросов сегодня: {c.requests_today} из {c.daily_limit}, токенов: {c.tokens_today}")
         if c.last_error:
             lines.append(f"Последняя ошибка: {html.escape(c.last_error[:300])}")
@@ -983,18 +1164,17 @@ class AIAssistant:
 NO_AI_TEXT = """\
 🤖 <b>ИИ-помощник пока не подключён</b>
 
-Это бесплатно и без банковской карты, займёт 3 минуты с телефона:
-1. Открой <a href="https://console.groq.com/keys">console.groq.com/keys</a> и войди через Google.
-2. Нажми <b>Create API Key</b>, назови как угодно и скопируй ключ (начинается с <code>gsk_</code>).
-3. В Render открой сервис <b>ai-casher-bot</b> → <b>Environment</b> → <b>Add Environment Variable</b>:
-   Key: <code>AI_API_KEY</code>, Value: твой ключ → <b>Save Changes</b>.
-4. Бот перезапустится сам (около минуты), и можно писать вопросы прямо сюда обычным текстом.
+<b>Без телефона и без карты</b> (3 минуты с телефона):
+1. Открой <a href="https://console.groq.com/keys">console.groq.com/keys</a>, войди через Google или почту.
+2. <b>Create API Key</b> → скопируй ключ (начинается с <code>gsk_</code>).
+3. Render → сервис <b>ai-casher-bot</b> → <b>Environment</b> → <b>Add Environment Variable</b>:
+   Key: <code>AI_API_KEY</code>, Value: ключ → <b>Save Changes</b>. Бот перезапустится сам.
 
-<b>Или Gemini:</b> ключ из <a href="https://aistudio.google.com/apikey">aistudio.google.com/apikey</a> (начинается с \
-<code>AQ.</code> или <code>AIza</code>) положи в <code>GEMINI_API_KEY</code>. Проверка ключа: /mentors gemini
+🇷🇺 <b>По номеру РФ:</b> GigaChat от Сбера — бесплатно для физлиц, ключ в <code>GIGACHAT_AUTH_KEY</code>. \
+Как получить: /council keys
 
-<b>Ещё бесплатные ИИ</b> (можно все сразу — для 🧠 консилиума): Cerebras → <code>CEREBRAS_API_KEY</code>, \
-Mistral → <code>MISTRAL_API_KEY</code>, NVIDIA → <code>NVIDIA_API_KEY</code>, GitHub → <code>GITHUB_MODELS_TOKEN</code>.
+🟢 <b>Совсем без ключа</b> бот сам берёт бесплатные OVHcloud и LLM7 (если не выключены через \
+<code>AI_KEYLESS=0</code>) — но они медленные, с маленьким лимитом.
 
 Ключ никому не показывай и не присылай в чат.
 

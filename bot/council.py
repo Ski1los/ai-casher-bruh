@@ -193,20 +193,38 @@ def as_answer(res: Result) -> Answer:
     return Answer(render(res), [], None)
 
 
+KEYS_ORDER = ("keyless", "nophone", "ru", "google", "phone")
+
+
 def keys_text(ai) -> str:
-    """Какие ИИ подключены и какие ещё можно добавить бесплатно."""
-    from .ai import PROVIDERS, provider_env_names
+    """Какие ИИ подключены и какие ещё можно добавить — по тому, что нужно для регистрации."""
+    from .ai import ACCESS, PROVIDERS, provider_env_names
     have = {ep.provider for ep in ai.client.endpoints}
-    lines = ["🧠 <b>ИИ для консилиума</b>", f"Подключено: {len(have)}. Чем больше разных ИИ — тем надёжнее итог.\n"]
-    for name, p in PROVIDERS.items():
-        mark = "✅" if name in have else "➕"
-        env = provider_env_names(name)[0]
-        lines.append(f"{mark} <b>{html.escape(p['title'])}</b> — {html.escape(p.get('free', ''))}\n"
-                     f"    ключ: <a href=\"{p.get('signup', '')}\">получить</a> → Render → Environment → "
-                     f"<code>{env}</code>")
+    lines = ["🧠 <b>ИИ для консилиума</b>", f"Подключено: {len(have)}. Чем больше разных ИИ — тем надёжнее итог."]
+    for group in KEYS_ORDER:
+        names = [n for n, p in PROVIDERS.items() if p.get("access") == group]
+        if not names:
+            continue
+        lines.append(f"\n<b>{ACCESS[group]}</b>")
+        for name in names:
+            p = PROVIDERS[name]
+            mark = "✅" if name in have else ("⏸" if group == "keyless" else "➕")
+            env = provider_env_names(name)[0]
+            how = (f"свой ключ (по желанию): <code>{env}</code>" if group == "keyless" else
+                   f"ключ: <a href=\"{p.get('signup', '')}\">получить</a> → Render → <code>{env}</code>")
+            lines.append(f"{mark} <b>{html.escape(p['title'])}</b> — {html.escape(p.get('free', ''))}\n    {how}")
+    lines.append(GIGACHAT_HOW)
     lines.append("\nКлючи вставляй <b>только в Render</b> (Environment → Add → Save, бот перезапустится сам), "
-                 "не присылай их в чат. Для GitHub Models нужен токен с правом <b>Models: read</b>.")
+                 "не присылай их в чат. Для GitHub нужен токен с правом <b>Models: read</b>.")
     return "\n".join(lines)
+
+
+GIGACHAT_HOW = """
+🇷🇺 <b>GigaChat за 5 минут:</b>
+1. <a href="https://developers.sber.ru/studio">developers.sber.ru/studio</a> → войти по Сбер ID или номеру РФ.
+2. <b>Создать проект</b> → <b>GigaChat API</b> (тариф Freemium для физлиц включается сам).
+3. <b>Настройки API</b> → <b>Получить ключ</b> → скопируй <b>Authorization Key</b> (показывается один раз).
+4. Render → Environment → <code>GIGACHAT_AUTH_KEY</code> = этот ключ → Save."""
 
 
 __all__ = ["run", "render", "as_answer", "parse_vote", "tally", "keys_text", "Vote", "Result", "TRADE", "CAREFUL",

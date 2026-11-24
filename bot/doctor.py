@@ -199,8 +199,12 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
                         "сохраняется в Telegram: настройки, демо, журнал и графики переживут перезапуск" if b.backup
                         else "выключена: заполни ALLOWED_USER_IDS, иначе после перезапуска всё обнулится"))
     if b.ai.configured:
-        titles = ", ".join(sorted({ep.title for ep in b.ai.client.endpoints})) or "подключён"
-        checks.append(Check("Сервис", "ИИ", "ok", f"подключён: {titles}"))
+        eps = b.ai.client.endpoints
+        titles = ", ".join(sorted({ep.title + (" без ключа" if ep.keyless else "") for ep in eps})) or "подключён"
+        only_free = all(ep.keyless for ep in eps)
+        checks.append(Check("Сервис", "ИИ", "info" if only_free else "ok", f"подключён: {titles}" + (
+            ". Для скорости добавь свой ключ без телефона (Groq) или GigaChat по номеру РФ — /council keys"
+            if only_free else "")))
     else:
         checks.append(Check("Сервис", "ИИ", "info", "не подключён (по желанию): бесплатный ключ Groq, см. /ai"))
     checks.append(Check("Сервис", "Версия бота", "info", version_text()))
