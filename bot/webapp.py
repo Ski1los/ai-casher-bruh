@@ -274,6 +274,9 @@ class WebApp:
             ("POST", "/api/transfers/check"): self.transfer_check,
             ("POST", "/api/transfers/go"): self.transfer_go,
             ("POST", "/api/transfers/test"): self.transfer_test,
+            ("GET", "/api/spread"): self.spread,
+            ("POST", "/api/spread"): self.spread_set,
+            ("POST", "/api/spread/check"): self.spread_check,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -786,6 +789,52 @@ class WebApp:
                       f"{self._name(it['dst'])}, сеть {it['network']}. Сообщу, когда дойдёт")
         return {"item": {k: it.get(k) for k in ("coin", "amount", "src", "dst", "network", "status")},
                 "transfers": self._transfers_dict()}
+
+    # --- ⚖️ спред-арбитраж -----------------------------------------------------------------------------
+
+    async def spread(self, request: web.Request) -> dict:
+        return self.b.spread.status_dict()
+
+    async def spread_set(self, request: web.Request) -> dict:
+        from . import spread as spread_mod
+        from .users_ui import is_main_owner
+
+        self._owner(request)
+        uid = request[USER]["id"]
+        if not is_main_owner(self.b, uid):
+            raise ApiError("включает спред только главный владелец", 403)
+        body = await self._body(request)
+        sp = self.b.spread
+        if "paper" in body:  # 🧪 тест ⇄ 💵 реальные сделки
+            paper = bool(body.get("paper"))
+            if not paper:
+                why = spread_mod.real_problem(self.b)
+                if why:
+                    raise ApiError(f"пока нельзя: {why}")
+                if not body.get("confirm"):
+                    raise ApiError("нужно подтверждение")
+            await spread_mod.set_paper(self.b, paper)
+            self._changed("📱 ⚖️ Спред: " + ("тест на бумаге" if sp.st["paper"] else "💵 реальные сделки"))
+        if "on" in body:
+            on = bool(body.get("on"))
+            text = await spread_mod.set_on(self.b, on)
+            if on and not sp.st["on"]:
+                raise ApiError(re.sub(r"<[^>]+>", "", text))
+            self._changed("📱 ⚖️ Спред-арбитраж " + ("включён" if sp.st["on"] else "выключен")
+                          + (" (реальные сделки)" if sp.live and sp.st["on"] else ""))
+        return sp.status_dict()
+
+    async def spread_check(self, request: web.Request) -> dict:
+        from . import spread as spread_mod
+
+        self._owner(request)
+        body = await self._body(request)
+        coin = str(body.get("coin") or "").upper().strip() or None
+        if coin and not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
+            raise ApiError("монета — латиницей, например SOL")
+        evs, empty = await spread_mod.check_evs(self.b, coin)
+        return {"empty": re.sub(r"<[^>]+>", "", empty), "items": [self.b.spread.ev_dict(e) for e in evs],
+                "live": self.b.spread.live}
 
     async def cancel_plan(self, request: web.Request) -> dict:
         body = await self._body(request)

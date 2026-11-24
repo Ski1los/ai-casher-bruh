@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 
 from . import (autonomy, copy_ui, council, extras_ui, feed, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
-               trading_ui, transfers,
+               spread, trading_ui, transfers,
                updater, users_ui)
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
@@ -166,20 +166,21 @@ HELP_TEXT = """\
 /mentors 🎓 трейдеры · /stream 🎥 эфиры · /scout 🔭 · /train 🏋️ · /pulse ⚡ GMGN/Axiom · /news
 
 <b>Сигналы</b>
-/scan — просканировать прямо сейчас
+/scan — скан прямо сейчас
 /auto_on — присылать новые связки автоматически
-/auto_off — выключить автосигналы
+/auto_off — выключить их
 
 <b>Демо-счета</b> (виртуальные деньги, реальные стаканы и комиссии)
 /demo_start — демо на $5, $50 и $500 (<code>/demo_start 5</code> — только $5)
 /demo — сводка по всем счетам
-/demo 5 — подробно по счетам на $5: сделки и почему связки отклонены
+/demo 5 — счета на $5: сделки и отказы
 /demo_history — последние сделки
 /demo_stop — остановить демо
 
 <b>Торговля</b> 💼 (сначала в тестовом режиме: ордера не отправляются)
 /setup — 🚀 <b>с чего начать</b>: проверка ключей, денег и стратегии, следующий шаг кнопкой
 /trade — панель: балансы, ордера, режим, автоторговля
+/spread — ⚖️ <b>спред</b>: купить дешевле → перевезти → продать
 /keys — ключ биржи · /transfer — 🔁 перевод между биржами
 /balance — балансы на биржах
 <code>/buy bybit BTC 5</code> — купить BTC на 5 USDT
@@ -193,7 +194,7 @@ HELP_TEXT = """\
 /why — 🔍 что автоторговля делает и почему нет сделок
 /trades — журнал сделок
 /stop — 🛑 стоп-кран: всё выключить и отменить ордера
-Под треугольниками есть кнопка «⚡ Исполнить». Каждый ордер исполняется только после твоего подтверждения.
+Под треугольниками кнопка «⚡ Исполнить» — ордер только после твоего подтверждения.
 
 <b>ИИ-помощник и трейдер</b> 🧠
 /ai — полный разбор: комиссии, демо, что поменять
@@ -502,6 +503,7 @@ class ArbitrageBot:
         self.conflicts = ConflictWatch()
         self.scalper = Scalper(self.trader, self.duplicate_running)  # режим $5 (bot/scalper.py)
         self.transfers = Transfers(self)  # 🔁 переводы между своими биржами (bot/transfers.py)
+        self.spread = spread.Spread(self)  # ⚖️ спред-арбитраж: купить дешевле → перевезти → продать дороже
         self._duplicate_warned = 0.0
         self.trading_file = TRADING_FILE
         self.tri_refs: dict[str, TriOpportunity] = {}  # кнопки «⚡ Исполнить» под сигналами
@@ -843,7 +845,19 @@ class ArbitrageBot:
             "traders_youtube_twitch": self.mentors.ai_context(),
             "market_pulse_gmgn_axiom": self._pulse_context(),
             "transfers_between_exchanges": self._transfers_context(),
+            "spread_arbitrage": self._spread_context(),
         }
+
+    def _spread_context(self) -> dict:
+        try:
+            d = self.spread.status_dict()
+            return {"how": "/spread: купить монету там, где дешевле, перевезти на вторую биржу и продать дороже; "
+                           "полный анализ до покупки (вывод/ввод, сеть ≤15 мин, стаканы, комиссия вывода, контракт); "
+                           "тест на бумаге или реально; /spread check — проверить сейчас",
+                    **{k: d[k] for k in ("on", "live", "min_pct", "max_usd", "problems", "totals", "checks", "active")}}
+        except Exception as e:
+            log.warning("Спред для ИИ: %s", e)
+            return {}
 
     def _transfers_context(self) -> dict:
         try:
@@ -1553,6 +1567,7 @@ class ArbitrageBot:
         notify.register(self)
         feed.register(self)
         transfers.register(self)
+        spread.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1621,6 +1636,19 @@ class ArbitrageBot:
                 log.info(text)
             else:
                 await self._send(chat_id, text)
+
+    async def _run_spread(self, result: ScanResult) -> None:
+        if not self.spread.wants_scan or self.owner_id is None:
+            return
+        try:
+            events = await self.spread.process(result)
+        except Exception:
+            log.exception("Ошибка спред-арбитража")
+            return
+        for text in events:
+            await self.notify(text, urgent="ТЕСТ" not in text)
+        if events:
+            await self._backup_now()
 
     async def _run_autotrade(self, result: ScanResult) -> None:
         if not self.trader.state.auto or self.owner_id is None:
@@ -1722,10 +1750,11 @@ class ArbitrageBot:
                     log.info("Уборка памяти: %.0f → %.0f МБ, убрано записей: %d", r["before"], r["after"], r["removed"])
                 except Exception:
                     log.exception("Ошибка уборки памяти")
-            if self.subscribers.chats or self.demo.active or self.trader.state.auto:
+            if self.subscribers.chats or self.demo.active or self.trader.state.auto or self.spread.wants_scan:
                 try:
                     result = await self._scan()
                     await self._run_autotrade(result)  # первым: каждая секунда задержки съедает прибыль
+                    await self._run_spread(result)
                     await self._run_demo(result)
                     await self._send_alerts(result)
                 except Exception:
@@ -1969,6 +1998,7 @@ class ArbitrageBot:
                     BotCommand(command="profit", description="💰 Профит: что реально зарабатывает, план денег"),
                     BotCommand(command="autopilot", description="🤖 Автопилот: бот торгует сам"),
                     BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
+                    BotCommand(command="spread", description="⚖️ Спред-арбитраж: купить дешевле → продать дороже"),
                     BotCommand(command="transfer", description="🔁 Перевод монет между биржами (с проверкой)"),
                     BotCommand(command="lab", description="🧪 Лаборатория: стратегии вживую"),
                     BotCommand(command="copy", description="🐋 Копитрейдинг: умные кошельки"),

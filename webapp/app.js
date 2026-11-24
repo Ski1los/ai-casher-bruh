@@ -1117,7 +1117,8 @@ function renderWallet() {
     ${p ? p.exchanges.map((e) => `<div class="section-title">${esc(e.name)} ${e.error ? "" : `<span class="num" style="text-transform:none">${money(e.total_usd)}</span>`}</div>
       ${e.hint ? `<div class="banner">💡 ${esc(e.hint)}</div>` : ""}
       ${e.error ? `<div class="banner red">❌ ${esc(e.error)}</div>` : (e.coins || []).length ? `<div class="list">${e.coins.filter((c) => (c.usd || 0) >= 0.01 || c.usd == null).slice(0, 20).map((c) => `<div class="item press" data-act="coin" data-ex="${esc(e.exchange)}" data-coin="${esc(c.coin)}">${coinIcon(c.coin)}<div class="grow"><div class="t">${esc(c.coin)}</div><div class="s num">${amount(c.total)}${c.total - c.free > 1e-12 ? ` · в ордерах ${amount(c.total - c.free)}` : ""}</div></div><div class="r"><div class="b num">${c.usd != null ? money(c.usd) : "—"}</div><div class="s">${c.coin === S.ov.quote ? "" : "продать →"}</div></div></div>`).join("")}</div>` : e.hint ? "" : `<div class="card empty">Пусто. Если деньги на бирже есть, переведи их на торговый (спот) счёт</div>`}`).join("") : ""}
-    ${t.keys.length ? `<button class="btn block xf-btn" style="margin-top:12px" data-act="xfer">🔁 Перевод между биржами — с проверкой</button>` : ""}
+    ${t.keys.length ? `<button class="btn block xf-btn" style="margin-top:12px" data-act="xfer">🔁 Перевод между биржами — с проверкой</button>
+    <button class="btn block xf-btn" style="margin-top:8px" data-act="spread">⚖️ Спред-арбитраж: дешевле купить → перевезти → продать</button>` : ""}
     ${phantomBlock()}
     <div class="section-title">Открытые ордера <a data-act="load-orders">Обновить</a></div>
     <div id="ordersBox">${ordersHtml()}</div>
@@ -1309,6 +1310,74 @@ function transferPlanHtml(p) {
     ${p.ok ? `<div class="small muted" style="margin:8px 0">Придёт ≈ ${got != null ? amount(got) + "–" : ""}${amount(p.amount)} ${esc(p.coin)}${p.usd != null ? ` (≈${money(p.usd)})` : ""}. Обычно 2–30 минут. Проверка действует 5 минут.</div>
       <button class="btn primary block" data-act="xfer-go" data-id="${esc(p.id)}">🚀 Перевести</button>` : `<div class="banner red" style="margin-top:8px">Переводить нельзя — причины выше</div>`}
   </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// ⚖️ Спред-арбитраж: купить дешевле на одной бирже, перевезти, продать дороже на другой
+// ---------------------------------------------------------------------------
+
+function spreadHtml(x) {
+  const tot = x.totals || {}, tt = tot.test || { n: 0, pnl: 0 }, tl = tot.live || { n: 0, pnl: 0 };
+  const sign = (v) => (v >= 0 ? "+" : "") + Number(v).toFixed(3) + "$";
+  return `<div class="card">
+      <div class="row between"><div class="b">${x.on ? "▶️ Работает" : "⏸ Выключен"}</div><span class="pill ${x.live ? "bad" : "gray"}">${x.live ? "💵 реальный" : "🧪 тест на бумаге"}</span></div>
+      <div class="small muted" style="margin-top:6px">Монета на одной бирже дешевле → бот покупает там, переводит и продаёт на другой. Перед покупкой проверяет вывод/ввод, сеть, комиссии, стаканы и одна ли это монета.</div>
+      <div class="small" style="margin-top:8px">Прибыль после всех комиссий от <b>${x.min_pct}%</b> и <b>$${x.min_usd}</b> · сделка до <b>$${x.max_usd}</b> · перевод ≤ ${x.max_net_min} мин · одна за раз</div>
+      ${(x.problems || []).map((p) => `<div class="banner red" style="margin-top:8px">⛔ ${esc(p)}</div>`).join("")}
+      <div class="row" style="gap:8px;margin-top:10px">
+        <button class="btn ${x.on ? "" : "primary"} grow" data-act="spread-toggle" ${owner() ? "" : "disabled"}>${x.on ? "⏸ Выключить" : "▶️ Включить"}</button>
+        <button class="btn grow" data-act="spread-check" ${owner() ? "" : "disabled"}>🔍 Проверить сейчас</button>
+      </div>
+      <button class="btn block" style="margin-top:8px" data-act="spread-mode" ${owner() ? "" : "disabled"}>${x.paper ? "💵 Перейти на реальные сделки" : "🧪 Вернуть тест на бумаге"}</button>
+      ${!x.paper && !x.trading_live ? `<div class="banner" style="margin-top:8px">Спред переключён на реальные, но вся торговля сейчас в тесте — включи реальный режим (/live)</div>` : ""}
+    </div>
+    ${(x.active || []).length ? `<div class="section-title">Сейчас</div><div class="list">${x.active.map((r) => `<div class="item"><div class="grow small">${esc(r)}</div></div>`).join("")}</div>` : ""}
+    <div id="spCheck"></div>
+    <div class="section-title">Итоги</div>
+    <div class="card small">🧪 тест: ${tt.n} сделок, <b class="num">${sign(tt.pnl)}</b> · 💵 реально: ${tl.n}, <b class="num">${sign(tl.pnl)}</b>
+      ${x.near ? `<div class="muted" style="margin-top:6px">Лучший спред скана: ${esc(x.near.text)} — ${x.near.gross >= 0 ? "+" : ""}${x.near.gross}% по ценам, ${x.near.net >= 0 ? "+" : ""}${x.near.net}% после торговых комиссий</div>` : ""}</div>
+    ${(x.checks || []).length ? `<div class="section-title">Последние проверки</div><div class="list">${x.checks.map((c) => `<div class="item"><div class="grow"><div class="t">${esc(c.coin)} ${esc(c.src)} → ${esc(c.dst)}</div><div class="s">спред ${c.gross}%${c.pct != null ? ` · итог ${c.pct >= 0 ? "+" : ""}${c.pct}%` : ""}${c.reason ? ` · ${esc(c.reason)}` : ""}</div></div><div class="r">${c.reason ? "⛔" : "🟢"}</div></div>`).join("")}</div>` : ""}
+    ${(x.runs || []).length ? `<div class="section-title">Сделки</div><div class="list">${x.runs.map((r) => `<div class="item"><div class="grow small">${esc(r)}</div></div>`).join("")}</div>` : ""}`;
+}
+
+async function spreadSheet() {
+  Sheet.open("Спред-арбитраж", `<div class="skel" style="height:140px"></div>`, { full: true });
+  try { S.spread = await api("/api/spread"); } catch (e) { fail(e); Sheet.close(); return; }
+  Sheet.body().innerHTML = spreadHtml(S.spread);
+}
+
+async function spreadToggle(btn) {
+  const on = !(S.spread || {}).on;
+  btn.disabled = true;
+  try {
+    S.spread = await api("/api/spread", { on });
+    haptic.ok(); toast(S.spread.on ? "⚖️ Спред включён" : "Спред выключен");
+    Sheet.body().innerHTML = spreadHtml(S.spread);
+  } catch (e) { fail(e); btn.disabled = false; }
+}
+
+async function spreadMode(btn) {
+  const paper = !(S.spread || {}).paper;
+  if (!paper && !(await confirmBox("Перевести спред на РЕАЛЬНЫЕ сделки? Бот будет сам покупать монеты, выводить их на твою вторую биржу и продавать — только если прибыль после всех комиссий выше порога. Пока монеты едут (2–15 мин), цена может уйти. Защита: одна сделка за раз, лимиты, стоп −3%, дневной лимит убытка."))) return;
+  btn.disabled = true;
+  try {
+    S.spread = await api("/api/spread", { paper, confirm: !paper });
+    haptic.ok(); toast(S.spread.paper ? "🧪 Спред — тест на бумаге" : "💵 Спред — реальные сделки");
+    Sheet.body().innerHTML = spreadHtml(S.spread);
+  } catch (e) { fail(e); btn.disabled = false; }
+}
+
+async function spreadCheck(btn) {
+  btn.disabled = true; btn.textContent = "🔍 Проверяю…";
+  try {
+    const r = await api("/api/spread/check", {}, { timeout: 60000 });
+    $("#spCheck").innerHTML = r.empty ? `<div class="card small" style="margin-top:10px">${esc(r.empty)}</div>` : r.items.map((it) => `<div class="card xf-plan ${it.ok ? "ok" : "bad"}" style="margin-top:10px">
+      <div class="row between"><div class="b">${esc(it.coin)} · ${esc(it.src)} → ${esc(it.dst)}</div><span class="pill ${it.ok ? "ok" : "bad"}">${it.ok ? "беру" : "нет"}</span></div>
+      <div class="small muted">спред ${it.gross}%${it.pct != null ? ` · итог после всех комиссий ${it.pct >= 0 ? "+" : ""}${it.pct}% (${it.profit >= 0 ? "+" : ""}${it.profit}$ на $${it.usd})` : ""}${it.reason ? ` · ${esc(it.reason)}` : ""}</div>
+      <div class="xf-checks">${it.checks.map((c) => `<div class="xf-c ${c.status}"><span>${XF_ICON[c.status] || "•"}</span><span>${esc(c.text)}</span></div>`).join("")}</div>
+    </div>`).join("");
+    haptic.ok();
+  } catch (e) { fail(e); } finally { btn.disabled = false; btn.textContent = "🔍 Проверить сейчас"; }
 }
 
 async function transferTest(btn) {
@@ -2389,6 +2458,10 @@ document.addEventListener("click", async (e) => {
     case "doctor": haptic.tap(); doctorSheet(); break;
     case "alerts": haptic.tap(); alertsSheet(); break;
     case "xfer": haptic.tap(); transferSheet(); break;
+    case "spread": haptic.tap(); spreadSheet(); break;
+    case "spread-toggle": spreadToggle(el); break;
+    case "spread-check": spreadCheck(el); break;
+    case "spread-mode": spreadMode(el); break;
     case "xfer-check": transferCheck(el); break;
     case "xfer-go": transferGo(el); break;
     case "xfer-test": transferTest(el); break;

@@ -319,6 +319,7 @@ class TradingState:
     history: list[list[float]] = field(default_factory=list)  # [[время, стоимость портфеля $], ...]
     scalp: dict = field(default_factory=dict)  # режим $5 (bot/scalper.py): включён ли, позиция, итоги
     transfers: dict = field(default_factory=dict)  # 🔁 переводы между биржами (bot/transfers.py)
+    spread: dict = field(default_factory=dict)  # ⚖️ спред-арбитраж между биржами (bot/spread.py)
 
 
 @dataclass
@@ -1090,6 +1091,10 @@ class Trader:
         if isinstance(self.state.transfers, dict) and self.state.transfers.get("allowed"):
             self.state.transfers["allowed"] = False  # 🔁 переводы тоже стоп; снова разрешает только владелец
             self.state.transfers["auto"] = False
+        if isinstance(self.state.spread, dict) and self.state.spread.get("on"):
+            self.state.spread["on"] = False  # ⚖️ спред тоже стоп; монеты в пути бот не продаёт сам
+        if isinstance(self.state.spread, dict) and self.state.spread:
+            self.state.spread["paper"] = True  # после /live спред сам на реальные не вернётся
         scalp_pos = bool(self.state.scalp.get("positions") or self.state.scalp.get("pos"))
         if self.state.scalp:
             self.state.scalp["on"] = False
