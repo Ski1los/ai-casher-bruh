@@ -39,7 +39,7 @@ from .gmgn import GmgnClient
 from .pulse import Pulse
 from .autonomy import Autonomy
 from .solkey import looks_like_secret
-from .ai import NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
+from .ai import COUNCIL_MAX, NO_AI_TEXT, AIAssistant, AIError, Answer, Proposal, validate_setting
 from .alerts import AlertBook
 from .analytics import analysis_text, analyze, fees_text
 from .cloud import (BOT_VERSION, STATUS, TelegramBackup, cloud_port, public_url, self_ping_loop, set_status, start_health_server,
@@ -204,7 +204,7 @@ HELP_TEXT = """\
 /fees — комиссии бирж; <code>/fee bybit 0.08</code> — задать свою ставку в %
 
 <b>Полезное</b> ✨
-/doctor — 🩺 проверить всё: биржи, ключи, сроки ключей, приложение, ИИ
+/doctor — 🩺 проверить всё: биржи, ключи, все ИИ, автомат · /doctor ai
 <code>/price TON</code> — цена монеты на Bybit и BingX и разница между ними
 <code>/alert TON &lt; 5</code> — сообщить, когда цена дойдёт до уровня (или <code>/alert SOL +5%</code>)
 /alerts — мои алерты (удаление кнопками)
@@ -1134,6 +1134,7 @@ class ArbitrageBot:
             rows = list((self.app_markup() or InlineKeyboardMarkup(inline_keyboard=[])).inline_keyboard)
             rows.insert(0, [InlineKeyboardButton(text="💡 Как заработать сейчас (акции, проценты, новости)",
                                                  callback_data="op:show")])
+            rows.insert(1, [InlineKeyboardButton(text="🩺 Проверить всё: биржи, ключи, все ИИ", callback_data="dr:all")])
             if message.from_user and self.is_owner(message.from_user.id):
                 rows.insert(0, [InlineKeyboardButton(text="🚀 С чего начать: готовность к торговле", callback_data="su:again")])
             await message.answer(HELP_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
@@ -1411,7 +1412,7 @@ class ArbitrageBot:
                 return council.as_answer(res)
 
             wait = await self.bot.send_message(
-                chat_id, f"🧠 Собираю консилиум: спрашиваю {min(len(self.ai.client.endpoints), 5)} ИИ одновременно, "
+                chat_id, f"🧠 Собираю консилиум: спрашиваю {min(len(self.ai.client.endpoints), COUNCIL_MAX)} ИИ одновременно, "
                          "до минуты…") if self.ai.configured else None
             await self._ai_respond(chat_id, make, wait=wait)
 
@@ -1925,7 +1926,7 @@ class ArbitrageBot:
                     BotCommand(command="stop", description="🛑 Остановить торговлю"),
                     BotCommand(command="ai", description="🧠 ИИ: разбор и вопросы"),
                     BotCommand(command="council", description="🧠 Консилиум: несколько ИИ сразу"),
-                    BotCommand(command="doctor", description="🩺 Проверить всё"),
+                    BotCommand(command="doctor", description="🩺 Проверить всё и все ИИ"),
                     BotCommand(command="clean", description="🧹 Освободить память"),
                     BotCommand(command="price", description="💲 Цена на Bybit и BingX"),
                     BotCommand(command="alert", description="🔔 Ценовой алерт"),

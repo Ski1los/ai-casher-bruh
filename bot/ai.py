@@ -61,7 +61,9 @@ PROVIDERS: dict[str, dict] = {
         "base": "https://openrouter.ai/api/v1",
         "env": "OPENROUTER_API_KEY",
         "prefix": "sk-or-",
-        "prefer": ["openrouter/free", "gpt-oss-120b:free", "deepseek", "qwen", "gemma", "llama"],
+        # самые умные бесплатные (:free) — сначала DeepSeek; openrouter/free = «любая свободная», если их нет
+        "prefer": ["deepseek-v4", "deepseek", "qwen3", "kimi", "glm", "gpt-oss-120b:free", "openrouter/free", "gemma",
+                   "llama"],
         "only_free": True,
         "fallback": ["openrouter/free"],
     },
@@ -130,6 +132,55 @@ PROVIDERS: dict[str, dict] = {
         "free": "платный, но копейки: ~$0.3 за 1000 вопросов (оплата зарубежной картой)",
         "access": "nophone",
     },
+    # --- v39: самые умные бесплатные, регистрация по почте/Google, без телефона ------------------------------
+    "ollama": {
+        "title": "Ollama Cloud",
+        "base": "https://ollama.com/v1",
+        "env": "OLLAMA_API_KEY",
+        "prefix": None,
+        "prefer": ["deepseek-v4-pro", "deepseek-v4", "kimi-k3", "kimi-k2", "deepseek-v3", "qwen3.5", "glm",
+                   "gpt-oss:120b", "gpt-oss-120b", "deepseek"],
+        "fallback": ["deepseek-v4-flash", "gpt-oss:120b"],
+        "signup": "https://ollama.com/settings/keys",
+        "free": "DeepSeek V4 Pro, Kimi, Qwen бесплатно; лимит на неделю, по одному вопросу за раз",
+        "access": "nophone",
+    },
+    "sambanova": {
+        "title": "SambaNova",
+        "base": "https://api.sambanova.ai/v1",
+        "env": "SAMBANOVA_API_KEY",
+        "prefix": None,
+        "prefer": ["deepseek-v3.2", "deepseek-v3.1", "deepseek", "gpt-oss-120b", "llama-3.3-70b"],
+        "fallback": ["DeepSeek-V3.1", "gpt-oss-120b"],
+        "signup": "https://cloud.sambanova.ai/apis",
+        "free": "DeepSeek V3.2 / V3.1 бесплатно, 20 вопросов в день на модель (хватает для консилиума)",
+        "access": "nophone",
+    },
+    "zai": {
+        "title": "Z.ai GLM",
+        "base": "https://api.z.ai/api/paas/v4",
+        "env": "ZAI_API_KEY",
+        "prefix": None,
+        "prefer": ["glm-4.7-flash", "glm-4.5-flash"],
+        "strict": True,  # только бесплатные Flash-модели: остальные GLM платные
+        "fallback": ["glm-4.7-flash", "glm-4.5-flash"],
+        "signup": "https://z.ai/manage-apikey/apikey-list",
+        "free": "GLM-4.7-Flash бесплатно навсегда (берём только бесплатные модели)",
+        "access": "nophone",
+    },
+    "cloudflare": {
+        "title": "Cloudflare AI",
+        "base": "https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1",
+        "env": "CLOUDFLARE_API_TOKEN",
+        "prefix": None,
+        "prefer": ["@cf/qwen/qwen3.8-27b", "@cf/openai/gpt-oss-120b", "@cf/nvidia/nemotron-3-120b-a12b",
+                   "@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+        "strict": True,  # только модели бесплатного тарифа Workers Free
+        "fallback": ["@cf/qwen/qwen3.8-27b", "@cf/openai/gpt-oss-120b", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+        "signup": "https://dash.cloudflare.com/profile/api-tokens",
+        "free": "Qwen 3.8, GPT-OSS 120B бесплатно, 10 000 «нейронов» в день; нужен ещё CLOUDFLARE_ACCOUNT_ID",
+        "access": "nophone",
+    },
     # --- v38: российские ИИ (вход по номеру РФ) ------------------------------------------------------------
     "gigachat": {
         "title": "GigaChat (Сбер)",
@@ -170,7 +221,7 @@ PROVIDERS: dict[str, dict] = {
         "base": "https://api.llm7.io/v1",
         "env": "LLM7_API_KEY",
         "prefix": None,
-        "prefer": ["gpt-oss", "deepseek", "qwen", "mistral", "llama"],
+        "prefer": ["deepseek", "gpt-oss", "qwen", "mistral", "llama"],
         "fallback": ["gpt-oss:20b"],
         "signup": "https://token.llm7.io",
         "free": "без ключа; бесплатный токен по почте — больше лимит",
@@ -195,6 +246,8 @@ for _name, _url, _free, _access in (
 EXTRA_ENV = {  # синонимы имён переменных
     "github": ("GITHUB_MODELS_TOKEN", "GITHUB_MODELS_KEY"),
     "gigachat": ("GIGACHAT_AUTH_KEY", "GIGACHAT_CREDENTIALS", "GIGACHAT_API_KEY"),
+    "zai": ("ZAI_API_KEY", "ZHIPU_API_KEY", "GLM_API_KEY"),
+    "cloudflare": ("CLOUDFLARE_API_TOKEN", "CF_API_TOKEN"),
 }
 GIGACHAT_AUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 RU_CA_FILE = Path(__file__).parent / "certs" / "russian_trusted_root_ca.pem"  # корневой сертификат Минцифры (Сбер)
@@ -216,7 +269,10 @@ SKIP_MODELS = ("whisper", "tts", "guard", "embed", "image", "vision", "audio", "
 MAX_CONTEXT_CHARS = 9_000  # ≈3 тыс. токенов: вместе с ответом влезает в бесплатный лимит Groq 8K токенов/мин
 HISTORY_TURNS = 3  # сколько последних вопросов-ответов помнить в чате
 REQUEST_TIMEOUT = 90
-COUNCIL_MAX = 5  # сколько ИИ максимум спрашивает консилиум
+COUNCIL_MAX = 7  # сколько ИИ максимум спрашивает консилиум
+PING_TIMEOUT = 30  # 🩺 проверка: сколько ждём ответа каждого ИИ
+PAID_WORDS = ("subscription", "upgrade", "paid plan", "premium", "insufficient balance", "余额", "requires a plan",
+              "pro plan", "billing")
 COUNCIL_TIMEOUT = 60
 # Запас выходных токенов на «размышления» Gemini 2.5+/3: они считаются в maxOutputTokens. Без запаса модель
 # обрывает мысль → пустой или обрезанный ответ → повторный запрос (вдвое дольше и минус из дневного лимита).
@@ -327,6 +383,11 @@ def provider_env_names(name: str) -> tuple[str, ...]:
     return EXTRA_ENV.get(name) or (PROVIDERS[name]["env"],)
 
 
+def env_name(provider: str) -> str:
+    """Имя переменной в Render для ключа этого ИИ (для подсказок)."""
+    return provider_env_names(provider)[0] if PROVIDERS.get(provider, {}).get("env") else "AI_API_KEY"
+
+
 def ai_keys_present(env=None) -> bool:
     env = os.environ if env is None else env
     return bool((env.get("AI_API_KEY") or "").strip()) or any(
@@ -391,8 +452,8 @@ def endpoints_from_env(env: dict | None = None) -> list[Endpoint]:
         key = next((k for k in (clean_key(env.get(n)) for n in names) if k), "")
         if key and key not in seen:
             seen.add(key)
-            if name == "yandex":
-                ep = _yandex_endpoint(env, key)
+            if name in ("yandex", "cloudflare"):
+                ep = _yandex_endpoint(env, key) if name == "yandex" else _cloudflare_endpoint(env, key)
                 if ep:
                     out.append(ep)
                 continue
@@ -417,6 +478,15 @@ def _yandex_endpoint(env, key: str) -> Endpoint | None:
                     headers={"OpenAI-Project": folder, "x-folder-id": folder})
 
 
+def _cloudflare_endpoint(env, key: str) -> Endpoint | None:
+    account = (env.get("CLOUDFLARE_ACCOUNT_ID") or env.get("CF_ACCOUNT_ID") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", account):
+        log.warning("CLOUDFLARE_API_TOKEN задан, но нет CLOUDFLARE_ACCOUNT_ID (32 знака из dash.cloudflare.com) — "
+                    "Cloudflare AI выключен")
+        return None
+    return Endpoint("cloudflare", PROVIDERS["cloudflare"]["base"].format(account=account), key)
+
+
 def keyless_endpoints(env=None, have: list[Endpoint] | None = None) -> list[Endpoint]:
     """ИИ, которым не нужен ни ключ, ни регистрация. В конце списка: запасные и голоса в консилиуме."""
     env = os.environ if env is None else env
@@ -436,11 +506,13 @@ def pick_model(provider: str, ids: list[str], dead: set | None = None) -> str | 
         clean = [i for i in clean if i.endswith(":free") or i == "openrouter/free"]
     for pattern in p.get("prefer", []):
         matches = [i for i in clean if pattern in i.lower()]
+        if p.get("strict"):  # только точно бесплатные модели: «flashx» у Z.ai уже платная
+            matches = [i for i in matches if i.lower() == pattern]
         if matches:
             # у Gemini номер версии в названии: берём самую новую стабильную
             stable = [m for m in matches if "preview" not in m and "exp" not in m] or matches
             return sorted(stable, reverse=True)[0]
-    return clean[0] if clean else None
+    return None if p.get("strict") else (clean[0] if clean else None)
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +612,7 @@ class LLMClient:
             await self._auth(ep)
             async with http.get(url, headers=self._headers(ep), **self._tls(ep)) as r:
                 if r.status in (401, 403) and not ep.keyless:  # без ключа список моделей могут не отдать — возьмём запасную
-                    raise AIError(f"{ep.title}: ключ не подходит (ошибка {r.status}). Проверь AI_API_KEY.")
+                    raise AIError(f"{ep.title}: ключ не подходит (ошибка {r.status}). Проверь {env_name(ep.provider)}.")
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     if "models" in data:  # родной API Gemini: {"models": [{"name": "models/…", ...}]}
@@ -686,6 +758,14 @@ class LLMClient:
                     refreshed = True  # токен истёк раньше срока — берём новый
                     await self._auth(ep, force=True)
                     continue
+                if r.status in (402, 403) and any(w in low for w in PAID_WORDS):
+                    ep.dead_models.add(model)  # модель только для платного тарифа — берём бесплатную
+                    ep.model = None
+                    if ep.pinned == model:
+                        ep.pinned = None
+                    if len(ep.dead_models) >= 4:
+                        raise AIError(f"{ep.title}: бесплатные модели закончились (нужна подписка)")
+                    continue
                 if r.status in (401, 403):
                     if ep.keyless:
                         ep.disabled_until = time.time() + 3600
@@ -751,6 +831,36 @@ class LLMClient:
             self.last_error = "; ".join(errors)
             raise AIError(self.last_error)
 
+
+    async def ping_all(self, wait_sec: float = PING_TIMEOUT) -> list[dict]:
+        """🩺 Живая проверка: короткий вопрос каждому ИИ одновременно. ИИ на паузе из-за лимита не дёргаем —
+        иначе проверка сама съест лимит. [{title, model, ok, sec, text|error, keyless, paused}]"""
+        now = time.time()
+        self._count_day()
+        msg = [{"role": "user", "content": "Проверка связи. Ответь одним словом: работает"}]
+
+        async def one(ep: Endpoint) -> dict:
+            row = {"provider": ep.provider, "title": ep.title, "keyless": ep.keyless, "model": ep.model, "ok": False,
+                   "sec": 0.0, "paused": 0, "text": "", "error": ""}
+            if ep.disabled_until > now:
+                row["paused"] = int(ep.disabled_until - now)
+                return row
+            self.requests_today += 1
+            t0 = time.monotonic()
+            try:
+                text = await asyncio.wait_for(self._call(ep, msg, 300), wait_sec)
+                row.update(ok=True, text=text.strip()[:60])
+            except asyncio.TimeoutError:
+                row["error"] = f"не ответил за {wait_sec:.0f} с"
+            except AIError as e:
+                row["error"] = str(e).removeprefix(f"{ep.title}: ")[:200]
+            except (aiohttp.ClientError, ValueError, OSError) as e:
+                row["error"] = f"нет связи ({type(e).__name__})"
+            row["sec"] = round(time.monotonic() - t0, 1)
+            row["model"] = ep.model
+            return row
+
+        return list(await asyncio.gather(*(one(ep) for ep in self.endpoints)))
 
     async def chat_each(self, messages: list[dict], max_tokens: int = 700,
                         limit: int = COUNCIL_MAX) -> list[tuple[str, str | None, str | None, str | None]]:

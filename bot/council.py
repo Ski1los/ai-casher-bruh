@@ -136,7 +136,7 @@ def tally(votes: list[Vote]) -> tuple[str | None, int, int, str]:
 
 
 async def run(ai, context: dict, question: str | None = None, now: float | None = None) -> Result:
-    """Спросить все подключённые ИИ (до 5) одновременно и посчитать голоса."""
+    """Спросить все подключённые ИИ (до 7) одновременно и посчитать голоса."""
     question = (question or "").strip()[:600] or DEFAULT_QUESTION
     sys = ai._system(context)
     messages = [sys, {"role": "user", "content": TASK.format(question=question)}]
