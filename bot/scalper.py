@@ -821,7 +821,7 @@ class Scalper:
                     options.append((0, -ps["sum"], Params(a["tp"], a["rsi_buy"], a["strategy"]), "lab"))
             if not options:
                 continue
-            why = self.shield_reason(coin, now)
+            why = self.shield_reason(coin, now) or self.trader.coin_wall(name, coin)
             if why:
                 held_back.append(f"{coin} — {why}")
                 continue

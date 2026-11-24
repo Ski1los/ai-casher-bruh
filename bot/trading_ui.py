@@ -255,14 +255,17 @@ async def keys_text(b: ArbitrageBot) -> str:
     return "\n".join(lines)
 
 
-def perms_line(info: dict | None) -> str:
+def perms_line(info: dict | None, transfers_on: bool = False) -> str:
     """«(чтение ✅, спот ✅, вывод ⬜️ — так и надо)»: что включено у ключа, если биржа это сообщает."""
     if not info or info.get("error") or not any(k in info for k in ("spot_trade", "read", "read_only", "withdraw")):
         return ""
     parts = []
     if "spot_trade" in info:
         parts.append(f"спот {'✅' if info.get('spot_trade') else '❌'}")
-    parts.append(f"вывод {'⚠️ включён — лучше выключить' if info.get('withdraw') else '⬜️ выключен, так и надо'}")
+    if transfers_on:
+        parts.append(f"вывод {'✅ для 🔁 переводов' if info.get('withdraw') else '⬜️ выключен — переводы не смогут, /transfer help'}")
+    else:
+        parts.append(f"вывод {'⚠️ включён — разреши /transfer или выключи' if info.get('withdraw') else '⬜️ выключен, так и надо'}")
     return " (" + ", ".join(parts) + ")"
 
 
@@ -293,7 +296,7 @@ async def readiness(b: ArbitrageBot) -> tuple[str, InlineKeyboardMarkup]:
                 lines.append(f"1️⃣ ⚠️ {title}: ключ работает, но {html.escape(problem)}")
                 todo.append(f"включить право «Спот-торговля» у ключа {title}")
             else:
-                lines.append(f"1️⃣ ✅ {title}: ключ работает, торговать может" + perms_line(t.key_info.get(name)))
+                lines.append(f"1️⃣ ✅ {title}: ключ работает, торговать может" + perms_line(t.key_info.get(name), t.transfers_allowed))
     name = sc.exchange()
 
     async def _stuck_coin(ex_name: str, quote: str):

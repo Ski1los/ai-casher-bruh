@@ -270,6 +270,9 @@ class WebApp:
             ("GET", "/api/brief"): self.brief,
             ("POST", "/api/clientlog"): self.clientlog,
             ("POST", "/api/notify"): self.notify_set,
+            ("GET", "/api/transfers"): self.transfers,
+            ("POST", "/api/transfers/check"): self.transfer_check,
+            ("POST", "/api/transfers/go"): self.transfer_go,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -720,6 +723,55 @@ class WebApp:
         else:
             plan = await t.plan_market(name, side, coin, amount)
         return {"plan": plan_dict(plan, t)}
+
+    # --- 🔁 переводы между биржами (разрешить их можно только в Telegram: два подтверждения) --------------
+
+    def _transfers_dict(self) -> dict:
+        tf = self.b.transfers
+        st = tf.st
+        perms = {n: tf.can_withdraw_key(n) for n in self.b.trader.creds}
+        items = [{k: it.get(k) for k in ("at", "coin", "amount", "src", "dst", "network", "fee", "usd", "status", "source")}
+                 for it in st["items"][-8:][::-1]]
+        return {"allowed": st["allowed"], "auto": st["auto"], "max_usd": st["max_usd"], "day_usd": st["day_usd"],
+                "day_sent": round(st["day_sent"], 2), "perms": perms, "items": items,
+                "exchanges": [{"id": n, "name": self._name(n)} for n in self.b.trader.creds]}
+
+    async def transfers(self, request: web.Request) -> dict:
+        return self._transfers_dict()
+
+    async def transfer_check(self, request: web.Request) -> dict:
+        self._owner(request)
+        body = await self._body(request)
+        coin = str(body.get("coin") or "").upper().strip()
+        if not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
+            raise ApiError("укажи монету, например USDT")
+        raw = str(body.get("amount") or "").strip().replace(",", ".")
+        if raw.lower() in ("all", "всё", "все", "max"):
+            amount: float | str = "all"
+        else:
+            try:
+                amount = float(raw)
+            except ValueError:
+                raise ApiError("сумма — число или «all»") from None
+            if not 0 < amount < 1e12:
+                raise ApiError("сумма должна быть больше 0")
+        src = self._exchange(body.get("src"))
+        dst = self._exchange(body.get("dst")) if body.get("dst") else None
+        tf = self.b.transfers
+        plan = await tf.analyze(coin, amount, src, dst)
+        if plan.ok:
+            tf.keep(plan)
+        return {"plan": plan.as_dict(self._name)}
+
+    async def transfer_go(self, request: web.Request) -> dict:
+        self._owner(request)
+        body = await self._body(request)
+        uid = request[USER]["id"]
+        it = await self.b.transfers.execute(str(body.get("id") or ""), actor=uid)
+        self._changed(f"📱 🚀 Вывод отправлен: {it['amount']:g} {it['coin']} {self._name(it['src'])} → "
+                      f"{self._name(it['dst'])}, сеть {it['network']}. Сообщу, когда дойдёт")
+        return {"item": {k: it.get(k) for k in ("coin", "amount", "src", "dst", "network", "status")},
+                "transfers": self._transfers_dict()}
 
     async def cancel_plan(self, request: web.Request) -> dict:
         body = await self._body(request)

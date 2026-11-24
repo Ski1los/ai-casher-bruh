@@ -85,8 +85,15 @@ def _key_info_checks(b: ArbitrageBot, name: str, info: dict, now: float) -> list
     if info.get("error"):
         return [Check("Ключи", f"{title}: права ключа", "info", f"не удалось прочитать: {info['error']}")]
     if info.get("withdraw"):
-        out.append(Check("Ключи", f"{title}: право вывода", "bad",
-                         "у ключа включён вывод (Withdraw). Удали ключ и создай новый только со спотовой торговлей"))
+        if not b.trader.transfers_allowed:
+            out.append(Check("Ключи", f"{title}: право вывода", "bad",
+                             "у ключа включён вывод (Withdraw), а переводы выключены: разреши их в /transfer "
+                             "или создай ключ только со спотовой торговлей"))
+        elif info.get("ip_bound") is False:
+            out.append(Check("Ключи", f"{title}: право вывода", "bad",
+                             "вывод включён без привязки к IP — привяжи IP сервера (/transfer help)"))
+        else:
+            out.append(Check("Ключи", f"{title}: право вывода", "ok", "включён для 🔁 переводов между биржами"))
     if name == "bybit":
         if info.get("read_only"):
             live = b.trader.state.live
