@@ -1117,6 +1117,7 @@ function renderWallet() {
     ${p ? p.exchanges.map((e) => `<div class="section-title">${esc(e.name)} ${e.error ? "" : `<span class="num" style="text-transform:none">${money(e.total_usd)}</span>`}</div>
       ${e.hint ? `<div class="banner">💡 ${esc(e.hint)}</div>` : ""}
       ${e.error ? `<div class="banner red">❌ ${esc(e.error)}</div>` : (e.coins || []).length ? `<div class="list">${e.coins.filter((c) => (c.usd || 0) >= 0.01 || c.usd == null).slice(0, 20).map((c) => `<div class="item press" data-act="coin" data-ex="${esc(e.exchange)}" data-coin="${esc(c.coin)}">${coinIcon(c.coin)}<div class="grow"><div class="t">${esc(c.coin)}</div><div class="s num">${amount(c.total)}${c.total - c.free > 1e-12 ? ` · в ордерах ${amount(c.total - c.free)}` : ""}</div></div><div class="r"><div class="b num">${c.usd != null ? money(c.usd) : "—"}</div><div class="s">${c.coin === S.ov.quote ? "" : "продать →"}</div></div></div>`).join("")}</div>` : e.hint ? "" : `<div class="card empty">Пусто. Если деньги на бирже есть, переведи их на торговый (спот) счёт</div>`}`).join("") : ""}
+    ${t.keys.length ? `<button class="btn block xf-btn" style="margin-top:12px" data-act="xfer">🔁 Перевод между биржами — с проверкой</button>` : ""}
     ${phantomBlock()}
     <div class="section-title">Открытые ордера <a data-act="load-orders">Обновить</a></div>
     <div id="ordersBox">${ordersHtml()}</div>
@@ -1251,6 +1252,86 @@ async function alertsSheet() {
   try { const r = await api("/api/alerts"); $("#alertsBox").innerHTML = alertsHtml(r.alerts); } catch (e) { $("#alertsBox").innerHTML = `<div class="banner red">${esc(e.message)}</div>`; }
 }
 
+// ---------------------------------------------------------------------------
+// 🔁 Переводы между биржами: анализ перед выводом, потом одна кнопка
+// ---------------------------------------------------------------------------
+
+const XF_ICON = { ok: "✅", warn: "⚠️", bad: "⛔" };
+const XF_STATUS = { sent: "⏳ отправлен", out: "🚚 в пути", done: "✅ дошёл", failed: "❌ отменён" };
+
+function transferHead(x) {
+  const perms = Object.entries(x.perms || {}).map(([id, p]) => {
+    const n = (x.exchanges.find((e) => e.id === id) || {}).name || id;
+    return `<span class="pill ${p ? "ok" : p === false ? "bad" : "gray"}">${esc(n)}: вывод ${p ? "есть" : p === false ? "нет" : "?"}</span>`;
+  }).join(" ");
+  return `<div class="card">
+      <div class="row between"><div class="b">${x.allowed ? "🔓 Переводы разрешены" : "🔒 Переводы выключены"}</div><span class="pill ${x.auto ? "ok" : "gray"}">⚖️ автобаланс ${x.auto ? "вкл" : "выкл"}</span></div>
+      <div class="small muted" style="margin-top:6px">Лимиты: $${x.max_usd} за раз · $${x.day_usd} в сутки · сегодня $${x.day_sent}</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px">${perms}</div>
+      ${x.allowed ? "" : `<div class="banner" style="margin-top:10px">Разрешить может главный владелец в Telegram: <b>/transfer</b> → «🔓 Разрешить» (два подтверждения). Проверку можно делать и сейчас.</div>`}
+    </div>`;
+}
+
+function transferItems(x) {
+  if (!(x.items || []).length) return `<div class="card empty"><div class="e">🔁</div>Переводов пока не было</div>`;
+  return `<div class="list">${x.items.map((it) => `<div class="item"><div class="grow"><div class="t num">${amount(it.amount)} ${esc(it.coin)}</div><div class="s">${esc(it.src)} → ${esc(it.dst)} · ${esc(it.network)}${it.source === "auto" ? " · ⚖️ авто" : ""} · ${ago(it.at)}</div></div><div class="r small">${XF_STATUS[it.status] || esc(it.status)}</div></div>`).join("")}</div>`;
+}
+
+async function transferSheet() {
+  Sheet.open("Переводы", `<div class="skel" style="height:120px"></div>`, { full: true });
+  let x;
+  try { x = await api("/api/transfers"); } catch (e) { fail(e); Sheet.close(); return; }
+  S.xfer = x;
+  const ex = x.exchanges;
+  const opt = (sel) => ex.map((e) => `<option value="${esc(e.id)}" ${e.id === sel ? "selected" : ""}>${esc(e.name)}</option>`).join("");
+  Sheet.body().innerHTML = `
+    ${transferHead(x)}
+    <div class="section-title">Новый перевод</div>
+    ${ex.length < 2 ? `<div class="banner">Нужны ключи обеих бирж (Bybit и BingX), чтобы бот взял адрес пополнения второй биржи.</div>` : `
+    <div class="card xf-form">
+      <div class="row" style="gap:8px"><input id="xfCoin" class="input grow" value="USDT" autocomplete="off" autocapitalize="characters" placeholder="Монета"><input id="xfAmount" class="input grow" inputmode="decimal" placeholder="Сумма или all"></div>
+      <div class="row" style="gap:8px;margin-top:8px;align-items:center"><select id="xfSrc" class="input grow">${opt(ex[0].id)}</select><button class="icon-btn" data-act="xfer-flip" aria-label="Поменять">⇄</button><select id="xfDst" class="input grow">${opt(ex[1].id)}</select></div>
+      <button class="btn primary block" style="margin-top:10px" data-act="xfer-check" ${owner() ? "" : "disabled"}>🔍 Проверить возможность</button>
+      <div class="tiny dim" style="margin-top:8px">Бот проверит: открыт ли вывод и ввод монеты (блокировки вроде Terra), общую сеть, комиссию, минимум, баланс, адрес и лимиты. Адрес — только твой, с другой биржи.</div>
+    </div>`}
+    <div id="xfPlan"></div>
+    <div class="section-title">Последние переводы</div>
+    <div id="xfItems">${transferItems(x)}</div>`;
+}
+
+function transferPlanHtml(p) {
+  const got = p.fee != null ? Math.max(0, p.amount - p.fee) : null;
+  return `<div class="card xf-plan ${p.ok ? "ok" : "bad"}" style="margin-top:10px">
+    <div class="b">${p.amount ? `${amount(p.amount)} ` : ""}${esc(p.coin)} · ${esc(p.src_name)} → ${esc(p.dst_name)}${p.network ? ` · ${esc(p.network)}` : ""}</div>
+    <div class="xf-checks">${p.checks.map((c) => `<div class="xf-c ${c.status}"><span>${XF_ICON[c.status]}</span><span>${esc(c.text)}</span></div>`).join("")}</div>
+    ${p.ok ? `<div class="small muted" style="margin:8px 0">Придёт ≈ ${got != null ? amount(got) + "–" : ""}${amount(p.amount)} ${esc(p.coin)}${p.usd != null ? ` (≈${money(p.usd)})` : ""}. Обычно 2–30 минут. Проверка действует 5 минут.</div>
+      <button class="btn primary block" data-act="xfer-go" data-id="${esc(p.id)}">🚀 Перевести</button>` : `<div class="banner red" style="margin-top:8px">Переводить нельзя — причины выше</div>`}
+  </div>`;
+}
+
+async function transferCheck(btn) {
+  const coin = ($("#xfCoin").value || "").trim().toUpperCase(), amt = ($("#xfAmount").value || "").trim();
+  if (!coin) { $("#xfCoin").focus(); return; }
+  if (!amt) { $("#xfAmount").focus(); return; }
+  btn.disabled = true; btn.textContent = "🔍 Анализирую…";
+  try {
+    const r = await api("/api/transfers/check", { coin, amount: amt, src: $("#xfSrc").value, dst: $("#xfDst").value }, { timeout: 45000 });
+    $("#xfPlan").innerHTML = transferPlanHtml(r.plan);
+    r.plan.ok ? haptic.ok() : haptic.err();
+  } catch (e) { fail(e); } finally { btn.disabled = false; btn.textContent = "🔍 Проверить возможность"; }
+}
+
+async function transferGo(btn) {
+  if (!(await confirmBox("Отправить вывод? Перед отправкой бот проверит всё ещё раз."))) return;
+  btn.disabled = true; btn.textContent = "Вывожу…";
+  try {
+    const r = await api("/api/transfers/go", { id: btn.dataset.id }, { timeout: 45000 });
+    haptic.ok(); toast("🚀 Вывод отправлен — сообщу в Telegram, когда дойдёт");
+    $("#xfPlan").innerHTML = "";
+    $("#xfItems").innerHTML = transferItems(r.transfers);
+  } catch (e) { fail(e); btn.disabled = false; btn.textContent = "🚀 Перевести"; }
+}
+
 async function addAlert(btn) {
   const text = ($("#alertText").value || "").trim();
   if (!text) { $("#alertText").focus(); return; }
@@ -1301,8 +1382,8 @@ function keysHelp() {
     <div class="muted small" style="margin-top:4px">Чтобы торговать из приложения, нужен API-ключ биржи. Это 5 минут с телефона.</div>
     <ol class="steps">
       <li>На <b>сайте</b> биржи (в браузере, «версия для ПК»): <b>Профиль → API → Создать ключ</b> (системный).</li>
-      <li>Права: <b>чтение + спотовая торговля</b>. <b>Вывод (Withdraw) не включай</b>: тогда деньги нельзя вывести даже при утечке ключа.</li>
-      <li>IP-ограничение не ставь. Ключ Bybit без IP живёт ~3 месяца (бот напомнит), ключ BingX живёт, пока бот им пользуется.</li>
+      <li>Права: <b>чтение + спотовая торговля</b>. Этого хватает для торговли.</li>
+      <li>Хочешь, чтобы бот сам <b>переводил монеты между биржами</b>? Тогда добавь право <b>Withdraw</b> и обязательно <b>привязку к IP</b> сервера, а адрес второй биржи внеси в адресную книгу. Подробно — в боте: <b>/transfer help</b>. Без вывода ключ Bybit можно не привязывать к IP (живёт ~3 месяца, бот напомнит).</li>
       <li>Render → сервис <b>ai-casher-bot</b> → <b>Environment</b>: <b>BYBIT_API_KEY</b> и <b>BYBIT_API_SECRET</b>, <b>BINGX_API_KEY</b> и <b>BINGX_API_SECRET</b> → <b>Save</b>.</li>
       <li>Через минуту бот перезапустится, и здесь появится твой баланс.</li>
     </ol>
@@ -2292,6 +2373,10 @@ document.addEventListener("click", async (e) => {
     case "keys": Sheet.open("Подключение биржи", keysHelp()); break;
     case "doctor": haptic.tap(); doctorSheet(); break;
     case "alerts": haptic.tap(); alertsSheet(); break;
+    case "xfer": haptic.tap(); transferSheet(); break;
+    case "xfer-check": transferCheck(el); break;
+    case "xfer-go": transferGo(el); break;
+    case "xfer-flip": { const a = $("#xfSrc"), b = $("#xfDst"); [a.value, b.value] = [b.value, a.value]; haptic.sel(); break; }
     case "alert-add": addAlert(el); break;
     case "alert-del": delAlert(d.id); break;
     case "alert-ex": $("#alertText").value = d.v; $("#alertText").focus(); break;

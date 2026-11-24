@@ -67,6 +67,34 @@ class PreviewExchange(FakeTradingExchange):
             prev = c
         return out
 
+    # 🔁 кошелёк: статус монет по сетям (как ccxt fetch_currencies), адреса, выводы
+    async def fetch_currencies(self, params=None):
+        bybit = self.name == "Bybit"
+        n = (lambda net, fee, w=True, d=True: {"network": net, "fee": fee, "withdraw": w, "deposit": d, "active": True,
+                                                 "limits": {"withdraw": {"min": 1}}})
+        out = {"USDT": {"nets": {"TRX" if bybit else "TRC20": n("TRC20", 1.0 if bybit else 1.5),
+                                  "ETH" if bybit else "ERC20": n("ERC20", 4.0), "SOL": n("SOL", 1.0, w=not bybit)}},
+               "TON": {"nets": {"TON": n("TON", 0.05)}},
+               "LUNA": {"nets": {"LUNA" if bybit else "Terra": n("LUNA", 0.1, w=not bybit)}, "withdraw": not bybit}}
+        for c in PRICES:
+            out.setdefault(c, {"nets": {c: n(c, 0.0005)}})
+        return {c: {"id": c, "code": c, "active": True, "withdraw": v.get("withdraw", True), "deposit": True,
+                    "networks": v["nets"]} for c, v in out.items()}
+
+    async def fetch_deposit_address(self, code, params=None):
+        return {"address": ("TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE" if self.name == "BingX" else
+                            "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"), "tag": "4815162342" if code == "TON" else None}
+
+    async def withdraw(self, code, amount, address, params=None):
+        self.balance[code] = self.balance.get(code, 0) - amount
+        return {"id": f"pw{int(time.time())}"}
+
+    async def fetch_withdrawals(self, code=None, since=None, limit=None, params=None):
+        return []
+
+    async def fetch_deposits(self, code=None, since=None, limit=None, params=None):
+        return []
+
     async def fetch_ticker(self, symbol):
         t = dict(self.tickers[symbol])
         jitter = 1 + math.sin(time.time() / 7) * 0.0006
@@ -128,11 +156,14 @@ def build():
 
     async def bybit_key_info(params=None):  # как отвечает Bybit: ключ без IP, истекает через 76 дней
         return {"result": {"readOnly": 1 if blocked else 0, "ips": ["*"], "deadlineDay": 76,
-                           "permissions": {"Spot": [] if blocked else ["SpotTrade"], "Wallet": ["AccountTransfer"]}}}
+                           "permissions": {"Spot": [] if blocked else ["SpotTrade"], "Wallet": ["AccountTransfer", "Withdraw"]}}}
 
     async def bingx_key_info(params=None):
-        return {"code": 0, "data": {"apiKey": "k", "permissions": [1, 2], "ipAddresses": [], "note": ""}}
+        return {"code": 0, "data": {"apiKey": "k", "permissions": [1, 2, 5], "ipAddresses": ["203.0.113.7"], "note": ""}}
 
+    b.trader.state.transfers = {"allowed": True, "items": [{"id": "1", "at": time.time() - 3600, "coin": "USDT", "amount": 15.0,
+                                                           "src": "bingx", "dst": "bybit", "network": "TRC20", "fee": 1.5,
+                                                           "usd": 15.0, "status": "done", "source": "manual"}]}
     b.scanner.exchanges["bybit"].privateGetV5UserQueryApi = bybit_key_info
     b.scanner.exchanges["bingx"].accountV1PrivateGetAccountApiPermissions = bingx_key_info
 

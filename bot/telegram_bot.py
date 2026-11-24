@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 
 from . import (autonomy, copy_ui, council, extras_ui, feed, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
-               trading_ui,
+               trading_ui, transfers,
                updater, users_ui)
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
@@ -54,6 +54,7 @@ from .dex import DexClient
 from .report import ScanStats, seconds_until, split_message
 from .scalper import STEP_SEC as SCALP_STEP_SEC
 from .scalper import Scalper
+from .transfers import Transfers
 from .scanner import Opportunity, ScanResult, Scanner, fmt_price
 from .solana import PhantomWatcher
 from .trading import Trader, days_left, key_trade_problem, new_auto_stats
@@ -113,14 +114,15 @@ class ConflictWatch(logging.Handler):
 _KEYWORDS = r"(ключ|api|апи|прав|разреш|галоч|торгов)"
 WITHDRAW_Q = re.compile(rf"(вывод|withdraw).*{_KEYWORDS}|{_KEYWORDS}.*(вывод|withdraw)", re.I | re.S)
 WITHDRAW_ANSWER = """\
-🔒 <b>Право «Вывод» боту НЕ нужно</b> — ни для теста, ни для реальной торговли. Не включай его.
+🔒 <b>Для торговли право «Вывод» боту НЕ нужно</b> — ни для теста, ни для реальной торговли.
 
 Бот покупает и продаёт <b>внутри биржи</b>: деньги никуда не уходят. Для этого хватает двух галочек:
 ✅ <b>Чтение</b> · ✅ <b>Спот торговля</b>
-Всё остальное (Вывод, Universal Transfer, фьючерсы, субаккаунты, P2P) — выключено. Доступ по IP — «Неограниченный».
+Остальное (фьючерсы, субаккаунты, P2P) — выключено.
 
-Почему это важно: ключ хранится на сервере. Если он когда-нибудь утечёт, без права вывода его владелец \
-сможет только торговать, а забрать деньги — нет. Поэтому биржи и требуют IP для вывода.
+🔁 <b>Переводы между твоими биржами</b> (Bybit ⇄ BingX) — другое дело: для них нужно право «Вывод». \
+Включай его только вместе с <b>привязкой ключа к IP</b> и <b>адресной книгой</b> (вывод только на адрес второй биржи) — \
+тогда даже украденным ключом деньги не уведут. Пошагово: /transfer help. Без этого переводы не включатся.
 
 Если бот где-то пишет про ключ, пришли скриншот этого сообщения — разберу. Проверить ключ: /setup или /keys"""
 
@@ -178,7 +180,7 @@ HELP_TEXT = """\
 <b>Торговля</b> 💼 (сначала в тестовом режиме: ордера не отправляются)
 /setup — 🚀 <b>с чего начать</b>: проверка ключей, денег и стратегии, следующий шаг кнопкой
 /trade — панель: балансы, ордера, режим, автоторговля
-/keys — как подключить биржу (ключ без права вывода)
+/keys — ключ биржи · /transfer — 🔁 перевод между биржами
 /balance — балансы на биржах
 <code>/buy bybit BTC 5</code> — купить BTC на 5 USDT
 <code>/sell bybit BTC all</code> — продать (число, all или 50%)
@@ -499,6 +501,7 @@ class ArbitrageBot:
         self.trader = Trader(self.scanner, settings)
         self.conflicts = ConflictWatch()
         self.scalper = Scalper(self.trader, self.duplicate_running)  # режим $5 (bot/scalper.py)
+        self.transfers = Transfers(self)  # 🔁 переводы между своими биржами (bot/transfers.py)
         self._duplicate_warned = 0.0
         self.trading_file = TRADING_FILE
         self.tri_refs: dict[str, TriOpportunity] = {}  # кнопки «⚡ Исполнить» под сигналами
@@ -819,8 +822,12 @@ class ArbitrageBot:
             keys[name] = {
                 "expiry": expiry,
                 # формулировки однозначные: модели неправильно понимали withdraw_enabled=false как «надо включить»
-                "withdraw_permission": ("ВКЛЮЧЁН — опасно, скажи создать ключ без вывода" if info.get("withdraw")
-                                        else "выключен — ПРАВИЛЬНО, боту вывод не нужен, ничего не советуй"),
+                "withdraw_permission": (
+                    ("ВКЛЮЧЁН — нужен для переводов между биржами (/transfer), это нормально" if info.get("withdraw")
+                     else "выключен — для торговли не нужен; переводы без него не работают, инструкция: /transfer help")
+                    if self.trader.transfers_allowed else
+                    ("ВКЛЮЧЁН, а переводы выключены — скажи: разрешить /transfer или создать ключ без вывода"
+                     if info.get("withdraw") else "выключен — ПРАВИЛЬНО, боту вывод не нужен, ничего не советуй")),
                 "spot_trade_permission": ("есть" if info.get("spot_trade") else "НЕТ — нужно включить «Спот торговля»")
                 if "spot_trade" in info else "неизвестно",
             }
@@ -835,7 +842,20 @@ class ArbitrageBot:
             "copytrading_solana": self._copy_context(),
             "traders_youtube_twitch": self.mentors.ai_context(),
             "market_pulse_gmgn_axiom": self._pulse_context(),
+            "transfers_between_exchanges": self._transfers_context(),
         }
+
+    def _transfers_context(self) -> dict:
+        try:
+            st = self.transfers.st
+            return {"how": "/transfer COIN AMOUNT FROM TO: бот сам проверяет (вывод/ввод открыт, сеть, комиссия, "
+                           "адрес твоей второй биржи, лимиты) и выводит по кнопке владельца; ИИ переводы не делает",
+                    "allowed": st["allowed"], "auto_rebalance": st["auto"], "limits_usd": [st["max_usd"], st["day_usd"]],
+                    "recent": [{k: it.get(k) for k in ("coin", "amount", "src", "dst", "network", "status")}
+                               for it in st["items"][-3:]]}
+        except Exception as e:
+            log.warning("Переводы для ИИ: %s", e)
+            return {}
 
     def _pulse_context(self) -> dict:
         try:
@@ -1532,6 +1552,7 @@ class ArbitrageBot:
         users_ui.register(self)
         notify.register(self)
         feed.register(self)
+        transfers.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1948,6 +1969,7 @@ class ArbitrageBot:
                     BotCommand(command="profit", description="💰 Профит: что реально зарабатывает, план денег"),
                     BotCommand(command="autopilot", description="🤖 Автопилот: бот торгует сам"),
                     BotCommand(command="scalp", description="🎯 Режим $5: состояние и сделки"),
+                    BotCommand(command="transfer", description="🔁 Перевод монет между биржами (с проверкой)"),
                     BotCommand(command="lab", description="🧪 Лаборатория: стратегии вживую"),
                     BotCommand(command="copy", description="🐋 Копитрейдинг: умные кошельки"),
                     BotCommand(command="meme", description="💸 Мемкоины: бот торгует сам"),
@@ -1984,6 +2006,7 @@ class ArbitrageBot:
             if self.trader.creds:
                 tasks.append(asyncio.create_task(self._check_keys_on_start()))
                 tasks.append(self._spawn("keys", self._keys_watch_loop))
+                tasks.append(self._spawn("transfers", lambda: transfers.transfers_loop(self)))
             tasks.append(self._spawn("alerts", lambda: extras_ui.alerts_loop(self)))
             tasks.append(self._spawn("radar", lambda: market_ui.radar_loop(self)))
             tasks.append(self._spawn("opps", lambda: opps_ui.opps_loop(self)))

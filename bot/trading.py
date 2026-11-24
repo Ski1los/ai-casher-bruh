@@ -2,8 +2,9 @@
 
 Безопасность прежде всего:
   * ключи берутся ТОЛЬКО из переменных окружения (Render → Environment), в чат и в код не попадают;
-  * ключу нужны только права на спотовую торговлю, БЕЗ права на вывод: даже если ключ утечёт,
-    деньги нельзя вывести с биржи;
+  * для торговли ключу нужны только права на спотовую торговлю. Право вывода нужно только для 🔁 переводов
+    между своими биржами (bot/transfers.py) — их включает главный владелец, и тогда ключ должен быть привязан
+    к IP, а вывод — разрешён только на адреса из адресной книги биржи;
   * по умолчанию включён ТЕСТОВЫЙ режим: всё считается по реальным стаканам и реальному балансу,
     но ордера на биржу не отправляются. Реальный режим включается отдельно кнопкой;
   * лимиты: максимум на сделку, максимум сделок в сутки, лимит дневного убытка автоторговли;
@@ -291,6 +292,7 @@ class TradingState:
     log: list[dict] = field(default_factory=list)
     history: list[list[float]] = field(default_factory=list)  # [[время, стоимость портфеля $], ...]
     scalp: dict = field(default_factory=dict)  # режим $5 (bot/scalper.py): включён ли, позиция, итоги
+    transfers: dict = field(default_factory=dict)  # 🔁 переводы между биржами (bot/transfers.py)
 
 
 @dataclass
@@ -425,7 +427,11 @@ class Trader:
                 out.append(f"ключ {title} перестанет работать через {max(days, 0):.0f} дн. "
                            f"Создай новый и замени в Render (как в /keys)")
             if info.get("withdraw"):
-                out.append(f"у ключа {title} включено право вывода: создай ключ без Withdraw")
+                if not self.transfers_allowed:
+                    out.append(f"у ключа {title} включено право вывода, а переводы выключены: разреши их в /transfer "
+                               f"или создай ключ без Withdraw")
+                elif info.get("ip_bound") is False:
+                    out.append(f"у ключа {title} вывод без привязки к IP — опасно: привяжи IP сервера (/transfer help)")
         return out
 
     def _ex(self, name: str):
@@ -436,6 +442,31 @@ class Trader:
         if self.key_status.get(name, "ok") != "ok":
             raise TradeError(f"ключ {self.scanner.display_name(name)} не работает: {self.key_status[name]}")
         return self.scanner.exchanges[name]
+
+    @property
+    def transfers_allowed(self) -> bool:
+        """Главный владелец разрешил 🔁 переводы между биржами (тогда право вывода у ключа — по делу)."""
+        return bool((self.state.transfers or {}).get("allowed"))
+
+    def coin_wall(self, name: str, coin: str) -> str | None:
+        """Анализ перед покупкой: биржа закрыла вывод монеты (блокировка вроде Terra, делистинг, техработы сетей)?
+        Купить такую монету можно, а вывести — нет, и часто это первый признак проблем. None = препятствий не видно
+        (или биржа не сообщила статус: без ключа ccxt его не знает)."""
+        if coin in STABLES:
+            return None
+        try:
+            cur = self.scanner.currency(name, coin)
+        except Exception:  # статус монеты неизвестен — не мешаем торговле, решают остальные проверки
+            return None
+        if not isinstance(cur, dict) or not cur:
+            return None
+        nets = [n for n in (cur.get("networks") or {}).values() if isinstance(n, dict)]
+        shut_all = bool(nets) and all(n.get("withdraw") is False for n in nets)
+        if cur.get("active") is False or cur.get("withdraw") is False or shut_all:
+            where = getattr(self.scanner, "display_name", str)(name)
+            dep = " и ввод" if cur.get("deposit") is False else ""
+            return f"{where} закрыла вывод{dep} {coin} (блокировка/техработы/делистинг) — купить можно, вывести нельзя"
+        return None
 
     def resolve_exchange(self, raw: str) -> str:
         raw = raw.strip().lower()
@@ -756,6 +787,11 @@ class Trader:
             cost = parse_amount(amount_spec, min(available, self.settings.max_trade_usd))
             self._check_funds(name, cost, available, quote, warnings)
             self._check_limits(cost, True, source)
+            wall = self.coin_wall(name, coin)
+            if wall:
+                if source == "ai":
+                    raise TradeError(f"анализ перед покупкой: {wall}")
+                warnings.append(f"⛔ {wall}")
             spent, coins = simulate_buy(book.get("asks") or [], cost, fee)
             if coins <= 0:
                 raise TradeError("стакан пустой")
@@ -805,6 +841,11 @@ class Trader:
             cost = parse_amount(amount_spec, min(available, self.settings.max_trade_usd))
             self._check_funds(name, cost, available, quote, warnings)
             self._check_limits(cost, True, source)
+            wall = self.coin_wall(name, coin)
+            if wall:
+                if source == "ai":
+                    raise TradeError(f"анализ перед покупкой: {wall}")
+                warnings.append(f"⛔ {wall}")
             amount = cost / price
             if best_ask and price >= best_ask:
                 warnings.append(f"цена выше лучшей продажи {best_ask:.8g}: исполнится сразу как рыночный")
@@ -1020,6 +1061,9 @@ class Trader:
             except Exception:
                 log.exception("on_panic")
         self.state.auto = False
+        if isinstance(self.state.transfers, dict) and self.state.transfers.get("allowed"):
+            self.state.transfers["allowed"] = False  # 🔁 переводы тоже стоп; снова разрешает только владелец
+            self.state.transfers["auto"] = False
         scalp_pos = bool(self.state.scalp.get("positions") or self.state.scalp.get("pos"))
         if self.state.scalp:
             self.state.scalp["on"] = False
