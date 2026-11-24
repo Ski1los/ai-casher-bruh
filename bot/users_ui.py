@@ -38,6 +38,8 @@ def export(b: ArbitrageBot) -> dict:
     out = {"users": dict(b.users), "invites": dict(b.invites)}
     if getattr(b, "muted", None):  # 🔕 кто выключил уведомления — пишем, только если такие есть
         out["muted"] = sorted(b.muted)
+    if getattr(b, "quiet", None):  # 🌙 у кого тихие часы
+        out["quiet"] = sorted(b.quiet)
     return out
 
 
@@ -52,6 +54,8 @@ def restore(b: ArbitrageBot, raw) -> None:
     b.invites = {k: float(v) for k, v in invites.items() if isinstance(v, (int, float)) and v > now}
     muted = raw.get("muted") if isinstance(raw.get("muted"), list) else []
     b.muted = {int(u) for u in muted if str(u).lstrip("-").isdigit()}
+    quiet = raw.get("quiet") if isinstance(raw.get("quiet"), list) else []
+    b.quiet = {int(u) for u in quiet if str(u).lstrip("-").isdigit()}
     if b.owner_id is not None:  # бот с владельцем: добавленные снова получают доступ (открытый бот не трогаем)
         for uid in b.users:
             b.allowed_ids.add(int(uid))
@@ -87,6 +91,7 @@ def remove_user(b: ArbitrageBot, uid: int) -> bool:
             subs.remove(uid)
         getattr(b, "radar_chats", set()).discard(uid)
         getattr(b, "muted", set()).discard(uid)
+        getattr(b, "quiet", set()).discard(uid)
     return True
 
 

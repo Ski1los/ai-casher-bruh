@@ -557,6 +557,23 @@ async def main():
         hist.append([now - i * 900, round(v, 4)])
         v /= 1 + rnd.gauss(0.0004, 0.004)
     b.trader.state.history = hist[::-1] + [[now, p["total_usd"]]]
+    from bot import feed  # 📡 лента и 🧠 штурман на ненастоящих данных — чтобы видеть дизайн
+    for ago_min, text in [
+        (400, "🐋 Кит 7xKX…gAsU купил MOODENG на 2.1 SOL — копирую на демо"),
+        (310, "♾ 🔁 перезапустил «пульс рынка GMGN/Axiom» (завис)"),
+        (240, "⚙️ Треугольник USDT → ETH → BTC → USDT: +0.034 USDT (тест)"),
+        (150, "🧪 Демо мемкоинов: продал PNUT +18.4% по тейку"),
+        (95, "⚠️ Ключ BingX без белого списка IP — истечёт через 9 дней"),
+        (40, "🤖 Автопилот: купил SOL на $5 (Откат), продажа по +0.9% стоит на бирже"),
+        (12, "🧠 Консилиум 3 ИИ: «ждать» — включать деньги рано (12 ч)"),
+        (3, "🎓 Benjamin Cowen: падение — BTC упирается в снижение ликвидности"),
+    ]:
+        feed.add(b, text, at=now - ago_min * 60)
+    b._brief = {"text": "Сейчас: бот учится на демо — 18 сделок автопилота, в среднем +0.6% за сделку.\n"
+                        "Риск: ключ BingX без белого списка IP истечёт через 9 дней.\n"
+                        "Шаг: привяжи IP к ключу BingX, остальное работает само — /doctor",
+                "at": now - 240, "model": "deepseek-v4-flash (предпросмотр)", "error": None}
+    b.ai.client.endpoints = b.ai.client.endpoints or [object()]  # предпросмотр: «ИИ подключён»
     app = web.Application()
     b.webapp.setup(app)
     app.add_subapp("/fake", fm.make_app())

@@ -88,6 +88,7 @@ const ICON = {
   brain: svg('<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 3 3V4zM15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-3 3V4z"/>', 'style="color:var(--accent2)"'),
   pilot: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 12l4-3M12 7v1M7 12h1M16 12h1"/>', 'style="color:var(--accent2)"'),
   fire: svg('<path d="M4 17l5-5 4 4 7-7M14 9h6v6"/>', 'style="color:var(--green)"'),
+  feed: svg('<path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.5"/>', 'style="color:#2dd4bf"'),
   ghost: svg('<path d="M5 20V11a7 7 0 0 1 14 0v9l-2.5-2-2.3 2-2.2-2-2.2 2-2.3-2z"/><circle cx="9.5" cy="11" r="1"/><circle cx="14.5" cy="11" r="1"/>', 'style="color:#ab9ff2"'),
 };
 const ARR = `<span class="arr">${ICON.arrow}</span>`;
@@ -124,8 +125,7 @@ function popup(title, message, okText) {
 }
 
 function applyTheme() {
-  const scheme = (tg && tg.colorScheme) || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
-  document.documentElement.dataset.theme = scheme;
+  document.documentElement.dataset.theme = "dark"; // 🌌 v41: космос всегда тёмный
   const bg = css("--bg");
   try {
     tg.setHeaderColor(bg); tg.setBackgroundColor(bg);
@@ -138,26 +138,59 @@ function applyTheme() {
 // API
 // ---------------------------------------------------------------------------
 
-async function api(path, body, { timeout = 30000 } = {}) {
+// ⚡ ETag: если на сервере ничего не изменилось, он отвечает 304 без данных — меньше трафика, батареи и перерисовок.
+const etags = new Map();
+const NET = { online: true, fails: 0 };
+function setOnline(on) {
+  if (NET.online === on) return;
+  NET.online = on;
+  const el = document.getElementById("offline");
+  if (el) el.classList.toggle("hidden", on);
+}
+async function api(path, body, { timeout = 30000, retry = body === undefined ? 1 : 0 } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
+  const headers = { "Content-Type": "application/json", "X-Telegram-Init-Data": (tg && tg.initData) || "" };
+  const cached = body === undefined ? etags.get(path) : null;
+  if (cached) headers["If-None-Match"] = cached.tag;
   try {
     const r = await fetch(path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: { "Content-Type": "application/json", "X-Telegram-Init-Data": (tg && tg.initData) || "" },
+      method: body === undefined ? "GET" : "POST", headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
     });
+    setOnline(true); NET.fails = 0;
+    if (r.status === 304 && cached) return Object.assign(cached.data, { __same: true });
     let data = null;
     try { data = await r.json(); } catch { /* не JSON */ }
     if (!r.ok) throw new Error((data && data.error) || `Ошибка сервера ${r.status}`);
+    const tag = r.headers.get("ETag");
+    if (tag && body === undefined && data && typeof data === "object" && !Array.isArray(data)) etags.set(path, { tag, data });
+    if (data && typeof data === "object") delete data.__same;
     return data;
   } catch (e) {
     if (e.name === "AbortError") throw new Error("Сервер долго не отвечает. Попробуй ещё раз");
-    if (e instanceof TypeError) throw new Error("Нет связи с сервером");
+    if (e instanceof TypeError) {
+      NET.fails += 1;
+      if (NET.fails >= 2) setOnline(false);
+      if (retry > 0) { await new Promise((ok) => setTimeout(ok, 1200)); return api(path, body, { timeout, retry: retry - 1 }); }
+      throw new Error("Нет связи с сервером");
+    }
     throw e;
   } finally { clearTimeout(timer); }
 }
+
+// 🐞 ошибки JavaScript — в лог сервера (не больше 5 за сессию), чтобы чинить то, что видят люди
+let errSent = 0;
+function reportError(msg, src, line) {
+  if (errSent >= 5 || !msg) return;
+  errSent += 1;
+  api("/api/clientlog", { msg: String(msg).slice(0, 300), src: String(src || "").slice(-80), line }).catch(() => {});
+}
+window.addEventListener("error", (e) => reportError(e.message, e.filename, e.lineno));
+window.addEventListener("unhandledrejection", (e) => reportError("promise: " + ((e.reason && e.reason.message) || e.reason)));
+window.addEventListener("online", () => setOnline(true));
+window.addEventListener("offline", () => setOnline(false));
 
 // ---------------------------------------------------------------------------
 // Тосты и шторка
@@ -434,7 +467,7 @@ const S = {
   sigTab: store.get("sigTab", "tri"),
   m: Object.assign({ ex: null, symbol: "BTC/USDT", tf: "15m", side: "buy", type: "market", amount: "", price: "" }, store.get("m", {})),
   market: null, portfolio: store.get("portfolio", null), orders: null, demo: null, phantom: store.get("phantom", null),
-  chat: [], symbols: {}, scanning: false, sigs: {},
+  chat: [], symbols: {}, scanning: false, sigs: {}, brief: store.get("brief", null),
 };
 const owner = () => !!(S.ov && S.ov.user && S.ov.user.owner);
 const tr = () => (S.ov && S.ov.trading) || {};
@@ -449,7 +482,9 @@ function renderHeader() {
   pill.className = "pill " + (t.live ? "live" : "test");
   pill.textContent = t.live ? "LIVE" : "ТЕСТ";
   const sc = S.ov && S.ov.scan;
-  $("#sub").textContent = S.ov ? (t.auto ? "⚙️ автоторговля включена" : sc ? `скан ${ago(sc.finished_at)}` : "готов к работе") : "загрузка…";
+  const a = S.ov && S.ov.auto;
+  const sub = S.ov ? (a && a.on ? `автомат на орбите · ${a.engines_on}/${a.engines.length}` : t.auto ? "⚙️ автоторговля включена" : sc ? `скан ${ago(sc.finished_at)}` : "готов к работе") : "загрузка…";
+  $("#sub").innerHTML = (a && a.on ? '<i class="live-dot"></i>' : "") + esc(sub);
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +543,162 @@ function signalMini(s, kind) {
     <div class="r"><div class="b num ${cls(p)}">${pct(p, 3)}</div><div class="s">${s.filled ? "по стакану" : "по тикеру"}</div></div></div>`;
 }
 
+// ---------------------------------------------------------------------------
+// 🌌 v41: центр управления автоматом, лента событий, здоровье, штурман-ИИ
+// ---------------------------------------------------------------------------
+
+const FEED_KIND = {
+  trade: ["💹", "Сделки"], meme: ["🐋", "Мемкоины"], auto: ["♾", "Автомат"], warn: ["⚠️", "Проблемы"], info: ["•", "Прочее"],
+};
+const LEVEL = { ok: "здоров", warn: "есть замечания", bad: "нужна помощь" };
+
+function ringSvg(score, level) {
+  const r = 36, c = +(2 * Math.PI * r).toFixed(1), off = +(c * (1 - Math.max(0, Math.min(100, score)) / 100)).toFixed(1);
+  const stroke = level === "ok" ? "url(#ccg)" : level === "warn" ? "var(--yellow)" : "var(--red)";
+  return `<svg viewBox="0 0 84 84" aria-hidden="true"><defs><linearGradient id="ccg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset=".55" stop-color="#6366f1"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs>
+    <circle cx="42" cy="42" r="${r}" class="ring-bg"/><circle cx="42" cy="42" r="${r}" class="ring-fg" stroke="${stroke}" stroke-dasharray="${c}" stroke-dashoffset="${off}" style="--c:${c}"/></svg>`;
+}
+
+function feedRow(x) {
+  return `<div class="tl-item k-${esc(x.kind)}"><div class="tl-text">${esc(x.text)}</div><div class="tl-time">${ago(x.at)}</div></div>`;
+}
+
+function cmdCenter() {
+  const a = S.ov.auto;
+  if (!a) return "";
+  const h = a.health || { score: 0, level: "bad", issues: [] };
+  const day = a.day || {};
+  const intro = !S.ccShown;
+  S.ccShown = true;
+  const feed = (S.ov.feed || []).slice(0, 4);
+  return `<div class="card cc ${a.on ? "on" : "off"} ${intro ? "intro" : ""}">
+    <div class="cc-head">
+      <div class="ring-box ${esc(h.level)}" data-act="health" title="Здоровье бота">${ringSvg(h.score, h.level)}${a.on ? '<div class="ring-orbit"></div>' : ""}<div class="ring-val"><b class="num">${h.score}</b><span>здоровье</span></div></div>
+      <div class="grow">
+        <div class="cc-title">${a.on ? '<i class="live-dot"></i>' : ""}♾ Автомат</div>
+        <div class="cc-state">${a.on ? "работает сам 24/7" : "выключен — бот ждёт команд"} · ${esc(LEVEL[h.level] || "")}</div>
+        <div class="cc-meta">${a.engines_on}/${a.engines.length} движков · 🛡 починок ${a.restarts}${a.last_tick ? " · проверка " + ago(a.last_tick) : ""}${a.real ? " · 🔓 деньги разрешены" : ""}</div>
+      </div>
+      ${owner() ? `<label class="switch" title="Полный автомат"><input type="checkbox" data-act="cc-auto" ${a.on ? "checked" : ""}><span></span></label>` : ""}
+    </div>
+    <div class="kpis">${["trade", "meme", "auto", "warn"].map((k) => `<div class="kpi k-${k}" data-act="feed" data-v="${k}"><b class="num">${day[k] || 0}</b><span>${FEED_KIND[k][1]}</span></div>`).join("")}</div>
+    <div class="eng">${a.engines.map((e) => `<span class="eng-chip ${e.on ? "on" : ""}" title="${esc(e.note || "")}"><i></i>${esc(e.title)}</span>`).join("")}</div>
+    ${(h.issues || []).slice(0, 2).map((i) => `<div class="cc-issue" data-act="health"><b>${esc(i.title)}</b><span>${esc(i.hint)}</span></div>`).join("")}
+    ${a.next ? `<div class="cc-next">👉 ${esc(a.next)}</div>` : ""}
+    <div class="cc-sub"><span>📡 ЛЕНТА · ЧТО БОТ СДЕЛАЛ САМ</span><a class="link" data-act="feed">Вся →</a></div>
+    ${feed.length ? `<div class="tl">${feed.map(feedRow).join("")}</div>` : `<div class="tiny muted" style="white-space:normal">Пока тихо. Сюда попадёт каждая сделка, находка кита, решение ИИ и починка сторожа.</div>`}
+  </div>`;
+}
+
+const AI_ICON = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 2.5c.4 3.9 2.6 6.1 6.5 6.5-3.9.4-6.1 2.6-6.5 6.5-.4-3.9-2.6-6.1-6.5-6.5 3.9-.4 6.1-2.6 6.5-6.5z"/><path d="M18 13c.25 2.2 1.3 3.25 3.5 3.5-2.2.25-3.25 1.3-3.5 3.5-.25-2.2-1.3-3.25-3.5-3.5 2.2-.25 3.25-1.3 3.5-3.5z" opacity=".8"/></svg>`;
+const AI_QUICK = [
+  ["Почему нет сделок?", "Почему сейчас мало сделок и что включить, чтобы их было больше без лишнего риска?"],
+  ["Где плюс?", "Что по данным Профит-центра реально зарабатывает и куда направить деньги?"],
+  ["Оцени риск", "Оцени мой текущий риск: режим, лимиты, позиции. Что опасно прямо сейчас?"],
+];
+
+function briefHtml(text) {
+  return esc(text).replace(/^(Сейчас:|Риск:|Шаг:|\d\))/gm, "<b>$1</b>");
+}
+
+function aiCard() {
+  const b = S.brief;
+  const thinking = S.briefLoading;
+  let body;
+  if (!S.ov.ai) body = `<div class="ai-text muted">ИИ не подключён. Бесплатный ключ Groq или OpenRouter за 2 минуты — и штурман будет объяснять, что происходит и что делать.</div><button class="btn sm primary" style="margin-top:10px" data-act="ai">Как подключить</button>`;
+  else if (b && b.text) body = `<div class="ai-text">${briefHtml(b.text)}</div><div class="tiny dim" style="margin-top:6px">${ago(b.at)}${b.model ? " · " + esc(b.model) : ""}${b.error ? " · ⚠️ обновить не удалось" : ""}</div>`;
+  else if (b && b.error && !thinking) body = `<div class="ai-text muted">⚠️ ${esc(b.error)}</div>`;
+  else body = `<div class="ai-text muted">Штурман изучает данные бота…</div>`;
+  return `<div class="card ai-card">
+    <div class="row between"><div class="row"><div class="ai-orb ${thinking ? "think" : ""}">${AI_ICON}</div><div><div class="b">Штурман-ИИ</div><div class="tiny muted">сейчас · риск · шаг — по данным бота</div></div></div>
+      ${S.ov.ai ? `<button class="icon-btn" data-act="brief-refresh" aria-label="Обновить">${thinking ? '<div class="spin dark" style="width:16px;height:16px"></div>' : ICON.refresh}</button>` : ""}</div>
+    ${body}
+    ${S.ov.ai ? `<div class="chips" style="margin-top:10px">${AI_QUICK.map(([t, q]) => `<span class="chip" data-act="ai-ask" data-v="${esc(q)}">${esc(t)}</span>`).join("")}</div>` : ""}
+  </div>`;
+}
+
+async function loadBrief(force = false) {
+  if (!S.ov || !S.ov.ai || S.briefLoading) return;
+  if (!force && S.brief && Date.now() / 1000 - S.brief.at < 600) return;
+  S.briefLoading = true; renderAiCard();
+  try { S.brief = await api("/api/brief" + (force ? "?force=1" : ""), undefined, { timeout: 70000 }); store.set("brief", S.brief); }
+  catch (e) { if (force) fail(e); }
+  finally { S.briefLoading = false; renderAiCard(); }
+}
+function renderAiCard() {
+  const el = $("#aiCardBox");
+  if (el && S.ov) el.innerHTML = aiCard();
+}
+
+function healthSheet() {
+  const h = (S.ov.auto || {}).health;
+  if (!h) return;
+  const rows = h.items.map((i) => {
+    const p = Math.round(i.ok * 100), c = p >= 100 ? "" : p >= 50 ? "w" : "b";
+    return `<div class="hl-item"><div class="doc-ic ${p >= 100 ? "ok" : p >= 50 ? "warn" : "bad"}">${p >= 100 ? "✓" : "!"}</div><div class="grow"><div class="row between"><div class="t small b">${esc(i.title)}</div><div class="tiny muted num">${i.weight} очк.</div></div>${i.hint ? `<div class="tiny muted" style="white-space:normal;margin-top:2px">${esc(i.hint)}</div>` : ""}<div class="hl-bar ${c}"><i style="width:${p}%"></i></div></div></div>`;
+  }).join("");
+  Sheet.open("Здоровье бота", `
+    <div class="cc-head" style="margin-bottom:12px"><div class="ring-box ${esc(h.level)}">${ringSvg(h.score, h.level)}<div class="ring-val"><b class="num">${h.score}</b><span>из 100</span></div></div>
+    <div class="grow small muted" style="white-space:normal">Бот сам проверяет себя каждые 5 минут: циклы, ключи бирж, ИИ, память, вторую копию. Что можно починить — чинит сам (сторож), остальное подскажет здесь.</div></div>
+    <div class="list">${rows}</div>
+    <button class="btn block primary" style="margin-top:12px" data-act="doctor">🩺 Полная проверка всего (до 40 с)</button>`, { full: true });
+}
+
+function feedSheet(kind = null) {
+  S.feedKind = kind;
+  const me = S.ov.me || {};
+  const settings = me.member ? `<div class="list" style="margin-bottom:10px">
+      <div class="item"><div class="grow"><div class="t">🔔 Уведомления в Telegram</div><div class="s" style="white-space:normal">сделки, мемкоины, проблемы, отчёт — тебе в чат</div></div><label class="switch"><input type="checkbox" data-act="nt-on" ${me.muted ? "" : "checked"}><span></span></label></div>
+      <div class="item"><div class="grow"><div class="t">🌙 Тихие часы ${String(me.quiet_hours[0]).padStart(2, "0")}:00–${String(me.quiet_hours[1]).padStart(2, "0")}:00</div><div class="s" style="white-space:normal">ночью обычное копится до утра, деньги и проблемы — сразу</div></div><label class="switch"><input type="checkbox" data-act="nt-quiet" ${me.quiet ? "checked" : ""}><span></span></label></div>
+    </div>` : "";
+  const chips = [[null, "Все"], ...Object.entries(FEED_KIND).map(([k, v]) => [k, v[0] + " " + v[1]])]
+    .map(([k, t]) => `<span class="chip ${k === kind ? "on" : ""}" data-act="feed-kind" data-v="${k || ""}">${esc(t)}${S.feed && S.feed.counts && k ? ` <span class="dim">${S.feed.counts[k] || 0}</span>` : ""}</span>`).join("");
+  Sheet.open("📡 Лента событий", `${settings}<div class="chips">${chips}</div><div id="feedBox" style="margin-top:8px">${feedBody()}</div>
+    <div class="tiny dim" style="margin-top:12px;white-space:normal">Всё, что бот сделал сам, — даже если уведомления выключены. Хранятся последние 60 событий, переживают перезапуск. В Telegram: /feed</div>`, { full: true });
+  loadFeed();
+}
+function feedBody() {
+  const f = S.feed;
+  if (!f) return `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto"></div></div>`;
+  if (!f.items.length) return `<div class="card empty"><div class="e">🛰</div>Здесь пока пусто</div>`;
+  let day = "", out = "";
+  const today = new Date().toDateString(), yest = new Date(Date.now() - 86400000).toDateString();
+  for (const x of f.items) {
+    const d = new Date(x.at * 1000).toDateString();
+    if (d !== day) { day = d; out += `<div class="tl-day">${d === today ? "Сегодня" : d === yest ? "Вчера" : dm(x.at)}</div>`; }
+    out += `<div class="tl-item k-${esc(x.kind)}"><div class="tl-text">${esc(x.text)}</div><div class="tl-time">${hm(x.at)}</div></div>`;
+  }
+  return `<div class="tl">${out}</div>`;
+}
+async function loadFeed() {
+  try {
+    S.feed = await api("/api/feed" + (S.feedKind ? "?kind=" + S.feedKind : ""));
+    const box = $("#feedBox"); if (box) box.innerHTML = feedBody();
+  } catch (e) { fail(e); }
+}
+async function notifySet(body, el) {
+  try { const r = await api("/api/notify", body); S.ov.me = r.me; haptic.ok(); toast(body.quiet != null ? (body.quiet ? "🌙 Тихие часы включены" : "Тихие часы выключены") : (body.muted ? "🔕 Уведомления выключены" : "🔔 Уведомления включены")); }
+  catch (e) { el.checked = !el.checked; fail(e); }
+}
+async function ccAuto(el) {
+  try { await api("/api/profit", { auto: el.checked }); haptic.ok(); toast(el.checked ? "♾ Автомат включён: бот работает сам" : "Автомат выключен"); refresh(); }
+  catch (e) { el.checked = !el.checked; fail(e); }
+}
+
+const TOOL_BG = {
+  scan: ["linear-gradient(135deg,#22d3ee,#0ea5e9)", "rgba(14,165,233,.45)"], buy: ["linear-gradient(135deg,#34d399,#059669)", "rgba(5,150,105,.45)"],
+  sell: ["linear-gradient(135deg,#fb7185,#be123c)", "rgba(190,18,60,.45)"], doctor: ["linear-gradient(135deg,#4ade80,#16a34a)", "rgba(22,163,74,.4)"],
+  bell: ["linear-gradient(135deg,#fbbf24,#d97706)", "rgba(217,119,6,.45)"], price: ["linear-gradient(135deg,#60a5fa,#4f46e5)", "rgba(79,70,229,.45)"],
+  ghost: ["linear-gradient(135deg,#c4b5fd,#7c3aed)", "rgba(124,58,237,.45)"], dex: ["linear-gradient(135deg,#fb923c,#ea580c)", "rgba(234,88,12,.45)"],
+  fire: ["linear-gradient(135deg,#f472b6,#db2777)", "rgba(219,39,119,.45)"], brain: ["linear-gradient(135deg,#e879f9,#9333ea)", "rgba(147,51,234,.5)"],
+  pilot: ["linear-gradient(135deg,#818cf8,#4338ca)", "rgba(67,56,202,.5)"], feed: ["linear-gradient(135deg,#2dd4bf,#0f766e)", "rgba(15,118,110,.45)"],
+};
+const white = (svgStr) => svgStr.replace(/style="color:[^"]*"/, 'style="color:#fff"');
+function tool(act, icon, label, extra = "") {
+  const [bg, glow] = TOOL_BG[icon] || [];
+  return `<div class="tool ${act === "stop" ? "danger" : ""}" data-act="${act}" ${extra}><div class="ic" style="${bg ? `--tg:${bg};--tglow:${glow}` : ""}">${white(ICON[icon] || ICON.scan)}</div>${label}</div>`;
+}
+
 function renderHome() {
   const v = $("#v-home");
   if (!S.ov) { v.innerHTML = skeleton(); return; }
@@ -518,56 +709,58 @@ function renderHome() {
   if (t.paused_reason && !t.auto) banners.push(`<div class="banner red">⏸ Автоторговля остановлена: ${esc(t.paused_reason)}</div>`);
   if (!t.keys || !t.keys.length) banners.push(`<div class="banner info press" data-act="keys"><div>🔑</div><div><b>Подключи биржу, чтобы торговать.</b><br><span class="muted">5 минут с телефона. Без ключа работают сигналы и демо.</span> <span class="link">Как подключить →</span></div></div>`);
   else if (t.keys.some((k) => k.status !== "ok" && k.status !== "unchecked")) banners.push(`<div class="banner red">⚠️ Ключ не работает: ${t.keys.filter((k) => k.status !== "ok" && k.status !== "unchecked").map((k) => `${esc(k.name)} — ${esc(k.status)}`).join("; ")}</div>`);
-
   for (const w of t.key_warnings || []) banners.push(`<div class="banner red press" data-act="doctor"><div>🔑</div><div>${esc(w)} <span class="link">Проверить →</span></div></div>`);
 
   const sc = S.ov.scan;
   const sigs = sc ? [...sc.tri.map((s) => [s, "tri"]), ...sc.cross.map((s) => [s, "cross"])]
     .sort((a, b) => (b[0].depth_pct ?? b[0].net) - (a[0].depth_pct ?? a[0].net)).slice(0, 3) : [];
   const log = (t.log || []).slice(0, 5);
+  const intro = !S.homeShown;
+  S.homeShown = true;
 
-  v.innerHTML = `
-    ${banners.length ? `<div class="col" style="gap:8px;margin-bottom:10px">${banners.join("")}</div>` : ""}
-    ${hero.html}
-    <div class="grid2" style="margin-top:10px">
-      <div class="stat"><div class="k">Сегодня</div><div class="v num ${cls(t.today ? t.today.pnl : 0)}">${money(t.today ? t.today.pnl : 0, { sign: true })}</div><div class="small muted">сделок: ${t.today ? t.today.trades : 0} из ${t.limits ? t.limits.daily_trades : "—"}</div></div>
-      <div class="stat"><div class="row between"><div class="k">Треугольники</div>
-        <label class="switch"><input type="checkbox" data-act="auto" ${t.auto ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
-        <div class="small muted" style="margin-top:6px">${t.auto ? (t.live ? "🔴 реально" : "🧪 в тесте") + `, от ${t.limits.auto_min}%` : "треугольники, по стакану"}</div></div>
+  v.innerHTML = `<div class="home-grid ${intro ? "intro-in" : ""}">
+    ${banners.length ? `<div class="banners col o1" style="gap:8px">${banners.join("")}</div>` : ""}
+    <div class="col-a">
+      <div class="o2">${cmdCenter()}</div>
+      <div class="o3">${hero.html}</div>
+      <div class="grid2 o4">
+        <div class="stat"><div class="k">Сегодня</div><div class="v num ${cls(t.today ? t.today.pnl : 0)}">${money(t.today ? t.today.pnl : 0, { sign: true })}</div><div class="small muted">сделок: ${t.today ? t.today.trades : 0} из ${t.limits ? t.limits.daily_trades : "—"}</div></div>
+        <div class="stat"><div class="row between"><div class="k">Треугольники</div>
+          <label class="switch"><input type="checkbox" data-act="auto" ${t.auto ? "checked" : ""} ${owner() ? "" : "disabled"}><span></span></label></div>
+          <div class="small muted" style="margin-top:6px">${t.auto ? (t.live ? "🔴 реально" : "🧪 в тесте") + `, от ${t.limits.auto_min}%` : "треугольники, по стакану"}</div></div>
+      </div>
+      <div class="o6 col" style="gap:10px">
+        <div class="section-title" style="margin:6px 4px 0">Движки заработка</div>
+        <div class="banner info press" data-act="opps"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
+        ${[profitCard(), scalpCard(), copyCard(), mentorsCard(), autoCard()].join("").replace(/margin-top:10px/g, "margin-top:0")}
+      </div>
     </div>
-    <div class="banner info press" data-act="opps" style="margin-top:10px"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
-    ${profitCard()}
-    ${scalpCard()}
-    ${copyCard()}
-    ${mentorsCard()}
-    ${autoCard()}
-    <div class="grid4" style="margin-top:10px">
-      <div class="action" data-act="scan"><div class="ic">${ICON.scan}</div>Скан</div>
-      <div class="action" data-act="quick" data-side="buy"><div class="ic" style="background:var(--green-bg)">${ICON.buy}</div>Купить</div>
-      <div class="action" data-act="quick" data-side="sell"><div class="ic" style="background:var(--red-bg)">${ICON.sell}</div>Продать</div>
-      <div class="action danger" data-act="stop"><div class="ic">${ICON.stop}</div>Стоп</div>
+    <div class="col-b">
+      <div class="o5" id="aiCardBox">${aiCard()}</div>
+      <div class="o5 col" style="gap:10px">
+        <div class="section-title" style="margin:6px 4px 0">Инструменты</div>
+        <div class="tools">
+          ${tool("scan", "scan", "Скан")}${tool("quick", "buy", "Купить", 'data-side="buy"')}${tool("quick", "sell", "Продать", 'data-side="sell"')}${tool("stop", "stop", "Стоп")}
+          ${tool("feed", "feed", "Лента")}${tool("doctor", "doctor", "Проверка")}${tool("alerts", "bell", "Алерты")}${tool("prices", "price", "Цены")}
+          ${tool("dex", "dex", "Мемкоины", 'data-v="hot"')}${tool("dex", "fire", "DEX-поиск", 'data-v="search"')}${tool("pilot", "pilot", "Автопилот")}${tool("phantom", "ghost", "Phantom")}
+        </div>
+      </div>
+      <div class="o7 lazy">
+        <div class="section-title">Лучшие сигналы <a data-act="goto" data-tab="signals">Все</a></div>
+        ${sigs.length ? `<div class="list">${sigs.map(([s, k]) => signalMini(s, k)).join("")}</div>` : `<div class="card empty"><div class="e">🔭</div>${sc ? "Прибыльных связок сейчас нет. Это нормально: рынок эффективен." : "Сканирований ещё не было"}<div style="margin-top:12px"><button class="btn primary sm" data-act="scan">Сканировать</button></div></div>`}
+      </div>
+      <div class="o8 lazy">
+        <div class="section-title">Последние сделки <a data-act="goto" data-tab="wallet">Журнал</a></div>
+        ${log.length ? `<div class="list">${log.map(tradeRow).join("")}</div>` : `<div class="card empty"><div class="e">🧾</div>Сделок через бота пока не было</div>`}
+      </div>
     </div>
-    <div class="grid4" style="margin-top:8px">
-      <div class="action" data-act="doctor"><div class="ic">${ICON.doctor}</div>Проверка</div>
-      <div class="action" data-act="alerts"><div class="ic">${ICON.bell}</div>Алерты</div>
-      <div class="action" data-act="prices"><div class="ic">${ICON.price}</div>Цены</div>
-      <div class="action" data-act="phantom"><div class="ic">${ICON.ghost}</div>Phantom</div>
-    </div>
-    <div class="grid4" style="margin-top:8px">
-      <div class="action" data-act="dex" data-v="hot"><div class="ic">${ICON.dex}</div>Мемкоины</div>
-      <div class="action" data-act="dex" data-v="search"><div class="ic">${ICON.fire}</div>DEX-поиск</div>
-      <div class="action" data-act="ai"><div class="ic">${ICON.brain}</div>ИИ</div>
-      <div class="action" data-act="pilot"><div class="ic">${ICON.pilot}</div>Автопилот</div>
-    </div>
-    <div class="section-title">Лучшие сигналы <a data-act="goto" data-tab="signals">Все</a></div>
-    ${sigs.length ? `<div class="list">${sigs.map(([s, k]) => signalMini(s, k)).join("")}</div>` : `<div class="card empty"><div class="e">🔍</div>${sc ? "Прибыльных связок сейчас нет. Это нормально: рынок эффективен." : "Сканирований ещё не было"}<div style="margin-top:12px"><button class="btn primary sm" data-act="scan">Сканировать</button></div></div>`}
-    <div class="section-title">Последние сделки <a data-act="goto" data-tab="wallet">Журнал</a></div>
-    ${log.length ? `<div class="list">${log.map(tradeRow).join("")}</div>` : `<div class="card empty"><div class="e">🧾</div>Сделок через бота пока не было</div>`}
-    <div class="center tiny dim" style="margin:18px 0 4px">Сканов: ${S.ov.stats.scans} · работает ${S.ov.stats.uptime_h} ч · биржи: ${S.ov.exchanges.map((e) => esc(e.name)).join(", ")}</div>`;
+    <div class="center tiny dim o9" style="grid-column:1/-1;margin:8px 0 4px">Сканов: ${S.ov.stats.scans} · работает ${S.ov.stats.uptime_h} ч · биржи: ${S.ov.exchanges.map((e) => esc(e.name)).join(", ")}</div>
+  </div>`;
   if (hero.points.length >= 2) {
-    const color = hero.base != null && hero.points[hero.points.length - 1][1] < hero.base ? css("--red") : "#7c5cff";
+    const color = hero.base != null && hero.points[hero.points.length - 1][1] < hero.base ? css("--red") : "#a78bfa";
     Charts.mount($("#heroChart"), new LineChart($("#heroChart"), [{ points: hero.points, color }], { fmt: (x) => money(x), baseline: hero.base, axis: false, padBottom: 6 }));
   }
+  loadBrief();
 }
 
 function tradeRow(r) {
@@ -2031,7 +2224,8 @@ function openLink(url) {
 const RENDER = { home: renderHome, market: renderMarket, signals: renderSignals, demo: renderDemo, wallet: renderWallet };
 let lastSig = {};
 function renderActive(force = false) {
-  const sig = JSON.stringify([S.ov && S.ov.trading, S.ov && S.ov.scan && S.ov.scan.finished_at, S.ov && S.ov.demo, S.portfolio && S.portfolio.updated_at, S.ov && S.ov.settings, S.scanning]);
+  const sig = JSON.stringify([S.ov && S.ov.trading, S.ov && S.ov.scan && S.ov.scan.finished_at, S.ov && S.ov.demo, S.portfolio && S.portfolio.updated_at, S.ov && S.ov.settings, S.scanning,
+    S.ov && S.ov.auto, S.ov && S.ov.feed, S.brief && S.brief.at, S.ov && S.ov.profit, S.ov && S.ov.copy]);
   if (!force && lastSig[S.tab] === sig) return;
   if (!force && document.querySelector(".tip:not(.hidden)")) return; // не мешаем, пока палец на графике
   if (!force && S.tab === "market") {        // рынок обновляется своим таймером
@@ -2062,6 +2256,7 @@ async function refresh() {
   refreshing = true;
   try {
     const ov = await api("/api/overview");
+    if (ov.__same && S.ov) return;  // ⚡ ничего не изменилось — ничего не перерисовываем
     S.ov = ov; store.set("ov", ov);
     renderHeader(); renderActive();
   } catch (e) {
@@ -2077,6 +2272,11 @@ document.addEventListener("click", async (e) => {
   const act = el.dataset.act, d = el.dataset;
   switch (act) {
     case "close-sheet": Sheet.close(); break;
+    case "feed": haptic.tap(); if (S.ov) feedSheet(d.v || null); break;
+    case "feed-kind": haptic.sel(); S.feedKind = d.v || null; $$('[data-act="feed-kind"]').forEach((c) => c.classList.toggle("on", (c.dataset.v || null) === S.feedKind)); S.feed = null; $("#feedBox").innerHTML = feedBody(); loadFeed(); break;
+    case "health": haptic.tap(); if (S.ov) healthSheet(); break;
+    case "brief-refresh": haptic.tap(); loadBrief(true); break;
+    case "ai-ask": haptic.tap(); aiSheet(); if (S.ov && S.ov.ai) askAI(d.v); break;
     case "settings": haptic.tap(); if (S.ov) settingsSheet(); break;
     case "ai": haptic.tap(); if (S.ov) aiSheet(); break;
     case "ai-q": askAI(d.v); break;
@@ -2212,6 +2412,9 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "opps-notify") toggleOppsNotify(el);
   else if (el.dataset.act === "scalp-coins") toggleScalpCoins(el);
   else if (el.dataset.act === "live") toggleLive(el);
+  else if (el.dataset.act === "cc-auto") ccAuto(el);
+  else if (el.dataset.act === "nt-on") notifySet({ muted: !el.checked }, el);
+  else if (el.dataset.act === "nt-quiet") notifySet({ quiet: el.checked }, el);
   else if (el.dataset.act === "copy-on") copyAction({ on: el.checked }, el.checked ? "Копитрейдинг включён" : "Выключен");
   else if (el.dataset.act === "copy-sig") copyAction({ signals: el.checked });
   else if (el.dataset.act === "mn-on") mentorsAction({ on: el.checked }, el.checked ? "Учусь" : "Выключено");
