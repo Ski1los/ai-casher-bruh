@@ -245,6 +245,35 @@ class Transfers:
                 ips.pop(old, None)
         return ip, new
 
+    def _env(self) -> dict:
+        return os.environ if self.env is None else self.env
+
+    def env_typos(self, name: str) -> list[str]:
+        """Имена (НЕ значения) переменных, похожих на ключ вывода, но с другим именем — частая опечатка."""
+        up = name.upper()
+        want = {WD_ENV[0].format(up=up), WD_ENV[1].format(up=up), f"{up}_API_KEY", f"{up}_API_SECRET",
+                f"{up}_HOSTNAME"}
+        out = []
+        for k, v in self._env().items():
+            ku = k.upper()
+            if k in want or not str(v).strip() or not ku.startswith(up[:4]):
+                continue
+            if re.search(r"WITHDR|WD|VYVOD|ВЫВОД|OUT|KEY|SECRET", ku):
+                out.append(k)
+        return sorted(out)[:5]
+
+    def env_names_incomplete(self, name: str) -> bool:
+        up = name.upper()
+        env = self._env()
+        have = [bool((env.get(n.format(up=up)) or "").strip()) for n in WD_ENV]
+        return any(have) and not all(have)
+
+    def ip_bound_keys(self) -> list[str]:
+        """Какие ключи привязаны к IP (их сломает смена IP сервера): отдельные ключи вывода и торговые с IP."""
+        out = [f"ключ вывода {self.name(n)}" for n in self.wd_creds]
+        out += [f"торговый ключ {self.name(n)}" for n, i in self.b.trader.key_info.items() if (i or {}).get("ip_bound")]
+        return out
+
     def ip_list(self) -> list[str]:
         ips = self.st["ips"]
         return sorted(ips, key=lambda k: ips[k][0])
@@ -531,6 +560,16 @@ class Transfers:
             return [{"src": "", "dst": "", "title": "Ключи", "ready": False,
                      "checks": [("bad", f"нужны ключи обеих бирж (сейчас: {have}) — /keys")], "test_amount": None}]
         ip, _ = await self.check_ip()
+        t = self.b.trader
+        known = dict(t.key_info)
+        try:  # свежие права торговых ключей: ты мог только что включить Withdraw
+            await asyncio.wait_for(t.inspect_keys(), 20)
+        except Exception as e:
+            log.info("Права ключей перед проверкой вывода: %s", e)
+        for n, old in known.items():  # не удалось перечитать — оставляем то, что знали
+            if (t.key_info.get(n) or {}).get("error") and old and not old.get("error"):
+                t.key_info[n] = old
+        self._wd_info.clear()
         out = []
         for src, dst in ((names[0], names[1]), (names[1], names[0])):
             out.append(await self._selftest_one(coin, src, dst, ip))
@@ -547,27 +586,43 @@ class Transfers:
             if t.key_status.get(n, "ok") != "ok":
                 add("bad", f"торговый ключ {self.name(n)} не работает: {t.key_status[n]}")
                 return res
-        # 1. ключ вывода и IP
+        # 1. ключ вывода и IP (если с ним проблема — остальное всё равно проверяем: адрес, сеть, деньги)
+        key_ok = True
         if src in self.wd_creds:
             info = await self.wd_info(src, force=True)
             if info.get("error"):
+                key_ok = False
                 add("bad", f"ключ вывода {self.name(src)}: " + (
                     f"биржа не принимает IP сервера {ip or ''} — добавь его в белый список ключа (/transfer ip)"
                     if info.get("ip_error") else info["error"]))
-                return res
-            if not info.get("withdraw"):
+            elif not info.get("withdraw"):
+                key_ok = False
                 add("bad", f"у ключа вывода {self.name(src)} нет права Withdraw")
-                return res
-            add("ok", f"ключ вывода {self.name(src)} принят биржей с IP {ip or 'сервера'}, право Withdraw есть")
+            else:
+                add("ok", f"ключ вывода {self.name(src)} принят биржей с IP {ip or 'сервера'}, право Withdraw есть")
         else:
-            perm = self.can_withdraw_key(src)
-            if not perm:
-                add("bad", f"у {self.name(src)} нет ключа с правом вывода — добавь {WD_ENV[0].format(up=src.upper())} и "
-                           f"{WD_ENV[1].format(up=src.upper())} в Render (/transfer help)")
-                return res
-            add("ok" if t.key_info.get(src, {}).get("ip_bound") else "warn",
-                f"вывод идёт торговым ключом {self.name(src)}" + ("" if t.key_info.get(src, {}).get("ip_bound") else
-                                                                  " без привязки к IP — лучше отдельный ключ вывода"))
+            info = t.key_info.get(src) or {}
+            if info.get("withdraw"):
+                if info.get("ip_bound"):
+                    add("ok", f"вывод идёт торговым ключом {self.name(src)} (право Withdraw есть, ключ привязан к IP)")
+                    add("info", f"торговый ключ {self.name(src)} привязан к IP: если Render сменит адрес, остановится и "
+                                "торговля на этой бирже. Бот проверяет IP раз в час и сразу напишет «🌐 новый IP»")
+                else:
+                    add("warn", f"вывод идёт торговым ключом {self.name(src)} без привязки к IP — "
+                                "биржа может не дать вывод; лучше отдельный ключ вывода (/transfer help)")
+            else:
+                key_ok = False
+                seen = "не проверены (" + info["error"] + ")" if info.get("error") else (
+                    "проверены только что — Withdraw нет" if info else "неизвестны")
+                add("bad", f"у {self.name(src)} нет ключа с правом вывода. Права торгового ключа: {seen}. "
+                           f"Нужны переменные {WD_ENV[0].format(up=src.upper())} и {WD_ENV[1].format(up=src.upper())} "
+                           f"в Render (/transfer help)")
+                typos = self.env_typos(src)
+                if typos:
+                    add("warn", "в Render есть похожие переменные: " + ", ".join(typos)
+                                + " — проверь имя: оно должно совпадать буква в букву")
+                elif src not in self.wd_creds and self.env_names_incomplete(src):
+                    add("warn", f"в Render заполнена только одна из двух переменных ключа вывода {self.name(src)}")
         # 2. статус монеты и сеть
         try:
             cs, cd = await asyncio.gather(self.currency(src, coin, True), self.currency(dst, coin, True))
@@ -603,12 +658,15 @@ class Transfers:
         add("ok", f"адрес пополнения {self.name(dst)} ({net}): {addr}" + (f", мемо {tag}" if tag else ""))
         # 4. адресная книга источника
         try:
-            book = await self.address_book(src, coin)
+            book = await self.address_book(src, coin) if key_ok else None
         except Exception as e:
             book = None
             add("warn", f"адресную книгу {self.name(src)} прочитать не смог ({human_error(e)}) — проверь вручную")
         else:
-            if book is None:
+            if book is None and not key_ok:
+                add("info", f"когда ключ вывода заработает, добавь адрес выше в адресную книгу {self.name(src)} "
+                            "(раздел адресов вывода)")
+            elif book is None:
                 add("info", f"{self.name(src)} не показывает адресную книгу через API: если там включён белый список "
                             f"адресов, убедись, что адрес выше добавлен")
         if book is not None:
@@ -628,7 +686,7 @@ class Transfers:
             add("warn", f"баланс {coin} не прочитан: {human_error(e)}")
             free = None
         try:
-            wa = await self.withdrawable(src, coin)
+            wa = await self.withdrawable(src, coin) if key_ok else None
         except Exception as e:
             wa = None
             log.info("Сумма к выводу %s: %s", src, e)
@@ -995,12 +1053,16 @@ async def transfers_loop(b: ArbitrageBot) -> None:
                 tf = b.transfers
                 had = bool(tf.st["ips"])
                 ip, new = await tf.check_ip(now)
-                if ip and new and had and tf.wd_creds:
+                bound = tf.ip_bound_keys()
+                if ip and new and had and bound:
                     tf._wd_info.clear()
+                    trading = any(k.startswith("торговый") for k in bound)
                     await b.notify(
                         f"🌐 <b>Сервер вышел в интернет с нового IP</b> <code>{html.escape(ip)}</code>.\n"
-                        "Добавь его в белый список ключа вывода, иначе переводы не пройдут (торговля работает). "
-                        "Весь список для копирования: /transfer ip", urgent=True)
+                        f"Добавь его в белый список: {html.escape(', '.join(bound))}. "
+                        + ("Иначе биржа отклонит запросы этого ключа — и торговлю тоже. " if trading else
+                           "Иначе переводы не пройдут (торговля работает). ")
+                        + "Весь список для копирования: /transfer ip", urgent=True)
                 b.save_trading()
             if b.transfers.st["items"]:
                 for text in await b.transfers.track():

@@ -585,7 +585,9 @@ def test_selftest_withdraw_key_ip_rejected(bot_env, monkeypatch):
     wd_setup(b, monkeypatch, ip_ok=False)
     rows = asyncio.run(b.transfers.selftest())
     back = next(r for r in rows if r["src"] == "bingx")
-    assert not back["ready"] and "74.220.51.10" in back["checks"][-1][1]
+    assert not back["ready"] and any("74.220.51.10" in t for st, t in back["checks"] if st == "bad")
+    # остальное всё равно проверено: видно адрес Bybit, который нужно добавить в адресную книгу BingX
+    assert back["address"] == BYBIT_ADDR and any("когда ключ вывода заработает" in t for _, t in back["checks"])
 
 
 def test_selftest_command_button_and_api(bot_env, monkeypatch):
@@ -627,3 +629,43 @@ def test_suggested_test_transfer_passes_analysis(bot_env, monkeypatch):
     r = asyncio.run(b.transfers.selftest())[0]
     plan = asyncio.run(b.transfers.analyze("USDT", r["test_amount"], r["src"], r["dst"]))
     assert plan.ok, plan.checks
+
+
+def test_selftest_refreshes_key_rights_and_spots_env_typos(bot_env, monkeypatch):
+    b, _ = bot_env
+    selftest_setup(b, monkeypatch)
+    bingx = b.scanner.exchanges["bingx"]
+    b.trader.key_info["bingx"] = {"spot_trade": True, "ip_bound": False}  # старое знание: Withdraw нет
+
+    async def bingx_perms(params=None):  # а на бирже его только что включили
+        return {"code": 0, "data": {"permissions": [1, 2, 5], "ipAddresses": ["74.220.51.10"]}}
+
+    async def bybit_perms(params=None):
+        raise Exception("timeout")  # перечитать не вышло — прежние права Bybit должны остаться
+
+    bingx.accountV1PrivateGetAccountApiPermissions = bingx_perms
+    b.scanner.exchanges["bybit"].privateGetV5UserQueryApi = bybit_perms
+    rows = asyncio.run(b.transfers.selftest())
+    assert all(r["ready"] for r in rows), [r["checks"] for r in rows]
+    assert b.trader.key_info["bybit"].get("withdraw") is True
+    assert any("привязан к IP" in t for _, t in rows[1]["checks"])
+
+    # ключа нет совсем, а в Render переменная с опечаткой — подскажем имя (без значения)
+    b.trader.key_info["bingx"] = {"spot_trade": True, "ip_bound": False}
+
+    async def no_withdraw(params=None):
+        return {"code": 0, "data": {"permissions": [1, 2], "ipAddresses": []}}
+
+    bingx.accountV1PrivateGetAccountApiPermissions = no_withdraw
+    b.transfers.env = {"BINGX_WITHDRAWAL_API_KEY": "secret-value", "BINGX_WITHDRAW_API_SECRET": "s2"}
+    back = asyncio.run(b.transfers.selftest())[1]
+    text = " ".join(t for _, t in back["checks"])
+    assert not back["ready"] and "Withdraw нет" in text and "BINGX_WITHDRAWAL_API_KEY" in text
+    assert "secret-value" not in text and back["address"] == BYBIT_ADDR
+
+
+def test_ip_bound_trading_key_counts_for_ip_alerts(bot_env):
+    b, _ = bot_env
+    setup(b)
+    b.trader.key_info["bingx"]["ip_bound"] = False
+    assert b.transfers.ip_bound_keys() == ["торговый ключ Bybit"]
