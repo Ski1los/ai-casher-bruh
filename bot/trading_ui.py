@@ -837,6 +837,7 @@ def register(b: ArbitrageBot) -> None:
             text = await b.trader.panic()
             await after_change()
             await b._answer(message, text)
+            await tell_others(message.from_user.id if message.from_user else None, "⛔ <b>Остановил всё</b> (/stop).")
 
     @dp.message(Command("trades"))
     async def cmd_trades(message: Message) -> None:
@@ -844,6 +845,11 @@ def register(b: ArbitrageBot) -> None:
             await b._answer(message, b.trader.log_text())
 
     # --- кнопки -------------------------------------------------------------
+
+    async def tell_others(uid: int | None, text: str) -> None:
+        """🔔 Действия с настоящими деньгами — видны и остальным пользователям бота: «👤 Вася: …»."""
+        if uid is not None:
+            await b.notify(text, actor=uid, skip_actor=True)
 
     async def drop_buttons(cb: CallbackQuery) -> None:
         if cb.message is not None:
@@ -870,6 +876,8 @@ def register(b: ArbitrageBot) -> None:
             return
         await after_change()
         await b._send(chat_of(cb), b.trader.record_text(rec))
+        if getattr(rec, "live", False):
+            await tell_others(cb.from_user.id, b.trader.record_text(rec))
 
     @dp.callback_query(F.data.startswith("ordno:"))
     async def cb_order_no(cb: CallbackQuery) -> None:
@@ -895,6 +903,8 @@ def register(b: ArbitrageBot) -> None:
             return
         await after_change()
         await b._send(chat_of(cb), res.text(b.scanner.display_name))
+        if getattr(res, "live", False) and getattr(res, "executed", False):
+            await tell_others(cb.from_user.id, res.text(b.scanner.display_name))
 
     @dp.callback_query(F.data.startswith("cx:"))
     async def cb_cancel(cb: CallbackQuery) -> None:
@@ -925,6 +935,8 @@ def register(b: ArbitrageBot) -> None:
         await b._send(chat_of(cb), "🔴 <b>Реальный режим включён.</b> Ордера после подтверждения уходят на биржу.\n"
                                    + "".join(f"⚠️ {html.escape(w)}\n" for w in warnings)
                                    + "Вернуть тест: /test · остановить всё: /stop")
+        await tell_others(cb.from_user.id, "🔴 <b>Реальный режим включён</b>: ордера уходят на биржу. "
+                                           "Вернуть тест: /test · остановить всё: /stop")
 
     @dp.callback_query(F.data.startswith("tr:"))
     async def cb_panel(cb: CallbackQuery) -> None:

@@ -35,7 +35,10 @@ def new_users_state() -> dict:
 
 
 def export(b: ArbitrageBot) -> dict:
-    return {"users": dict(b.users), "invites": dict(b.invites)}
+    out = {"users": dict(b.users), "invites": dict(b.invites)}
+    if getattr(b, "muted", None):  # 🔕 кто выключил уведомления — пишем, только если такие есть
+        out["muted"] = sorted(b.muted)
+    return out
 
 
 def restore(b: ArbitrageBot, raw) -> None:
@@ -47,6 +50,8 @@ def restore(b: ArbitrageBot, raw) -> None:
     now = time.time()
     invites = raw.get("invites") if isinstance(raw.get("invites"), dict) else {}
     b.invites = {k: float(v) for k, v in invites.items() if isinstance(v, (int, float)) and v > now}
+    muted = raw.get("muted") if isinstance(raw.get("muted"), list) else []
+    b.muted = {int(u) for u in muted if str(u).lstrip("-").isdigit()}
     if b.owner_id is not None:  # бот с владельцем: добавленные снова получают доступ (открытый бот не трогаем)
         for uid in b.users:
             b.allowed_ids.add(int(uid))
@@ -81,6 +86,7 @@ def remove_user(b: ArbitrageBot, uid: int) -> bool:
         if subs is not None and uid in getattr(subs, "chats", ()):
             subs.remove(uid)
         getattr(b, "radar_chats", set()).discard(uid)
+        getattr(b, "muted", set()).discard(uid)
     return True
 
 
@@ -105,16 +111,25 @@ def accept_invite(b: ArbitrageBot, code: str, uid: int, name: str, now: float | 
 
 
 def users_text(b: ArbitrageBot) -> str:
-    lines = ["👥 <b>Пользователи бота</b>",
-             f"👑 Владелец: <code>{b.owner_id}</code> (ты)"]
     env_extra = sorted(b.env_ids - {b.owner_id} - {int(u) for u in b.users})
+    muted = getattr(b, "muted", set())
+
+    def bell(uid: int) -> str:
+        return "🔕" if uid in muted else "🔔"
+
+    lines = ["👥 <b>Пользователи бота</b>",
+             f"👑 {bell(b.owner_id)} Владелец: <code>{b.owner_id}</code> (ты)"]
     for uid in env_extra:
-        lines.append(f"• <code>{uid}</code> — из ALLOWED_USER_IDS в Render (убрать можно только там)")
+        lines.append(f"• {bell(uid)} <code>{uid}</code> — из ALLOWED_USER_IDS в Render (убрать можно только там)")
     for uid, u in sorted(b.users.items(), key=lambda kv: kv[1].get("added", 0)):
         when = time.strftime("%d.%m.%Y", time.gmtime(u.get("added") or 0))
-        lines.append(f"• <b>{html.escape(u.get('name') or uid)}</b> (<code>{uid}</code>), с {when}, {u.get('how', '')}")
+        lines.append(f"• {bell(int(uid))} <b>{html.escape(u.get('name') or uid)}</b> (<code>{uid}</code>), с {when}, "
+                     f"{u.get('how', '')}")
     if not env_extra and not b.users:
         lines.append("Кроме тебя — никого.")
+    if env_extra or b.users:
+        lines.append("🔔 Уведомления бота (сделки, мемкоины, проблемы, отчёт) получают все с 🔔. Кнопки ниже "
+                     "включают/выключают их любому; каждый может и сам: /notify")
     active = [v for v in b.invites.values() if v > time.time()]
     if active:
         lines.append(f"🔗 Действующих ссылок-приглашений: {len(active)}")
@@ -126,8 +141,15 @@ def users_text(b: ArbitrageBot) -> str:
 
 def users_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text="➕ Пригласить (одноразовая ссылка)", callback_data="us:inv")]]
+    muted = getattr(b, "muted", set())
+    for uid in sorted(b.env_ids - {b.owner_id} - {int(u) for u in b.users}):
+        rows.append([InlineKeyboardButton(text=f"{'🔕' if uid in muted else '🔔'} Уведомления {uid}",
+                                          callback_data=f"us:nt:{uid}")])
     for uid, u in sorted(b.users.items(), key=lambda kv: kv[1].get("added", 0)):
-        rows.append([InlineKeyboardButton(text=f"➖ Убрать {(u.get('name') or uid)[:30]}", callback_data=f"us:ask:{uid}")])
+        name = (u.get("name") or uid)[:24]
+        rows.append([InlineKeyboardButton(text=f"{'🔕' if int(uid) in muted else '🔔'} {name}",
+                                          callback_data=f"us:nt:{uid}"),
+                     InlineKeyboardButton(text="➖ Убрать", callback_data=f"us:ask:{uid}")])
     if b.invites:
         rows.append([InlineKeyboardButton(text="🚫 Отменить все ссылки", callback_data="us:clear")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -174,7 +196,9 @@ async def handle_start_invite(b: ArbitrageBot, message: Message, args: str | Non
     log.info("Новый пользователь %s (%s) по приглашению", user.id, name)
     await message.answer("✅ <b>Добро пожаловать!</b> Владелец пригласил тебя в бота, доступ полный.\n"
                          "Бот работает с настоящими деньгами владельца — будь внимателен с кнопками торговли "
-                         "(перед реальной сделкой бот всегда переспрашивает).")
+                         "(перед реальной сделкой бот всегда переспрашивает).\n"
+                         "🔔 Уведомления бота (сделки, мемкоины, проблемы, ежедневный отчёт) теперь приходят и тебе. "
+                         "Выключить: /notify")
     if b.owner_id is not None:
         try:
             await b._send(b.owner_id, f"👥 <b>{html.escape(name)}</b> (<code>{user.id}</code>) присоединился по "
@@ -221,7 +245,17 @@ def register(b: ArbitrageBot) -> None:
                           "как у тебя, включая настоящую торговлю. Я сообщу, когда он присоединится.\n"
                           "Передумал — /users → «🚫 Отменить все ссылки».")
             return
-        if action == "clear":
+        if action == "nt" and len(parts) > 2 and parts[2].lstrip("-").isdigit():
+            from .notify import everyone, set_muted
+            uid = int(parts[2])
+            if uid in everyone(b):
+                now_muted = uid not in getattr(b, "muted", set())
+                set_muted(b, uid, now_muted)
+                await _save(b)
+                await cb.answer("Уведомления выключены" if now_muted else "Уведомления включены")
+            else:
+                await cb.answer("Его уже нет в списке")
+        elif action == "clear":
             b.invites.clear()
             await _save(b)
             await cb.answer("Все ссылки отменены")

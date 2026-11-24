@@ -29,7 +29,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import (autonomy, copy_ui, council, extras_ui, meme_ui, market_ui, mentors_ui, opps_ui, profit_ui, pulse_ui, trading_ui,
+from . import (autonomy, copy_ui, council, extras_ui, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
+               trading_ui,
                updater, users_ui)
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
@@ -220,7 +221,7 @@ HELP_TEXT = """\
 /report — отчёт о работе сейчас (он же приходит каждый день)
 /status — последний скан и состояние бота
 /settings — настройки, /set — изменить, например <code>/set tri_min 0.1</code>
-/myid — твой Telegram ID · /users — 👥 пригласить друга
+/myid — твой ID · /users — 👥 друзья · /notify — 🔔
 
 ⚠️ Прибыль не гарантирована: треугольники живут доли секунды, их забирают профессиональные боты. \
 Торгуй только деньгами, которые не жалко потерять."""
@@ -458,6 +459,7 @@ class ArbitrageBot:
         self.env_ids = set(allowed_ids)  # из ALLOWED_USER_IDS — постоянные, убрать можно только в Render
         self.users: dict[str, dict] = {}  # 👥 приглашённые ссылкой (bot/users_ui.py): полный доступ, как у владельца
         self.invites: dict[str, float] = {}  # одноразовые коды приглашений → до какого времени действуют
+        self.muted: set[int] = set()  # 🔕 кто выключил себе уведомления (/notify)
         self.scanner = Scanner(settings)
         self.subscribers = SubscriberStore()
         self.sent_alerts: dict[tuple[str, str, str], tuple[float, float]] = {}
@@ -578,7 +580,7 @@ class ArbitrageBot:
         out = {"values": dict(self._changed), "fees": dict(self._fee_changes),
                "alerts": self.alerts.export(), "phantom": self.phantom.address,
                "radar": sorted(self.radar_chats), "opps_notify": self.opps_notify}
-        if self.users or self.invites:  # 👥 приглашённые: пишем, только если они есть
+        if self.users or self.invites or self.muted:  # 👥 приглашённые: пишем, только если они есть
             out["people"] = users_ui.export(self)
         return out
 
@@ -709,7 +711,7 @@ class ArbitrageBot:
         else:
             text = (f"🆕 <b>Бот обновлён</b> до {html.escape(version_text())}. Настройки и история на месте.\n"
                     "Проверить, всё ли готово к торговле: /setup")
-        await self._send(self.owner_id, text, markup)
+        await self.notify(text, markup)
         await self._backup_now()  # запомнить версию, чтобы не здороваться при каждом перезапуске
 
     # --- отправка -----------------------------------------------------------
@@ -725,6 +727,11 @@ class ArbitrageBot:
                     await self.bot.send_message(chat_id, _strip_tags(part), reply_markup=kb, parse_mode=None)
             except Exception as e:
                 log.warning("Не смог отправить в чат %s: %s", chat_id, e)
+
+    async def notify(self, text: str, markup: InlineKeyboardMarkup | None = None, actor: int | None = None,
+                     skip_actor: bool = False) -> int:
+        """🔔 Уведомление всем пользователям бота (владелец, приглашённые, ALLOWED_USER_IDS), кто его не выключил."""
+        return await notify.notify(self, text, markup, actor=actor, skip_actor=skip_actor)
 
     async def _answer(self, message: Message, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
         parts = split_message(text)
@@ -1052,9 +1059,7 @@ class ArbitrageBot:
         return text, proposals_keyboard(answer.proposals)
 
     def _report_recipients(self) -> set[int]:
-        chats = set()
-        if self.owner_id:
-            chats.add(self.owner_id)
+        chats = set(notify.recipients(self))  # ежедневный отчёт — всем пользователям, кто не выключил уведомления
         if self.demo.chat_id:
             chats.add(self.demo.chat_id)
         return chats
@@ -1521,6 +1526,7 @@ class ArbitrageBot:
         pulse_ui.register(self)
         autonomy.register(self)
         users_ui.register(self)
+        notify.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1603,10 +1609,10 @@ class ArbitrageBot:
             log.exception("Ошибка автоторговли")
             return
         for res in executions:  # пропуски не шлём каждый скан: они в /why и в сводке
-            await self._send(self.owner_id, "⚙️ " + res.text(self.scanner.display_name))
+            await self.notify("⚙️ " + res.text(self.scanner.display_name))
         if executions:
             if not self.trader.state.auto and self.trader.state.paused_reason:
-                await self._send(self.owner_id, f"⏸ <b>Автоторговля остановлена</b>: {html.escape(self.trader.state.paused_reason)}.\n"
+                await self.notify(f"⏸ <b>Автоторговля остановлена</b>: {html.escape(self.trader.state.paused_reason)}.\n"
                                                 "Включить снова: /autotrade on")
             self.save_trading()
             await self._backup_now()
@@ -1624,7 +1630,7 @@ class ArbitrageBot:
             if now - self._auto_warned.get(code, 0) > AUTO_WARN_SEC:
                 self._auto_warned[code] = now
                 hint = t._auto_hint()
-                await self._send(self.owner_id, "⚠️ <b>Автоторговля включена, но торговать не может</b>\n"
+                await self.notify("⚠️ <b>Автоторговля включена, но торговать не может</b>\n"
                                                 f"{html.escape(text)}\n{hint}\nПодробно: /why · проверка: /doctor")
         else:
             self._auto_warned.clear()  # проблему исправили: если вернётся, снова предупредим
@@ -1636,7 +1642,7 @@ class ArbitrageBot:
             text = t.auto_digest()
             self._auto_reports += 1
             t.auto_stats = new_auto_stats()
-            await self._send(self.owner_id, text + "\nСводку реже/выключить: <code>/set auto_report 24</code> или 0")
+            await self.notify(text + "\nСводку реже/выключить: <code>/set auto_report 24</code> или 0")
 
     async def _send_alerts(self, result: ScanResult) -> None:
         fresh_cross = [o for o in result.opportunities if self._should_alert(o)][:MAX_IN_MESSAGE]
@@ -1719,7 +1725,7 @@ class ArbitrageBot:
         if time.time() - self._duplicate_warned < DUPLICATE_WARN_SEC:
             return
         self._duplicate_warned = time.time()
-        await self._send(self.owner_id, DUPLICATE_TEXT)
+        await self.notify(DUPLICATE_TEXT)
 
     async def _scalp_loop(self) -> None:
         """Режим $5: каждые 30 секунд следит за позицией или ищет вход."""
@@ -1739,7 +1745,7 @@ class ArbitrageBot:
         if self.scalper.on and self.owner_id is not None:
             events = await self.scalper.step()
             for text in events:
-                await self._send(self.owner_id, text)
+                await self.notify(text)
         elif self.owner_id is not None and (self.trader.working or self.autonomy.on):
             await self.scalper.learn(public=not self.trader.working)
         if events:
@@ -1799,7 +1805,7 @@ class ArbitrageBot:
             lines += [f"{html.escape(self.scanner.display_name(k))}: {html.escape(v)}" for k, v in bad.items()]
             if self.trader.state.auto:
                 lines.append("Автоторговля на этих биржах не работает, пока ключ не исправлен.")
-            await self._send(self.owner_id, "\n".join(lines))
+            await self.notify("\n".join(lines))
 
     async def _keys_watch_loop(self) -> None:
         """Раз в 12 часов перепроверяет ключи: не сломался ли, не истекает ли (Bybit), нет ли права вывода."""
@@ -1821,7 +1827,7 @@ class ArbitrageBot:
                         notes.append(w)
                 if notes and self.owner_id:
                     lines = ["🔑 <b>Ключи бирж</b>"] + [f"• {html.escape(n)}" for n in notes]
-                    await self._send(self.owner_id, "\n".join(lines + ["Подробно: /doctor"]))
+                    await self.notify("\n".join(lines + ["Подробно: /doctor"]))
             except Exception:
                 log.exception("Ошибка проверки ключей")
             await asyncio.sleep(KEYS_WATCH_SEC)
@@ -1872,13 +1878,13 @@ class ArbitrageBot:
             ok, msg = await updater.trigger(session, hook)
             log.info("Самообновление до v%s: %s", latest, msg)
             if self.owner_id:
-                await self._send(self.owner_id, (f"⬆️ Нашёл новую версию <b>v{latest}</b> (сейчас v{BOT_VERSION}). "
+                await self.notify((f"⬆️ Нашёл новую версию <b>v{latest}</b> (сейчас v{BOT_VERSION}). "
                                                  + ("Обновляюсь сам, это 3–5 минут. Сделки и настройки сохранятся."
                                                     if ok else f"Сам обновиться не смог: {html.escape(msg)}.\n\n"
                                                     + updater.MANUAL_STEPS)))
         elif not hook and updater.should_notify(latest) and self.owner_id:
             updater.UPDATE["notified"][latest] = time.time()
-            await self._send(self.owner_id, (f"⬆️ <b>Вышла новая версия бота v{latest}</b>, а работает v{BOT_VERSION}: "
+            await self.notify((f"⬆️ <b>Вышла новая версия бота v{latest}</b>, а работает v{BOT_VERSION}: "
                                              "Render сам не обновляет этот сервис.\n\n"
                                              + updater.MANUAL_STEPS + "\n\n" + updater.HOOK_STEPS))
 
@@ -1953,6 +1959,7 @@ class ArbitrageBot:
                     BotCommand(command="rug", description="🛡 Проверка токена на скам"),
                     BotCommand(command="radar", description="📡 Радар новых мемкоинов"),
                     BotCommand(command="users", description="👥 Пользователи: пригласить по ссылке"),
+                    BotCommand(command="notify", description="🔔 Уведомления: вкл/выкл себе"),
                     BotCommand(command="analysis", description="Анализ: комиссии и узкие места"),
                     BotCommand(command="fees", description="Комиссии бирж"),
                     BotCommand(command="report", description="Отчёт о работе"),
