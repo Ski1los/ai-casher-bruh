@@ -167,10 +167,10 @@ async def opps_once(b: ArbitrageBot) -> None:
     held = held_coins(b)
     danger = [p for p in new if p.kind == "delisting" and any(c in held for c in p.coins)]
     for p in danger:
-        await b._send(b.owner_id, f"🚨 <b>Bybit уберёт монету, которая у тебя есть</b>\n{promo_line(p.as_dict(), full=True)}")
+        await b.notify(f"🚨 <b>Bybit уберёт монету, которая у тебя есть</b>\n{promo_line(p.as_dict(), full=True)}")
     promos = [p for p in new if p.kind in ALERT_KINDS]
     if promos and b.opps_notify:
-        await b._send(b.owner_id, alert_text(promos))
+        await b.notify(alert_text(promos))
 
 
 async def opps_loop(b: ArbitrageBot) -> None:

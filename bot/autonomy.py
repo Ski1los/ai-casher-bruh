@@ -606,11 +606,11 @@ async def tick(b, now: float | None = None) -> None:
         st["welcomed"] = True
         st["last_digest"] = now
         st["snap"] = {e["id"]: e["n"] for e in b.profit.engines(now)}
-        await b._send(b.owner_id, a.welcome(enabled), keyboard(b))
+        await b.notify(a.welcome(enabled), keyboard(b))
     elif enabled:
         for x in enabled:
             a._fix(f"включил обратно: {x}", now)
-        await b._send(b.owner_id, "♾ Автомат включил обратно: " + ", ".join(enabled)
+        await b.notify("♾ Автомат включил обратно: " + ", ".join(enabled)
                       + ".\nЕсли выключал специально — сначала выключи автомат (/autonomy), иначе я держу обучение "
                         "включённым.")
     for route in a.council_due(now):
@@ -627,7 +627,7 @@ async def tick(b, now: float | None = None) -> None:
     if a.digest_due(now):
         text = a.digest(now)
         if text:
-            await b._send(b.owner_id, text, keyboard(b))
+            await b.notify(text, keyboard(b))
     if fixes or enabled or events:
         log.info("Автомат: %s", "; ".join(fixes + enabled + [e["text"][:60] for e in events]))
     if b.copy.changes != before:
@@ -653,7 +653,7 @@ async def ask_council(b, route: str, now: float) -> None:
     title = ROUTES[route][0]
     if a.council_block(route, now):
         a._fix(f"🧠 консилиум против денег: {title}", now)
-        await b._send(b.owner_id, f"🧠 <b>Консилиум ИИ против включения денег: {html.escape(title)}</b>\n"
+        await b.notify(f"🧠 <b>Консилиум ИИ против включения денег: {html.escape(title)}</b>\n"
                                   "Стратегия доказала плюс без денег, но большинство ИИ советует подождать. Не включаю "
                                   "12 часов, обучение без денег продолжается.\n\n" + council.render(res))
     else:

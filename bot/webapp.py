@@ -35,6 +35,7 @@ from .opportunities import PLAN_QUESTION
 from .dex import SOL_ADDRESS_RE, DexError, best_pairs, is_address
 from .doctor import doctor_dict, run_doctor
 from .memetrade import SwapError
+from .notify import ACTOR
 from .mentors import VIDEOS_PER_DAY
 from .solana import WalletError
 from .trading import STABLES, OrderPlan, TradeError, human_error
@@ -285,7 +286,11 @@ class WebApp:
                                      status=403)
         request[USER] = user
         request[OWNER] = self.b.is_owner(uid)
-        return await handler(request)
+        token = ACTOR.set(uid)  # 🔔 уведомления остальным: «👤 Вася: …» — видно, кто что сделал в приложении
+        try:
+            return await handler(request)
+        finally:
+            ACTOR.reset(token)
 
     def _wrap(self, handler):
         async def inner(request: web.Request) -> web.Response:
@@ -330,8 +335,8 @@ class WebApp:
         async def later():
             try:
                 await self.b._backup_now()
-                if notify and self.b.owner_id:
-                    await self.b._send(self.b.owner_id, notify)
+                if notify:
+                    await self.b.notify(notify)
             except Exception:
                 log.exception("Фоновое сохранение после действия в приложении")
 
@@ -1021,8 +1026,8 @@ class WebApp:
         async def later():
             try:
                 await self.b._backup_now()
-                if notify and self.b.owner_id:
-                    await self.b._send(self.b.owner_id, notify)
+                if notify:
+                    await self.b.notify(notify)
             except Exception:
                 log.exception("Фоновое сохранение после сделки")
 
@@ -1059,8 +1064,8 @@ class WebApp:
                 try:
                     report = await ct.discover(force=True)
                     self.b.save_copy()
-                    if report and self.b.owner_id:
-                        await self.b._send(self.b.owner_id, "🔎 <b>Поиск кошельков</b>\n" + "\n".join(html.escape(r) for r in report))
+                    if report:
+                        await self.b.notify("🔎 <b>Поиск кошельков</b>\n" + "\n".join(html.escape(r) for r in report))
                 except Exception as e:
                     log.info("Поиск кошельков из приложения: %s", e)
                     ct.last_error = f"поиск кошельков: {e}"
@@ -1070,8 +1075,8 @@ class WebApp:
         async def later():
             try:
                 await self.b._backup_now()
-                if notify and self.b.owner_id:
-                    await self.b._send(self.b.owner_id, notify)
+                if notify:
+                    await self.b.notify(notify)
             except Exception:
                 log.exception("Фоновое сохранение копитрейдинга")
 
@@ -1112,13 +1117,13 @@ class WebApp:
             if sc.get("find") and not mt.scout.busy:
                 from . import mentors_ui
                 task = asyncio.get_running_loop().create_task(
-                    mentors_ui.scout_find(self.b, self.b.owner_id) if self.b.owner_id else asyncio.sleep(0))
+                    mentors_ui.scout_find(self.b, request[USER]["id"]))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 done.append("Ищу трейдеров — итог придёт в чат через 1–2 минуты")
-            if sc.get("history") and not mt.scout.busy and self.b.owner_id:
+            if sc.get("history") and not mt.scout.busy:
                 from . import mentors_ui
-                task = asyncio.get_running_loop().create_task(mentors_ui.scout_history(self.b, self.b.owner_id))
+                task = asyncio.get_running_loop().create_task(mentors_ui.scout_history(self.b, request[USER]["id"]))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 done.append("Считаю историю прогнозов — рейтинг придёт в чат")
@@ -1150,10 +1155,10 @@ class WebApp:
             if "mirror" in lv:  # 🪞 повтор стримеров на демо
                 mt.live.mirror.st["on"] = bool(lv["mirror"])
             login = str(lv.get("now") or "").lower()[:25]
-            if login and login in lst["sessions"] and self.b.owner_id and not mt.live.lock.locked():
+            if login and login in lst["sessions"] and not mt.live.lock.locked():
                 from . import mentors_ui
                 lst["focus"] = login
-                task = asyncio.get_running_loop().create_task(mentors_ui.live_now(self.b, self.b.owner_id, login))
+                task = asyncio.get_running_loop().create_task(mentors_ui.live_now(self.b, request[USER]["id"], login))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 done.append("Смотрю эфир — разбор придёт в чат через минуту")
@@ -1184,7 +1189,7 @@ class WebApp:
             if text.startswith("video:"):  # ролик разбирается 30–90 с — в фоне, итог придёт в чат
                 from . import mentors_ui
                 task = asyncio.get_running_loop().create_task(
-                    mentors_ui.analyze_link(self.b, self.b.owner_id, text[6:]) if self.b.owner_id else asyncio.sleep(0))
+                    mentors_ui.analyze_link(self.b, request[USER]["id"], text[6:]))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
                 done.append("Смотрю ролик — разбор придёт в чат через 1–2 минуты")

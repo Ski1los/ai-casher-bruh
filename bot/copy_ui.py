@@ -109,7 +109,7 @@ async def send_events(b: ArbitrageBot, events: list[dict]) -> None:
             btn = ((f"💸 Купить ботом ${b.meme.st['size_usd']:g}", f"cb:mt:b:{e['mint']}") if b.meme.configured
                    else (f"🧪 Купить на демо ${b.meme.st['size_usd']:g}", f"cb:mt:db:{e['mint']}"))
             e = {**e, "buttons": [btn] + list(e.get("buttons", []))}
-        await b._send(b.owner_id, e["text"], event_markup(e))
+        await b.notify(e["text"], event_markup(e))
 
 
 async def find_now(b: ArbitrageBot, chat_id: int) -> None:
