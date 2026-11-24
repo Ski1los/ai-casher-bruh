@@ -8,6 +8,10 @@
 «👤 Вася: 🔴 Реальный режим включён…».
 
 Только владельцу по-прежнему идут: резервные копии (это файлы-хранилище) и «кто-то присоединился по ссылке».
+
+v41: 🌙 «тихие часы» (23:00–08:00 по времени отчётов, REPORT_UTC_OFFSET) — по желанию каждого: ночью обычные
+события копятся и утром приходят одним сообщением «Пока ты спал». Важное приходит сразу всегда: настоящие деньги,
+предупреждения, проблемы. Каждое уведомление пишется и в 📡 ленту событий (bot/feed.py).
 """
 
 from __future__ import annotations
@@ -15,11 +19,14 @@ from __future__ import annotations
 import contextvars
 import html
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from aiogram import F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+from . import feed
 
 if TYPE_CHECKING:
     from .telegram_bot import ArbitrageBot
@@ -28,6 +35,26 @@ log = logging.getLogger(__name__)
 
 # кто сейчас действует (приложение ставит это на время запроса) — чтобы остальные видели, кто что сделал
 ACTOR: contextvars.ContextVar[int | None] = contextvars.ContextVar("notify_actor", default=None)
+
+QUIET = (23, 8)        # 🌙 тихие часы: с 23:00 до 08:00
+HELD_MAX = 40          # сколько событий копим за ночь на человека
+URGENT_MARKS = ("🔴", "🚨", "⛔", "❌", "⚠️", "⏸", "🔑", "📥", "💵")
+URGENT_WORDS = ("реальн", "настоящ", "live", "phantom", "стоп-лосс", "две копии", "убыт")
+
+
+def is_urgent(text: str) -> bool:
+    """Важное (деньги, проблемы) приходит сразу даже в тихие часы."""
+    head = (text or "").lstrip()
+    low = head.lower()
+    return head.startswith(URGENT_MARKS) or any(m in head[:80] for m in ("⚠️", "🚨", "⛔")) \
+        or any(w in low for w in URGENT_WORDS)
+
+
+def quiet_now(b: ArbitrageBot, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    hour = time.gmtime(now + float(getattr(b.settings, "report_utc_offset", 0) or 0) * 3600).tm_hour
+    start, end = QUIET
+    return hour >= start or hour < end
 
 
 def everyone(b: ArbitrageBot) -> list[int]:
@@ -56,23 +83,74 @@ def name_of(b: ArbitrageBot, uid: int) -> str:
     return u.get("name") or str(uid)
 
 
+def _held(b: ArbitrageBot) -> dict[int, list[tuple[float, str]]]:
+    if not isinstance(getattr(b, "_held", None), dict):
+        b._held = {}
+    return b._held
+
+
 async def notify(b: ArbitrageBot, text: str, markup: InlineKeyboardMarkup | None = None,
-                 actor: int | None = None, skip_actor: bool = False) -> int:
-    """Отправить уведомление всем, кто его не выключил. Возвращает, скольким отправлено."""
+                 actor: int | None = None, skip_actor: bool = False, urgent: bool | None = None) -> int:
+    """Отправить уведомление всем, кто его не выключил. Возвращает, скольким отправлено (сразу)."""
     actor = ACTOR.get() if actor is None else actor
+    people = everyone(b)
+    who = name_of(b, actor) if actor is not None and actor in people and len(people) > 1 else None
+    try:
+        feed.add(b, f"{text} · 👤 {who}" if who else text, kind=feed.kind_of(text))
+    except Exception as e:  # лента — не повод потерять уведомление
+        log.debug("feed: %s", e)
+    hold = not (is_urgent(text) if urgent is None else urgent) and quiet_now(b)
+    quiet = getattr(b, "quiet", set())
     sent = 0
     for uid in recipients(b):
         if skip_actor and uid == actor:
             continue
         body = text
-        if actor is not None and uid != actor and actor in everyone(b):
+        if actor is not None and uid != actor and actor in people:
             body = f"👤 <b>{html.escape(name_of(b, actor))}</b>: {text}"
+        if hold and uid in quiet:
+            box = _held(b).setdefault(uid, [])
+            box.append((time.time(), feed.plain(body)))
+            del box[:-HELD_MAX]
+            continue
         try:
             await b._send(uid, body, markup)
             sent += 1
         except Exception as e:  # пользователь удалил чат с ботом и т.п. — остальным всё равно отправляем
             log.info("Уведомление для %s не ушло: %s", uid, e)
     return sent
+
+
+async def flush_quiet(b: ArbitrageBot, now: float | None = None, force_uid: int | None = None) -> int:
+    """Утром (или когда человек выключил тихие часы) — всё отложенное одним сообщением."""
+    held = _held(b)
+    if not held or (force_uid is None and quiet_now(b, now)):
+        return 0
+    n = 0
+    for uid in [force_uid] if force_uid is not None else list(held):
+        box = held.pop(uid, None)
+        if not box:
+            continue
+        lines = [f"🌙 <b>Пока ты спал</b> — {len(box)} событ{'ие' if len(box) == 1 else 'ий'}:"]
+        for _at, t in box[-20:]:
+            lines.append(f"• {html.escape(t[:200])}")
+        if len(box) > 20:
+            lines.insert(1, "(показываю последние 20, всё — в ленте: /feed)")
+        try:
+            await b._send(uid, "\n".join(lines)[:4000])
+            n += 1
+        except Exception as e:
+            log.info("Утренняя сводка для %s не ушла: %s", uid, e)
+    return n
+
+
+def set_quiet(b: ArbitrageBot, uid: int, on: bool) -> None:
+    if not isinstance(getattr(b, "quiet", None), set):
+        b.quiet = set()
+    if on:
+        b.quiet.add(uid)
+    else:
+        b.quiet.discard(uid)
 
 
 def set_muted(b: ArbitrageBot, uid: int, muted: bool) -> None:
@@ -93,14 +171,22 @@ def status_text(b: ArbitrageBot, uid: int) -> str:
              f"Сейчас получают: {who}."]
     if uid == b.owner_id and not on:
         lines.append("⚠️ Ты главный владелец: без уведомлений не узнаешь о проблемах с ключами и сделках.")
+    q = uid in getattr(b, "quiet", set())
+    lines.append(f"🌙 Тихие часы {QUIET[0]:02d}:00–{QUIET[1]:02d}:00: " + (
+        "включены — ночью обычные события копятся и утром приходят одним сообщением. Деньги и проблемы — сразу."
+        if q else "выключены (уведомления приходят и ночью)."))
+    lines.append("📡 Всё, что бот сделал сам, — в ленте: /feed")
     return "\n".join(lines)
 
 
 def keyboard(b: ArbitrageBot, uid: int) -> InlineKeyboardMarkup:
     on = uid not in getattr(b, "muted", set())
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔕 Выключить мне" if on else "🔔 Включить мне",
-                             callback_data="nt:off" if on else "nt:on")]])
+    q = uid in getattr(b, "quiet", set())
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔕 Выключить мне" if on else "🔔 Включить мне",
+                              callback_data="nt:off" if on else "nt:on")],
+        [InlineKeyboardButton(text="☀️ Тихие часы: выключить" if q else "🌙 Тихие часы ночью",
+                              callback_data="nt:q0" if q else "nt:q1")]])
 
 
 def register(b: ArbitrageBot) -> None:
@@ -119,6 +205,9 @@ def register(b: ArbitrageBot) -> None:
         if arg in ("on", "вкл", "off", "выкл"):
             set_muted(b, uid, arg in ("off", "выкл"))
             await b.save_extras()
+        elif arg in ("quiet", "night", "ночь", "тихо"):
+            set_quiet(b, uid, uid not in getattr(b, "quiet", set()))
+            await b.save_extras()
         await message.answer(status_text(b, uid), reply_markup=keyboard(b, uid))
 
     @dp.callback_query(F.data.startswith("nt:"))
@@ -127,9 +216,16 @@ def register(b: ArbitrageBot) -> None:
         if not b._allowed_user(uid) or uid not in everyone(b):
             await cb.answer("Нет доступа", show_alert=True)
             return
-        set_muted(b, uid, cb.data == "nt:off")
-        await b.save_extras()
-        await cb.answer("Уведомления выключены" if cb.data == "nt:off" else "Уведомления включены")
+        if cb.data in ("nt:q0", "nt:q1"):
+            set_quiet(b, uid, cb.data == "nt:q1")
+            await b.save_extras()
+            await cb.answer("🌙 Тихие часы включены" if cb.data == "nt:q1" else "Тихие часы выключены")
+            if cb.data == "nt:q0":
+                await flush_quiet(b, force_uid=uid)
+        else:
+            set_muted(b, uid, cb.data == "nt:off")
+            await b.save_extras()
+            await cb.answer("Уведомления выключены" if cb.data == "nt:off" else "Уведомления включены")
         if cb.message:
             try:
                 await cb.message.edit_text(status_text(b, uid), reply_markup=keyboard(b, uid))
@@ -137,4 +233,5 @@ def register(b: ArbitrageBot) -> None:
                 log.debug("notify edit: %s", e)
 
 
-__all__ = ["ACTOR", "notify", "recipients", "everyone", "set_muted", "status_text", "keyboard", "register", "name_of"]
+__all__ = ["ACTOR", "notify", "recipients", "everyone", "set_muted", "set_quiet", "flush_quiet", "quiet_now",
+           "is_urgent", "status_text", "keyboard", "register", "name_of"]

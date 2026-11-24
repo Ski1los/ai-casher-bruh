@@ -56,7 +56,7 @@ def new_state() -> dict:
     return {"on": True, "real": False, "every_h": 6, "welcomed": False, "pilot_hold": False,
             "last_digest": 0.0, "last_sent": 0.0, "last_tick": 0.0, "last_mem": 0.0,
             "snap": {}, "fixes": [], "restarts": 0, "promoted": {}, "blocked": {}, "manual": [],
-            "council": {}}
+            "council": {}, "feed": []}
 
 
 def _money(x: float) -> str:
@@ -89,6 +89,8 @@ class Autonomy:
     def _fix(self, text: str, now: float) -> None:
         self.st["fixes"].append({"at": now, "text": text[:200]})
         del self.st["fixes"][:-FIXES_KEEP]
+        from . import feed
+        feed.add(self.b, "♾ " + text, kind="auto", at=now)  # 📡 починки сторожа видны в ленте
         self._changed()
 
     def set_on(self, on: bool) -> None:
@@ -530,6 +532,70 @@ class Autonomy:
             ("🤖 Автопилот", b.scalper.on, pilot_note),
         ]
 
+    def health(self, now: float | None = None) -> dict:
+        """🩺 Здоровье бота 0–100 одним числом + что именно не так и как починить (для приложения и /autonomy).
+
+        Считается быстро, без сети: только то, что бот уже знает о себе."""
+        now = time.time() if now is None else now
+        b, t = self.b, self.b.trader
+        items: list[dict] = []
+
+        def add(key: str, weight: int, ok: float, title: str, hint: str = "") -> None:
+            items.append({"key": key, "weight": weight, "ok": max(0.0, min(1.0, float(ok))), "title": title,
+                          "hint": hint})
+
+        add("auto", 15, self.st["on"], "♾ Автомат " + ("работает" if self.st["on"] else "выключен"),
+            "" if self.st["on"] else "включи: /autonomy — бот будет учиться и чиниться сам")
+        loops = getattr(b, "_loops", None) or {}
+        beats = getattr(b, "_beats", {})
+        dead = []
+        for name, (_f, task) in loops.items():
+            limit = STALE_SEC.get(name)
+            if name == "scan":
+                limit = max(limit, 6 * float(b.settings.scan_interval_sec))
+            if task.done() or (limit and now - beats.get(name, now) > limit):
+                dead.append(LOOP_NAMES.get(name, name))
+        total = len(loops)
+        add("loops", 20, 1 - len(dead) / total if total else 1,
+            f"⚙️ Циклы бота: {total - len(dead)} из {total} в порядке" if total else "⚙️ Циклы бота запускаются",
+            ("не отвечают: " + ", ".join(dead) + " — сторож перезапустит за 5 минут") if dead else "")
+        warns = t.key_warnings(now)
+        if not t.creds:
+            add("keys", 20, 0.5, "🔑 Ключей бирж нет — работает демо", "для настоящей торговли: /setup")
+        elif not t.working:
+            add("keys", 20, 0, "🔑 Ключи бирж не работают", "проверка и подсказка: /doctor")
+        else:
+            add("keys", 20, 0.6 if warns else 1, f"🔑 Биржи: {', '.join(t.working)}",
+                warns[0] if warns else "")
+        n_ai = len(getattr(getattr(b.ai, "client", None), "endpoints", []) or [])
+        add("ai", 15, 1 if n_ai >= 2 else 0.6 if n_ai else 0,
+            f"🧠 ИИ: {n_ai} шт" + (" — консилиум готов" if n_ai >= 2 else ""),
+            "" if n_ai >= 2 else "добавь бесплатный ключ (Groq, OpenRouter…): /keys")
+        dup = b.duplicate_running()
+        add("dup", 15, not dup, "🧬 Две копии бота!" if dup else "🧬 Одна копия бота",
+            "удали лишний сервис в Render — сделки на паузе" if dup else "")
+        mem = rss_mb()
+        add("mem", 10, 1 if mem < MEM_SOFT_MB else 0.4, f"🧹 Память {mem:.0f} из 512 МБ",
+            "" if mem < MEM_SOFT_MB else "сторож уберёт лишнее сам")
+        hook = bool(updater.hook_url())
+        add("update", 5, hook, "⬆️ Обновляюсь сам" if hook else "⬆️ Обновления — вручную",
+            "" if hook else "добавь Deploy Hook (1 раз): /autonomy")
+        score = round(sum(i["weight"] * i["ok"] for i in items) / sum(i["weight"] for i in items) * 100)
+        level = "ok" if score >= 85 else "warn" if score >= 60 else "bad"
+        return {"score": score, "level": level, "items": items,
+                "issues": [i for i in items if i["ok"] < 1 and i["hint"]]}
+
+    def brief(self, now: float | None = None) -> dict:
+        """Короткое состояние для главного экрана приложения (запрашивается часто — без тяжёлых расчётов)."""
+        now = time.time() if now is None else now
+        st = self.st
+        engines = [{"title": a, "on": bool(o), "note": n} for a, o, n in self.engines_status()]
+        from . import feed
+        return {"on": st["on"], "real": st["real"], "restarts": st["restarts"], "last_tick": st["last_tick"],
+                "engines": engines, "engines_on": sum(e["on"] for e in engines), "health": self.health(now),
+                "next": getattr(self, "_next", "") or "", "promoted": sorted(st["promoted"]),
+                "day": feed.counts(self.b, now - 86400)}
+
     def status_dict(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
         st = self.st
@@ -551,6 +617,13 @@ class Autonomy:
         st = self.st
         d = self.status_dict(now)
         lines = [f"♾ <b>Полный автомат</b> — {'✅ работает' if st['on'] else '⏸ выключен'}"]
+        try:
+            h = self.health(now)
+            mark = {"ok": "🟢", "warn": "🟡", "bad": "🔴"}[h["level"]]
+            lines.append(f"🩺 Здоровье: {mark} <b>{h['score']}/100</b>"
+                         + "".join(f"\n  • {html.escape(i['title'])}: {html.escape(i['hint'])}" for i in h["issues"][:3]))
+        except Exception as e:
+            log.debug("health: %s", e)
         if st["on"]:
             lines.append("Бот работает сам круглые сутки, тебе ничего нажимать не нужно.")
         lines.append("\n<b>Учится без денег</b> (держу включённым):")
@@ -596,12 +669,21 @@ async def tick(b, now: float | None = None) -> None:
     st = a.st
     before = b.copy.changes
     fixes = a.watchdog(now)  # сторож работает всегда: упавший цикл — это поломка, а не настройка
+    try:
+        from .notify import flush_quiet
+        await flush_quiet(b, now)  # 🌙 утро: всё, что копилось ночью, — одним сообщением
+    except Exception:
+        log.exception("Автомат: утренняя сводка")
     if b.owner_id is None or not st["on"]:
         if b.copy.changes != before:
             b.save_copy()
         return
     st["last_tick"] = now
     enabled = a.ensure(now)
+    try:
+        a._next = a.next_step(now=now)  # для главного экрана приложения (там считать дорого)
+    except Exception as e:
+        log.debug("Автомат: следующий шаг: %s", e)
     if not st["welcomed"]:
         st["welcomed"] = True
         st["last_digest"] = now
@@ -627,6 +709,14 @@ async def tick(b, now: float | None = None) -> None:
     if a.digest_due(now):
         text = a.digest(now)
         if text:
+            if b.ai.configured:  # 🧠 штурман-ИИ комментирует итог простыми словами (ошибка ИИ итогу не мешает)
+                try:
+                    from . import brief
+                    br = await brief.make(b, force=True)
+                    if br.get("text") and not br.get("error"):
+                        text += "\n\n🧠 <b>Штурман-ИИ</b>:\n" + html.escape(br["text"])
+                except Exception as e:
+                    log.info("Автомат: штурман-ИИ: %s", e)
             await b.notify(text, keyboard(b))
     if fixes or enabled or events:
         log.info("Автомат: %s", "; ".join(fixes + enabled + [e["text"][:60] for e in events]))

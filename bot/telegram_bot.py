@@ -29,7 +29,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import (autonomy, copy_ui, council, extras_ui, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
+from . import (autonomy, copy_ui, council, extras_ui, feed, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
                trading_ui,
                updater, users_ui)
 from .copytrade import CopyTrader
@@ -460,6 +460,8 @@ class ArbitrageBot:
         self.users: dict[str, dict] = {}  # 👥 приглашённые ссылкой (bot/users_ui.py): полный доступ, как у владельца
         self.invites: dict[str, float] = {}  # одноразовые коды приглашений → до какого времени действуют
         self.muted: set[int] = set()  # 🔕 кто выключил себе уведомления (/notify)
+        self.quiet: set[int] = set()  # 🌙 у кого тихие часы: ночью обычные события копятся до утра
+        self._held: dict[int, list[tuple[float, str]]] = {}  # отложенное на ночь (только в памяти)
         self.scanner = Scanner(settings)
         self.subscribers = SubscriberStore()
         self.sent_alerts: dict[tuple[str, str, str], tuple[float, float]] = {}
@@ -580,7 +582,7 @@ class ArbitrageBot:
         out = {"values": dict(self._changed), "fees": dict(self._fee_changes),
                "alerts": self.alerts.export(), "phantom": self.phantom.address,
                "radar": sorted(self.radar_chats), "opps_notify": self.opps_notify}
-        if self.users or self.invites or self.muted:  # 👥 приглашённые: пишем, только если они есть
+        if self.users or self.invites or self.muted or self.quiet:  # 👥 приглашённые: пишем, только если они есть
             out["people"] = users_ui.export(self)
         return out
 
@@ -729,9 +731,11 @@ class ArbitrageBot:
                 log.warning("Не смог отправить в чат %s: %s", chat_id, e)
 
     async def notify(self, text: str, markup: InlineKeyboardMarkup | None = None, actor: int | None = None,
-                     skip_actor: bool = False) -> int:
-        """🔔 Уведомление всем пользователям бота (владелец, приглашённые, ALLOWED_USER_IDS), кто его не выключил."""
-        return await notify.notify(self, text, markup, actor=actor, skip_actor=skip_actor)
+                     skip_actor: bool = False, urgent: bool | None = None) -> int:
+        """🔔 Уведомление всем пользователям бота (владелец, приглашённые, ALLOWED_USER_IDS), кто его не выключил.
+
+        urgent=None — бот сам решает, важно ли (деньги/проблемы приходят сразу даже в 🌙 тихие часы)."""
+        return await notify.notify(self, text, markup, actor=actor, skip_actor=skip_actor, urgent=urgent)
 
     async def _answer(self, message: Message, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
         parts = split_message(text)
@@ -1527,6 +1531,7 @@ class ArbitrageBot:
         autonomy.register(self)
         users_ui.register(self)
         notify.register(self)
+        feed.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1609,7 +1614,7 @@ class ArbitrageBot:
             log.exception("Ошибка автоторговли")
             return
         for res in executions:  # пропуски не шлём каждый скан: они в /why и в сводке
-            await self.notify("⚙️ " + res.text(self.scanner.display_name))
+            await self.notify("⚙️ " + res.text(self.scanner.display_name), urgent=bool(getattr(res, "live", False)))
         if executions:
             if not self.trader.state.auto and self.trader.state.paused_reason:
                 await self.notify(f"⏸ <b>Автоторговля остановлена</b>: {html.escape(self.trader.state.paused_reason)}.\n"
@@ -1745,7 +1750,7 @@ class ArbitrageBot:
         if self.scalper.on and self.owner_id is not None:
             events = await self.scalper.step()
             for text in events:
-                await self.notify(text)
+                await self.notify(text, urgent=bool(self.trader.state.live))
         elif self.owner_id is not None and (self.trader.working or self.autonomy.on):
             await self.scalper.learn(public=not self.trader.working)
         if events:
@@ -1959,7 +1964,8 @@ class ArbitrageBot:
                     BotCommand(command="rug", description="🛡 Проверка токена на скам"),
                     BotCommand(command="radar", description="📡 Радар новых мемкоинов"),
                     BotCommand(command="users", description="👥 Пользователи: пригласить по ссылке"),
-                    BotCommand(command="notify", description="🔔 Уведомления: вкл/выкл себе"),
+                    BotCommand(command="notify", description="🔔 Уведомления и 🌙 тихие часы"),
+                    BotCommand(command="feed", description="📡 Лента: что бот сделал сам"),
                     BotCommand(command="analysis", description="Анализ: комиссии и узкие места"),
                     BotCommand(command="fees", description="Комиссии бирж"),
                     BotCommand(command="report", description="Отчёт о работе"),

@@ -44,7 +44,7 @@ def test_everyone_can_mute_himself_and_owner_can_mute_anyone(bot_env):
     async def run():
         await send(b, "/notify", user=FRIEND)
         assert "Уведомления</b>: включены" in session.sent[-1][1] and "Вася" in session.sent[-1][1]
-        assert buttons(session.markups[-1]) == ["nt:off"]
+        assert buttons(session.markups[-1]) == ["nt:off", "nt:q1"]
         await press(b, "nt:off", user=FRIEND)
         assert FRIEND in b.muted
         await b.notify("📈 Сделка автомата")

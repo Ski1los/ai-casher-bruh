@@ -35,6 +35,7 @@ from .opportunities import PLAN_QUESTION
 from .dex import SOL_ADDRESS_RE, DexError, best_pairs, is_address
 from .doctor import doctor_dict, run_doctor
 from .memetrade import SwapError
+from . import feed as feed_mod
 from .notify import ACTOR
 from .mentors import VIDEOS_PER_DAY
 from .solana import WalletError
@@ -106,6 +107,7 @@ def sign_init_data(user: dict, token: str, auth_date: int | None = None) -> str:
 
 
 _RequestKey = getattr(web, "RequestKey", None)  # aiohttp ≥ 3.12; в старых версиях — обычные строки
+VOLATILE = ("server_time", "stats")  # меняются каждую секунду, на ETag не влияют
 USER = _RequestKey("user", dict) if _RequestKey else "user"
 OWNER = _RequestKey("owner", bool) if _RequestKey else "owner"
 PREVIEW = _RequestKey("preview", bool) if _RequestKey else "preview"
@@ -138,7 +140,7 @@ def account_curve(acc) -> list[list[float]]:
         balance += t.profit_usd
         points.append([t.closed_at or t.opened_at, round(balance, 6)])
     if acc.active or len(points) == 1:
-        points.append([time.time(), round(acc.equity, 6)])
+        points.append([max(points[-1][0], float(int(time.time()) // 60 * 60)), round(acc.equity, 6)])  # до минуты: ответ не меняется каждую секунду (ETag)
     return downsample(points)
 
 
@@ -264,6 +266,10 @@ class WebApp:
             ("POST", "/api/mentors"): self.mentors_set,
             ("GET", "/api/profit"): self.profit,
             ("POST", "/api/profit"): self.profit_set,
+            ("GET", "/api/feed"): self.feed,
+            ("GET", "/api/brief"): self.brief,
+            ("POST", "/api/clientlog"): self.clientlog,
+            ("POST", "/api/notify"): self.notify_set,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -305,8 +311,19 @@ class WebApp:
             except Exception as e:
                 log.exception("Ошибка API %s", request.path)
                 return web.json_response({"error": human_error(e)}, status=500)
-            resp = web.json_response(data, dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
-            resp.headers["Cache-Control"] = "no-store"
+            body = json.dumps(data, ensure_ascii=False, default=str)
+            headers = {"Cache-Control": "no-store"}
+            if request.method == "GET":
+                # ⚡ ETag: приложение опрашивает сервер каждые 7 с — если ничего не изменилось, отвечаем 304 без тела
+                stable = body
+                if isinstance(data, dict) and "server_time" in data:
+                    stable = json.dumps({k: v for k, v in data.items() if k not in VOLATILE},
+                                        ensure_ascii=False, default=str)
+                etag = '"' + hashlib.blake2s(stable.encode(), digest_size=10).hexdigest() + '"'
+                headers["ETag"] = etag
+                if request.headers.get("If-None-Match") == etag:
+                    return web.Response(status=304, headers=headers)
+            resp = web.Response(text=body, content_type="application/json", headers=headers)
             if len(resp.body or b"") > 1024:
                 resp.enable_compression()
             return resp
@@ -479,7 +496,65 @@ class WebApp:
             "copy": self._copy_brief(),
             "mentors": self._mentors_brief(),
             "profit": self._profit_brief(),
+            "auto": self._auto_brief(),
+            "feed": feed_mod.items(self.b, 12),
+            "me": self._me(request[USER]["id"]),
         }
+
+    def _auto_brief(self) -> dict | None:
+        """♾ Центр управления на главной: здоровье, движки, итог за сутки."""
+        try:
+            return self.b.autonomy.brief()
+        except Exception as e:
+            log.warning("Автомат (кратко): %s", e)
+            return None
+
+    def _me(self, uid: int) -> dict:
+        from . import notify
+        return {"member": uid in notify.everyone(self.b), "muted": uid in getattr(self.b, "muted", set()),
+                "quiet": uid in getattr(self.b, "quiet", set()), "quiet_hours": list(notify.QUIET)}
+
+    async def brief(self, request: web.Request) -> dict:
+        """🧠 Штурман-ИИ: брифинг из кэша (20 мин); ?force=1 — заново (не чаще раза в минуту)."""
+        from . import brief
+        cur = getattr(self.b, "_brief", None) or {}
+        force = request.query.get("force") == "1" and time.time() - cur.get("at", 0) > 60
+        return await brief.make(self.b, force=force)
+
+    async def clientlog(self, request: web.Request) -> dict:
+        """Ошибки JavaScript из приложения → в лог Render (не больше 30 в час), чтобы чинить то, что видят люди."""
+        now = time.time()
+        self._client_errs = [t for t in getattr(self, "_client_errs", []) if now - t < 3600]
+        if len(self._client_errs) < 30:
+            self._client_errs.append(now)
+            body = await self._body(request)
+            log.warning("Ошибка в приложении: %s @ %s:%s", str(body.get("msg"))[:300], str(body.get("src"))[-80:],
+                        str(body.get("line"))[:10])
+        return {"ok": True}
+
+    async def feed(self, request: web.Request) -> dict:
+        """📡 Лента событий: всё, что бот сделал сам. ?kind=trade|meme|auto|warn|info"""
+        kind = request.query.get("kind") or None
+        if kind is not None and kind not in feed_mod.KINDS:
+            raise ApiError("неизвестный фильтр ленты")
+        return {"items": feed_mod.items(self.b, feed_mod.FEED_MAX, kind),
+                "counts": feed_mod.counts(self.b, time.time() - 86400)}
+
+    async def notify_set(self, request: web.Request) -> dict:
+        """🔔 Свои уведомления: {muted: bool} / {quiet: bool} — каждый пользователь меняет только себе."""
+        from . import notify
+        uid = request[USER]["id"]
+        if uid not in notify.everyone(self.b):
+            raise ApiError("уведомления получают пользователи бота — попроси владельца пригласить тебя", 403)
+        body = await self._body(request)
+        if "muted" in body:
+            notify.set_muted(self.b, uid, bool(body["muted"]))
+        if "quiet" in body:
+            notify.set_quiet(self.b, uid, bool(body["quiet"]))
+            if not body["quiet"]:
+                await notify.flush_quiet(self.b, force_uid=uid)
+        await self.b.save_extras()
+        return {"me": self._me(uid)}
 
     def _profit_brief(self) -> dict | None:
         try:

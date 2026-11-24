@@ -76,6 +76,28 @@ def slim_markets(ex) -> int:
 
 
 DEPTH_CHECK_TOP = 10  # для скольких лучших вариантов проверять стакан
+# v41: самые ликвидные пары каждой биржи (по объёму за сутки) — автопилот смотрит не только 13 монет из списка,
+# а и то, где сейчас много денег. Больше вариантов → больше сделок, а порог качества у стратегии тот же.
+LIQUID_MIN_VOLUME = 30_000_000   # от $30 млн оборота за сутки
+LIQUID_MAX_SPREAD = 0.0015       # спред до 0,15%
+LIQUID_TOP = 12
+_NOT_COIN = ("UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S", "2L", "2S")
+_STABLE_BASES = {"USDT", "USDC", "FDUSD", "DAI", "TUSD", "USDD", "PYUSD", "USDE", "BUSD", "EUR", "USD1", "RLUSD"}
+
+
+def liquid_symbols(quotes: dict[str, Quote], limit: int = LIQUID_TOP) -> list[str]:
+    """Самые ликвидные пары к USDT: без стейблкоинов и токенов с плечом. Возвращает символы, лучшие сверху."""
+    rows = []
+    for sym, q in quotes.items():
+        base = sym.split("/")[0]
+        if base in _STABLE_BASES or base.endswith(_NOT_COIN) or q.volume_usd < LIQUID_MIN_VOLUME:
+            continue
+        mid = (q.bid + q.ask) / 2
+        if mid <= 0 or (q.ask - q.bid) / mid > LIQUID_MAX_SPREAD:
+            continue
+        rows.append((q.volume_usd, sym))
+    rows.sort(reverse=True)
+    return [s for _, s in rows[:limit]]
 TRI_DEPTH_CHECK_TOP = 5  # то же для треугольников (по 3 стакана на каждый)
 
 
@@ -225,6 +247,7 @@ class Scanner:
         self._markets_loaded_at: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self.last_result: ScanResult | None = None
+        self.liquid: dict[str, list[str]] = {}  # биржа → самые ликвидные пары (для автопилота)
 
         for name in settings.exchanges:
             ex = make_exchange(name)
@@ -396,6 +419,7 @@ class Scanner:
                     continue
                 result.exchanges_ok.append(name)
                 quotes[name] = self._quotes_from_tickers(name, data)
+                self.liquid[name] = liquid_symbols(quotes[name])
                 if self.settings.triangular_enabled:
                     result.triangles += find_triangles(
                         name,
