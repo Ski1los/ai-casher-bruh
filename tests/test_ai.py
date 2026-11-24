@@ -59,7 +59,8 @@ def test_pick_model():
     assert pick_model("gemini", gemini) == "gemini-3.8-flash"
 
     orouter = ["openai/gpt-5", "deepseek/deepseek-v4:free", "anthropic/claude", "openrouter/free"]
-    assert pick_model("openrouter", orouter) == "openrouter/free"
+    assert pick_model("openrouter", orouter) == "deepseek/deepseek-v4:free"  # самый умный из бесплатных
+    assert pick_model("openrouter", ["openai/gpt-5", "openrouter/free"]) == "openrouter/free"
     # только бесплатные модели: платные OpenRouter не выбирает никогда
     assert pick_model("openrouter", ["openai/gpt-5", "x/y"]) is None
 

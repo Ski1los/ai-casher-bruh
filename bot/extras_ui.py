@@ -7,11 +7,12 @@ import html
 import logging
 from typing import TYPE_CHECKING
 
+from aiogram import F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .alerts import AlertError, alerts_text, build_alert, fired_text, fmt_price, parse_alert
-from .doctor import doctor_text, run_doctor
+from .doctor import check_ai, doctor_text, run_doctor
 from .solana import WalletError, short
 
 if TYPE_CHECKING:
@@ -234,14 +235,11 @@ def register(b: ArbitrageBot) -> None:
         snap = await b.phantom_snapshot(force=bool(args))
         await b._answer(message, b.phantom.text(snap))
 
-    @dp.message(Command("doctor", "check"))
-    async def cmd_doctor(message: Message) -> None:
-        if not b._allowed(message):
-            return
-        wait = await message.answer("🩺 Проверяю биржи, ключи и сервис… (до 30 секунд)")
+    async def run_check(chat_id: int, only_ai: bool = False) -> None:
+        wait = await b.bot.send_message(chat_id, "🤖 Задаю короткий вопрос каждому ИИ… (до 30 секунд)" if only_ai else
+                                        "🩺 Проверяю биржи, ключи, все ИИ, автомат и сервис… (до 40 секунд)")
         try:
-            checks = await run_doctor(b)
-            text = doctor_text(checks)
+            text = doctor_text(await check_ai(b), title="🤖 Проверка ИИ") if only_ai else doctor_text(await run_doctor(b))
         except Exception as e:
             log.exception("doctor")
             text = f"❌ Проверка упала: {html.escape(type(e).__name__)}: {html.escape(str(e)[:200])}"
@@ -249,7 +247,31 @@ def register(b: ArbitrageBot) -> None:
             await wait.delete()
         except Exception:
             pass
-        await b._answer(message, text)
+        await b._send(chat_id, text, doctor_markup())
+
+    @dp.message(Command("doctor", "check", "проверка"))
+    async def cmd_doctor(message: Message, command: CommandObject) -> None:
+        if not b._allowed(message):
+            return
+        arg = (command.args or "").strip().lower()
+        await run_check(message.chat.id, only_ai=arg in ("ai", "ии", "иишки"))
+
+    @dp.callback_query(F.data.startswith("dr:"))
+    async def cb_doctor(cb: CallbackQuery) -> None:
+        if not b._allowed_user(cb.from_user.id):
+            await cb.answer("Нет доступа", show_alert=True)
+            return
+        await cb.answer("Проверяю…")
+        chat_id = cb.message.chat.id if cb.message else cb.from_user.id
+        await run_check(chat_id, only_ai=cb.data == "dr:ai")
+
+
+def doctor_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Проверить всё ещё раз", callback_data="dr:all"),
+         InlineKeyboardButton(text="🤖 Только ИИ", callback_data="dr:ai")],
+        [InlineKeyboardButton(text="➕ Добавить бесплатные ИИ", callback_data="cn:keys")],
+    ])
 
 
 async def check_alerts_once(b: ArbitrageBot) -> int:

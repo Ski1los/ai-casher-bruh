@@ -1,7 +1,8 @@
 """«Проверка всего» (/doctor): что работает, что нет и что с этим делать.
 
 Проверяет с самого сервера: доступность каждой биржи и задержку, ключи (права, срок действия,
-деньги на счёте Funding, которых бот не видит), приложение, резервную копию, ИИ, Phantom и память.
+деньги на счёте Funding, которых бот не видит), КАЖДЫЙ ИИ вживую (короткий вопрос всем сразу),
+полный автомат и его источники данных (GMGN, кошелёк мемкоинов), приложение, резервную копию, Phantom и память.
 """
 
 from __future__ import annotations
@@ -123,6 +124,7 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
     now = time.time()
     names = list(b.scanner.exchanges)
 
+    ai_task = asyncio.create_task(check_ai(b))  # ИИ отвечают до 30 с — проверяем их параллельно с биржами
     ex_checks = await asyncio.gather(*(_check_exchange(b, n) for n in names))
     checks += ex_checks
     if not names:
@@ -198,15 +200,6 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
     checks.append(Check("Сервис", "Резервная копия", "ok" if b.backup else "warn",
                         "сохраняется в Telegram: настройки, демо, журнал и графики переживут перезапуск" if b.backup
                         else "выключена: заполни ALLOWED_USER_IDS, иначе после перезапуска всё обнулится"))
-    if b.ai.configured:
-        eps = b.ai.client.endpoints
-        titles = ", ".join(sorted({ep.title + (" без ключа" if ep.keyless else "") for ep in eps})) or "подключён"
-        only_free = all(ep.keyless for ep in eps)
-        checks.append(Check("Сервис", "ИИ", "info" if only_free else "ok", f"подключён: {titles}" + (
-            ". Для скорости добавь свой ключ без телефона (Groq) или GigaChat по номеру РФ — /council keys"
-            if only_free else "")))
-    else:
-        checks.append(Check("Сервис", "ИИ", "info", "не подключён (по желанию): бесплатный ключ Groq, см. /ai"))
     checks.append(Check("Сервис", "Версия бота", "info", version_text()))
     mem = rss_mb()
     checks.append(Check("Сервис", "Память", "ok" if mem < RENDER_RAM_MB * 0.75 else "warn",
@@ -228,7 +221,121 @@ async def run_doctor(b: ArbitrageBot) -> list[Check]:
     n_alerts = len(b.alerts.items)
     checks.append(Check("Кошелёк", "Ценовые алерты", "info",
                         f"активных: {n_alerts}" if n_alerts else "нет. Пример: /alert TON < 5"))
+    checks += _automat_checks(b, now)
+    try:
+        checks += await ai_task
+    except Exception as e:  # проверка ИИ не должна ронять всю проверку
+        log.exception("doctor: ИИ")
+        checks.append(Check("ИИ", "Проверка ИИ", "warn", f"не удалась: {type(e).__name__}"))
     return checks
+
+
+# ---------------------------------------------------------------------------
+# ИИ: каждый — вживую
+# ---------------------------------------------------------------------------
+
+
+def _ai_hint(provider: str, error: str) -> str:
+    from .ai import provider_env_names
+    low = error.lower()
+    env = provider_env_names(provider)[0] if provider not in ("ovh", "llm7", "custom") else ""
+    if "ключ" in low and ("не подходит" in low or "authorization" in low):
+        return f" → скопируй ключ заново и вставь в Render → Environment → {env}" if env else ""
+    if "лимит" in low or "закончились" in low or "подписка" in low:
+        return " → бесплатный лимит на сегодня исчерпан, завтра заработает сам; пока отвечают другие ИИ"
+    if "нет связи" in low or "не ответил" in low or "перегруж" in low:
+        return " → сервис сейчас не отвечает, бот спросит другой ИИ; проверь позже"
+    return ""
+
+
+async def check_ai(b: ArbitrageBot) -> list[Check]:
+    """Короткий вопрос всем ИИ одновременно: кто ответил, за сколько секунд и какой моделью."""
+    from .ai import PROVIDERS
+    out: list[Check] = []
+    client = b.ai.client
+    have = {ep.provider for ep in client.endpoints}
+    if not client.endpoints:
+        out.append(Check("ИИ", "ИИ-помощник", "warn", "ни одного ИИ нет. Бесплатно и без телефона: /council keys"))
+    else:
+        rows = await client.ping_all()
+        working = 0
+        for r in rows:
+            name = r["title"] + (" (без ключа)" if r["keyless"] else "")
+            model = f" · {r['model']}" if r["model"] else ""
+            if r["ok"]:
+                working += 1
+                out.append(Check("ИИ", name, "ok", f"ответил за {r['sec']:.1f} с{model}"))
+            elif r["paused"]:
+                out.append(Check("ИИ", name, "info", f"на паузе из-за лимита ещё ~{r['paused']} с — не трогаю, "
+                                                     "чтобы не тратить лимит"))
+            else:
+                out.append(Check("ИИ", name, "warn" if r["keyless"] else "bad",
+                                 r["error"] + _ai_hint(r["provider"], r["error"])))
+        total = len(rows)
+        council = ("🧠 консилиум готов" if working >= 2 else
+                   "для 🧠 консилиума нужно минимум 2 работающих ИИ")
+        out.append(Check("ИИ", "Итог по ИИ", "ok" if working >= 2 else "warn" if working else "bad",
+                         f"отвечают {working} из {total}: {council}"))
+    free = [p["title"] for n, p in PROVIDERS.items() if n not in have and p.get("access") in ("nophone", "ru")
+            and not p.get("free", "").startswith("платн")]
+    if free:
+        out.append(Check("ИИ", "Можно добавить бесплатно", "info",
+                         ", ".join(free[:8]) + " — без телефона или по номеру РФ. Как: /council keys"))
+    m = getattr(b, "mentors", None)
+    gem = getattr(m, "gemini", None)
+    if gem is not None:
+        out.append(Check("ИИ", "🎥 Видео и эфиры (Gemini)", "ok" if gem.configured else "info",
+                         "ключ есть: бот смотрит ролики и эфиры" if gem.configured else
+                         "нет ключа Gemini: видео не разбираются (текст ИИ работает и без него)"))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Полный автомат и его источники данных
+# ---------------------------------------------------------------------------
+
+
+def _automat_checks(b: ArbitrageBot, now: float) -> list[Check]:
+    out: list[Check] = []
+    auto = getattr(b, "autonomy", None)
+    if auto is not None:
+        try:
+            st = auto.st
+            if not st["on"]:
+                out.append(Check("Автомат", "♾ Полный автомат", "info", "выключен. Включить: /autonomy"))
+            else:
+                ago = now - (st.get("last_tick") or 0)
+                stale = bool(st.get("last_tick")) and ago > 3 * 3600
+                engines = auto.engines_status()
+                on = sum(1 for _, o, _ in engines if o)
+                money = "на деньгах разрешён" if st.get("real") else "только без денег (обучение и демо)"
+                out.append(Check("Автомат", "♾ Полный автомат", "warn" if stale else "ok",
+                                 f"работает, {money}; учебных движков включено {on} из {len(engines)}"
+                                 + (f". Последний обход {ago / 3600:.0f} ч назад — проверь, не спит ли сервис"
+                                    if stale else "")))
+        except Exception as e:  # у тестовых заглушек может не быть части полей
+            log.debug("doctor: автомат: %s", e)
+    gmgn = getattr(b, "gmgn", None)
+    if gmgn is not None:
+        g = gmgn.status()
+        if g.get("key_bad"):
+            out.append(Check("Автомат", "GMGN", "bad", "ключ GMGN не принят: проверь GMGN_API_KEY в Render"))
+        elif g.get("configured"):
+            out.append(Check("Автомат", "GMGN", "warn" if g.get("error") else "ok",
+                             f"ключ есть, запросов: {g.get('calls', 0)}"
+                             + (f". Последняя ошибка: {str(g['error'])[:120]}" if g.get("error") else "")))
+        else:
+            out.append(Check("Автомат", "GMGN", "info", "без ключа: пульс рынка берёт данные с DexScreener"))
+    meme = getattr(b, "meme", None)
+    if meme is not None:
+        if getattr(meme, "key_error", None):
+            out.append(Check("Автомат", "Кошелёк мемкоинов", "bad", str(meme.key_error)[:200]))
+        elif getattr(meme, "configured", False):
+            out.append(Check("Автомат", "Кошелёк мемкоинов", "ok", "ключ горячего кошелька подключён"))
+        else:
+            out.append(Check("Автомат", "Кошелёк мемкоинов", "info",
+                             "не подключён: мемкоины торгуются на демо и учатся. Как подключить: /meme"))
+    return out
 
 
 def _auto_check(b: ArbitrageBot) -> Check:
@@ -254,8 +361,8 @@ def summary(checks: list[Check]) -> dict:
     return {s: sum(1 for c in checks if c.status == s) for s in ("ok", "warn", "bad", "info")}
 
 
-def doctor_text(checks: list[Check]) -> str:
-    lines = ["🩺 <b>Проверка всего</b>"]
+def doctor_text(checks: list[Check], title: str = "🩺 Проверка всего") -> str:
+    lines = [f"<b>{html.escape(title)}</b>"]
     group = None
     for c in checks:
         if c.group != group:

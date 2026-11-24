@@ -1017,7 +1017,7 @@ const docSvg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke
 const DOC_ICON = { ok: docSvg('<path d="M6 12.5l4 4 8-9"/>'), warn: docSvg('<path d="M12 6v7M12 17.5v.5"/>'), bad: docSvg('<path d="M7 7l10 10M17 7 7 17"/>'), info: docSvg('<path d="M12 11v6M12 7v.5"/>') };
 
 async function doctorSheet() {
-  Sheet.open("Проверка всего", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Проверяю биржи, ключи, сервис… до 30 секунд</div>`, { full: true });
+  Sheet.open("Проверка всего", `<div class="card empty"><div class="spin dark" style="width:22px;height:22px;margin:0 auto 10px"></div>Проверяю биржи, ключи, каждый ИИ, автомат… до 40 секунд</div>`, { full: true });
   try {
     const r = await api("/api/doctor", undefined, { timeout: 90000 });
     if (!Sheet.isOpen() || $("#sheetTitle").textContent !== "Проверка всего") return;
