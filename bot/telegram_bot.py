@@ -1421,7 +1421,8 @@ class ArbitrageBot:
                 return
             arg = (command.args or "").strip()
             if arg.lower() in ("keys", "ключи", "add", "добавить") or not self.ai.configured:
-                await self._answer(message, council.keys_text(self.ai) if self.ai.configured else NO_AI_TEXT)
+                keys = arg.lower() in ("keys", "ключи", "add", "добавить")
+                await self._answer(message, council.keys_text(self.ai) if keys else NO_AI_TEXT)
                 return
             await run_council(message.chat.id, arg or None)
 
