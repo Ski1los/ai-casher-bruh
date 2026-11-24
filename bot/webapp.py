@@ -273,6 +273,7 @@ class WebApp:
             ("GET", "/api/transfers"): self.transfers,
             ("POST", "/api/transfers/check"): self.transfer_check,
             ("POST", "/api/transfers/go"): self.transfer_go,
+            ("POST", "/api/transfers/test"): self.transfer_test,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -762,6 +763,19 @@ class WebApp:
         if plan.ok:
             tf.keep(plan)
         return {"plan": plan.as_dict(self._name)}
+
+    async def transfer_test(self, request: web.Request) -> dict:
+        """🧪 Проверка вывода в обе стороны без перевода денег."""
+        self._owner(request)
+        body = await self._body(request)
+        coin = str(body.get("coin") or "USDT").upper().strip()
+        if not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
+            raise ApiError("укажи монету, например USDT")
+        rows = await self.b.transfers.selftest(coin)
+        return {"coin": coin, "ready": all(r["ready"] for r in rows),
+                "rows": [{"title": r["title"], "src": r["src"], "dst": r["dst"], "ready": r["ready"],
+                          "network": r.get("network"), "test_amount": r.get("test_amount"),
+                          "checks": [{"status": st, "text": t} for st, t in r["checks"]]} for r in rows]}
 
     async def transfer_go(self, request: web.Request) -> dict:
         self._owner(request)

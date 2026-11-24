@@ -1256,7 +1256,7 @@ async function alertsSheet() {
 // 🔁 Переводы между биржами: анализ перед выводом, потом одна кнопка
 // ---------------------------------------------------------------------------
 
-const XF_ICON = { ok: "✅", warn: "⚠️", bad: "⛔" };
+const XF_ICON = { ok: "✅", warn: "⚠️", bad: "⛔", info: "ℹ️" };
 const XF_STATUS = { sent: "⏳ отправлен", out: "🚚 в пути", done: "✅ дошёл", failed: "❌ отменён" };
 
 function transferHead(x) {
@@ -1286,6 +1286,8 @@ async function transferSheet() {
   const opt = (sel) => ex.map((e) => `<option value="${esc(e.id)}" ${e.id === sel ? "selected" : ""}>${esc(e.name)}</option>`).join("");
   Sheet.body().innerHTML = `
     ${transferHead(x)}
+    <button class="btn block xf-btn" style="margin-top:10px" data-act="xfer-test" ${owner() ? "" : "disabled"}>🧪 Проверить вывод в обе стороны — без перевода</button>
+    <div id="xfTest"></div>
     <div class="section-title">Новый перевод</div>
     ${ex.length < 2 ? `<div class="banner">Нужны ключи обеих бирж (Bybit и BingX), чтобы бот взял адрес пополнения второй биржи.</div>` : `
     <div class="card xf-form">
@@ -1307,6 +1309,19 @@ function transferPlanHtml(p) {
     ${p.ok ? `<div class="small muted" style="margin:8px 0">Придёт ≈ ${got != null ? amount(got) + "–" : ""}${amount(p.amount)} ${esc(p.coin)}${p.usd != null ? ` (≈${money(p.usd)})` : ""}. Обычно 2–30 минут. Проверка действует 5 минут.</div>
       <button class="btn primary block" data-act="xfer-go" data-id="${esc(p.id)}">🚀 Перевести</button>` : `<div class="banner red" style="margin-top:8px">Переводить нельзя — причины выше</div>`}
   </div>`;
+}
+
+async function transferTest(btn) {
+  btn.disabled = true; btn.textContent = "🧪 Проверяю… деньги никуда не уходят";
+  try {
+    const r = await api("/api/transfers/test", { coin: "USDT" }, { timeout: 60000 });
+    $("#xfTest").innerHTML = r.rows.map((row) => `<div class="card xf-plan ${row.ready ? "ok" : "bad"}" style="margin-top:10px">
+      <div class="row between"><div class="b">${esc(row.title)}</div><span class="pill ${row.ready ? "ok" : "bad"}">${row.ready ? "готово" : "не готово"}</span></div>
+      <div class="xf-checks">${row.checks.map((c) => `<div class="xf-c ${c.status}"><span>${XF_ICON[c.status] || "•"}</span><span>${esc(c.text)}</span></div>`).join("")}</div>
+      ${row.ready && row.test_amount ? `<div class="small muted" style="margin-top:8px">Пробный перевод: ${amount(row.test_amount)} ${esc(r.coin)} — заполни форму ниже</div>` : ""}
+    </div>`).join("");
+    r.ready ? haptic.ok() : haptic.err();
+  } catch (e) { fail(e); } finally { btn.disabled = false; btn.textContent = "🧪 Проверить вывод в обе стороны — без перевода"; }
 }
 
 async function transferCheck(btn) {
@@ -2376,6 +2391,7 @@ document.addEventListener("click", async (e) => {
     case "xfer": haptic.tap(); transferSheet(); break;
     case "xfer-check": transferCheck(el); break;
     case "xfer-go": transferGo(el); break;
+    case "xfer-test": transferTest(el); break;
     case "xfer-flip": { const a = $("#xfSrc"), b = $("#xfDst"); [a.value, b.value] = [b.value, a.value]; haptic.sel(); break; }
     case "alert-add": addAlert(el); break;
     case "alert-del": delAlert(d.id); break;

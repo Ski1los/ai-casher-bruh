@@ -523,3 +523,107 @@ def test_server_ips_are_remembered_for_whitelist(bot_env, monkeypatch):
     asyncio.run(run())
     # другой экземпляр не делит список IP через DEFAULTS
     assert tr.DEFAULTS["ips"] == {} and tr.DEFAULTS["items"] == []
+
+
+# --- 🧪 проверка вывода без перевода ---------------------------------------------------------------------
+
+
+def selftest_setup(b, monkeypatch, book_status=0, in_book=True, frozen=0.0):
+    bybit, bingx = setup(b)
+    rows = [{"coin": "USDT", "chain": "TRX", "address": BINGX_ADDR if in_book else "Tsomeoneelse", "status": book_status}]
+
+    async def query_address(params=None):
+        if (params or {}).get("coin") == "baseCoin":
+            return {"result": {"rows": []}}
+        return {"result": {"rows": rows, "nextPageCursor": ""}}
+
+    async def withdrawable(params=None):
+        return {"result": {"limitAmountUsd": str(frozen),
+                           "withdrawableAmount": {"UTA": {"coin": "USDT", "withdrawableAmount": "60"}}}}
+
+    bybit.privateGetV5AssetWithdrawQueryAddress = query_address
+    bybit.privateGetV5AssetWithdrawWithdrawableAmount = withdrawable
+
+    async def fake_ip():
+        return "74.220.51.10"
+
+    monkeypatch.setattr(tr, "outbound_ip", fake_ip)
+    return bybit, bingx
+
+
+def test_selftest_all_ready_and_moves_no_money(bot_env, monkeypatch):
+    b, _ = bot_env
+    bybit, bingx = selftest_setup(b, monkeypatch, frozen=12.5)
+    rows = asyncio.run(b.transfers.selftest())
+    assert [r["title"] for r in rows] == ["Bybit → BingX", "BingX → Bybit"]
+    assert all(r["ready"] for r in rows), [r["checks"] for r in rows]
+    fwd = " ".join(t for _, t in rows[0]["checks"])
+    assert "есть в адресной книге" in fwd and "до 60" in fwd and "заморожена" in fwd and "74.220.51.10" not in fwd
+    back = " ".join(t for _, t in rows[1]["checks"])
+    assert "не показывает адресную книгу" in back  # BingX не отдаёт книгу — честно говорим
+    assert rows[0]["test_amount"] == 20.0  # комиссия 1 USDT ≤ 5% → от 20 USDT
+    assert bybit.withdrawn == [] and bingx.withdrawn == []  # ни одного вывода
+    text = b.transfers.selftest_text(rows)
+    assert "/transfer USDT 20 bybit bingx" in text and "Всё готово" in text
+    assert rows[1]["test_amount"] is None  # на BingX 3 USDT — на пробный перевод не хватает
+    assert any("для пробного перевода нужно 21" in t for _, t in rows[1]["checks"])
+
+
+def test_selftest_finds_address_book_problems(bot_env, monkeypatch):
+    b, _ = bot_env
+    selftest_setup(b, monkeypatch, in_book=False)
+    r = asyncio.run(b.transfers.selftest())[0]
+    assert not r["ready"] and any("нет в адресной книге" in t for st, t in r["checks"] if st == "bad")
+    selftest_setup(b, monkeypatch, book_status=1)
+    b.transfers._addr.clear()
+    r = asyncio.run(b.transfers.selftest())[0]
+    assert r["ready"] and any("через 24 часа" in t for st, t in r["checks"] if st == "warn")
+
+
+def test_selftest_withdraw_key_ip_rejected(bot_env, monkeypatch):
+    b, _ = bot_env
+    wd_setup(b, monkeypatch, ip_ok=False)
+    rows = asyncio.run(b.transfers.selftest())
+    back = next(r for r in rows if r["src"] == "bingx")
+    assert not back["ready"] and "74.220.51.10" in back["checks"][-1][1]
+
+
+def test_selftest_command_button_and_api(bot_env, monkeypatch):
+    b, session = bot_env
+    selftest_setup(b, monkeypatch)
+
+    async def run():
+        await send(b, "/transfer test")
+        assert "Проверка вывода USDT" in session.sent[-1][1] and "Bybit → BingX" in session.sent[-1][1]
+        await send(b, "/transfer")
+        assert "xf:test" in buttons(session.markups[-1])
+        await press(b, "xf:test")
+        assert "Проверка вывода" in session.sent[-1][1]
+
+    asyncio.run(run())
+
+
+def test_selftest_api(app_env, monkeypatch):
+    from tests.test_webapp import FRIEND as VIEWER
+    from tests.test_webapp import call, post
+
+    b, _ = app_env
+    selftest_setup(b, monkeypatch)
+
+    async def fn(client):
+        st, r = await post(client, "/api/transfers/test", {"coin": "USDT"}, uid=VIEWER)
+        assert st == 403
+        st, r = await post(client, "/api/transfers/test", {"coin": "USDT"})
+        assert st == 200 and r["ready"] and len(r["rows"]) == 2 and r["rows"][0]["network"] == "TRC20"
+        return True
+
+    assert call(b, fn)
+
+
+def test_suggested_test_transfer_passes_analysis(bot_env, monkeypatch):
+    """Пробная сумма из проверки должна проходить анализ перевода (не «комиссия 50%»)."""
+    b, _ = bot_env
+    selftest_setup(b, monkeypatch)
+    r = asyncio.run(b.transfers.selftest())[0]
+    plan = asyncio.run(b.transfers.analyze("USDT", r["test_amount"], r["src"], r["dst"]))
+    assert plan.ok, plan.checks
