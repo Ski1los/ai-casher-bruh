@@ -243,9 +243,9 @@ def test_paper_balance_follows_real_money_until_first_trade():
 
     real_free = trader.free
     trader.free = boom
-    assert run(sc._free_usd("a")) == 5.0 and sc.st["paper"].get("a") is None  # ошибку не запоминаем
+    assert run(sc._free_usd("a")) == 10.0 and sc.st["paper"].get("a") is None  # ошибку не запоминаем
     trader.free = real_free
-    assert run(sc._free_usd("a")) == 5.0 and "a" in sc._paper_virtual
+    assert run(sc._free_usd("a")) == 10.0 and "a" in sc._paper_virtual  # v45: виртуальные $10 вместо $5
     ex.balance["USDT"] = 5.54  # деньги пришли позже
     assert run(sc._free_usd("a")) == 5.54 and "a" not in sc._paper_virtual
 

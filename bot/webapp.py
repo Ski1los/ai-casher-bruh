@@ -893,7 +893,7 @@ class WebApp:
         body = await self._body(request)
         t = self.b.trader
         on = bool(body.get("on"))
-        if on and not t.working:
+        if on and not t.working and t.state.live:
             raise ApiError("для автоторговли нужен рабочий ключ биржи")
         if on and not self.b.settings.triangular_enabled:
             raise ApiError("треугольный арбитраж выключен (TRIANGULAR=0)")
@@ -924,7 +924,7 @@ class WebApp:
             if "on" not in body:
                 return {"scalp": sc.status_dict(), "auto": t.state.auto}
         on = bool(body.get("on"))
-        if on and not t.working:
+        if on and not t.working and t.state.live:
             raise ApiError("для режима $5 нужен рабочий ключ биржи")
         if on:
             note = ""
@@ -1413,10 +1413,12 @@ class WebApp:
             d["autonomy"] = self.b.autonomy.status_dict()
         except Exception as e:
             log.warning("Автомат: %s", e)
+        from .demo_report import rows as demo_rows
+        d["demos"] = demo_rows(self.b)  # 🧪 вся демо-торговля: что работает и почему нет сделок
         return d
 
     async def profit_set(self, request: web.Request) -> dict:
-        """{guard} / {amount} / {resume: pilot|meme} / {unmute: copy} — только владелец."""
+        """{guard} / {amount} / {resume: pilot|meme} / {unmute: copy} / {demos_on} — только владелец."""
         self._owner(request)
         body = await self._body(request)
         p = self.b.profit
@@ -1451,6 +1453,11 @@ class WebApp:
             done.append(f"«Результат» раз в {h} ч" if h else "«Результат» выключен")
         if body.get("auto_real") is False:
             done.append(a.allow_real(False))
+            self.b.save_trading()
+        if body.get("demos_on"):  # ▶️ включить всё демо (только виртуальные деньги)
+            from .demo_report import enable_all
+            on = enable_all(self.b)
+            done.append("▶️ Включил: " + ", ".join(on) if on else "✅ Всё демо уже включено")
             self.b.save_trading()
         p._changed()
         self.b.save_copy()

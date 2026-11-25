@@ -304,6 +304,45 @@ class DemoManager:
         self.save()
         return [account_label(a) for a in self.accounts.values()]
 
+    def resume(self, amounts: list[float], chat_id: int | None = None) -> list[str]:
+        """Включить демо, не стирая историю: остановленные счета снова работают, недостающих сумм — добавляются.
+        Возвращает подписи новых счетов."""
+        if not self.accounts:
+            return self.start(amounts, chat_id)
+        strategies = ["cross"] + (["tri"] if self.settings.triangular_enabled else [])
+        now = time.time()
+        if chat_id is not None:
+            self.chat_id = chat_id
+        for acc in self.accounts.values():
+            acc.active = True
+        added = []
+        for st in strategies:
+            for amount in amounts:
+                aid = account_id(st, amount)
+                if aid not in self.accounts:
+                    self.accounts[aid] = DemoAccount(active=True, chat_id=self.chat_id, start_balance=amount,
+                                                     balance=amount, created_at=now, strategy=st)
+                    added.append(account_label(self.accounts[aid]))
+        self._rebuild()
+        self.save()
+        return added
+
+    def why_idle(self) -> str:
+        """Главная причина, почему у демо-счетов нет сделок (по всем счетам)."""
+        total: dict[str, int] = {}
+        best, best_pct = "", -1e9
+        for a in self.accounts.values():
+            for code, n in a.rejects.items():
+                total[code] = total.get(code, 0) + n
+            if a.best_rejected and a.best_rejected_percent > best_pct:
+                best, best_pct = a.best_rejected, a.best_rejected_percent
+        if not total:
+            return ("сканер пока не нашёл связок с прибылью после комиссий — бот ничего не покупает, пока не будет "
+                    "прибыли (это защита)")
+        top = sorted(total.items(), key=lambda kv: -kv[1])[:2]
+        text = "; ".join(f"{REASONS.get(k, k)} ×{v}" for k, v in top)
+        return text + (f". Лучшая отклонённая: {best}" if best else "")
+
     def stop(self) -> None:
         for acc in self.accounts.values():
             acc.active = False

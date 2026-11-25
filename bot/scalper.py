@@ -78,6 +78,8 @@ TREND_FAST, TREND_SLOW = 20, 200  # короткая и длинная сред�
 TREND_RSI_MIN, TREND_RSI_MAX = 40.0, 62.0
 MARKET_DROP_1H = -0.02  # BTC упал больше чем на 2% за час — новых покупок нет: весь рынок падает
 MARKET_CACHE_SEC = 60
+PAPER_START_USD = 10.0  # 🧪 тест: если на бирже меньше (или ключа нет) — виртуальные $10: с $5 продажа часто упирается
+                        # в минимальный ордер биржи, и тест стоял бы без сделок
 IDLE_RETRY_SEC = 3600  # «Монеты в дело»: если продажа монеты не прошла, следующая попытка через час
 # Лаборатория: каждая монета со своей стратегией «торгует» на бумаге по живым свечам по тем же правилам,
 # что и проверка на истории. Стратегия, которая вживую в минусе, к реальной торговле не допускается.
@@ -346,7 +348,7 @@ class Scalper:
         self.ranked_at: dict[str, float] = {}
         self.reasons: dict[str, str] = {}  # биржа -> что режим делал на последнем шаге и почему
         self._cur: str | None = None  # биржа, с которой сейчас работает шаг
-        self._paper_virtual: set[str] = set()  # биржи, где тест идёт на виртуальных $5 (реальных было меньше)
+        self._paper_virtual: set[str] = set()  # биржи, где тест идёт на виртуальных $10 (реальных меньше или нет ключа)
         self._market: dict[str, tuple[float, float | None]] = {}  # биржа -> (когда, изменение BTC за час)
         self._sig: dict[tuple[str, str], tuple[int, list]] = {}  # (биржа, пара) -> (номер 5-минутки, свечи)
         self._lab_period: dict[str, int] = {}  # биржа -> номер 5-минутки, на которой лаборатория уже отработала
@@ -430,8 +432,11 @@ class Scalper:
         return lowest_sale >= self._min_cost(name, symbol, price) * 1.001
 
     def exchanges(self) -> list[str]:
-        """Все биржи с рабочими ключами: режим $5 торгует на каждой своими деньгами (Bybit первым)."""
+        """Все биржи с рабочими ключами: режим $5 торгует на каждой своими деньгами (Bybit первым).
+        🧪 В тесте ключ не обязателен: нет рабочего ключа — тест идёт по публичным ценам бирж на виртуальные деньги."""
         working = list(self.trader.working)
+        if not working and not self.trader.state.live:
+            working = list(self.trader.scanner.exchanges)
         return sorted(working, key=lambda n: (n != "bybit", n))
 
     def exchange(self) -> str | None:
@@ -447,6 +452,17 @@ class Scalper:
 
     def turn_off(self) -> None:
         self.st["on"] = False
+
+    def paper_reset(self) -> int:
+        """🧪 Тест заново: тестовые балансы и тестовые позиции сбрасываются (опыт лаборатории остаётся)."""
+        st = self.st
+        n = sum(1 for p in st["positions"].values() if p and not p.get("live"))
+        st["positions"] = {k: p for k, p in st["positions"].items() if p and p.get("live")}
+        st["paper"] = {}
+        self._paper_virtual.clear()
+        if not self.trader.state.live:
+            st["stats"] = {"cycles": 0, "wins": 0, "pnl": 0.0, "since": time.time()}
+        return n
 
     # --- проверка на истории -----------------------------------------------
 
@@ -543,7 +559,8 @@ class Scalper:
         self.reasons = {n: r for n, r in self.reasons.items() if n in names}
         if not names:
             self._cur = None
-            self.last_reason = "нет рабочего ключа биржи (/keys)"
+            self.last_reason = ("нет рабочего ключа биржи (/keys)" if self.trader.state.live
+                                else "нет ни одной биржи в сканере")
             return []
         self.reasons.pop("_", None)
         out: list[str] = []
@@ -561,7 +578,8 @@ class Scalper:
         """Автопилот выключен, но ключ есть: лаборатория всё равно учится (без денег и без ордеров),
         чтобы к включению уже было видно, какие стратегии работают вживую. public=True — ключа нет
         (♾ полный автомат): учимся на публичных свечах, чтобы опыт копился ещё до первого депозита."""
-        for name in self.exchanges() or (self.public_exchanges() if public else []):
+        keyed = sorted(self.trader.working, key=lambda n: (n != "bybit", n))
+        for name in keyed or (self.public_exchanges() if public else []):
             try:
                 await self.rank(name)
                 await self.lab_step(name)
@@ -602,18 +620,23 @@ class Scalper:
         paper = self.st["paper"]
         if self.trader.state.live:
             return await self.trader.free(name, self.trader.settings.quote)
-        # тест: начинаем с реального свободного баланса (или виртуальных $5, если пусто). Пока тестовых
-        # сделок не было, сверяемся с биржей снова: деньги могли прийти позже или баланс не прочитался
-        if paper.get(name) is None or (name in self._paper_virtual and not self.positions.get(name)):
-            try:
-                real = await self.trader.free(name, self.trader.settings.quote)
-            except Exception:
-                return float(paper.get(name) or 5.0)  # не прочитали — не запоминаем виртуальные $5 навсегда
-            if real >= 5:
+        # тест: начинаем с реального свободного баланса (от $5 — как будет в реальном режиме), иначе (и без ключа) —
+        # с виртуальных $10. Пока тест на виртуальных и сделок ещё не было, сверяемся с биржей снова: деньги могли
+        # прийти позже. Ошибку чтения баланса не запоминаем
+        fresh = paper.get(name) is None or (name in self._paper_virtual and not self.positions.get(name)
+                                            and float(paper[name]) == PAPER_START_USD)
+        if fresh:
+            real = None
+            if name in self.trader.working:
+                try:
+                    real = await self.trader.free(name, self.trader.settings.quote)
+                except Exception:
+                    return float(paper.get(name) or PAPER_START_USD)
+            if real is not None and real >= 5:
                 paper[name] = round(real, 4)
                 self._paper_virtual.discard(name)
             elif paper.get(name) is None:
-                paper[name] = 5.0
+                paper[name] = PAPER_START_USD
                 self._paper_virtual.add(name)
         return float(paper[name])
 
@@ -643,6 +666,10 @@ class Scalper:
                                     else "биржа не отдала свечи, попробую позже")
             return []
         min_need = min(self._min_cost(name, r["symbol"]) for r, _, _ in good)
+        if free < min_need and not t.state.live:
+            self.last_reason = (f"🧪 тестовый баланс ${free:.2f} меньше минимального ордера биржи ${min_need:.2f} — "
+                                "тест ушёл в минус. Начать тест заново: <code>/scalp reset</code>")
+            return []
         if free < min_need:
             await self._fresh_balances(name)
             idle = self._idle_coins_text(name)
@@ -1294,7 +1321,8 @@ class Scalper:
                 lines.append(f"  на бирже: {real}")
             if not live and st["paper"].get(n) is not None:
                 lines.append(f"  тестовый баланс: ${float(st['paper'][n]):.2f}"
-                             + (" (виртуальные: на бирже меньше $5)" if n in self._paper_virtual else ""))
+                             + (" (виртуальные: на бирже меньше $5 или нет рабочего ключа)"
+                                if n in self._paper_virtual else ""))
             if self.positions.get(n):
                 lines.append("  позиция: " + self._pos_line(self.positions[n]))
             if self.reasons.get(n):

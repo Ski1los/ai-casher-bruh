@@ -118,7 +118,7 @@ class Autonomy:
 
     def _pilot_test_ok(self) -> bool:
         b, t = self.b, self.b.trader
-        if self.st["pilot_hold"] or not t.working or t.state.live or t.state.auto or b.scalper.on:
+        if self.st["pilot_hold"] or t.state.live or t.state.auto or b.scalper.on:
             return False
         # после /stop могла остаться настоящая позиция — сами её снова не «вооружаем»
         return not any(p.get("live") for p in (b.scalper.positions or {}).values())
@@ -129,9 +129,14 @@ class Autonomy:
         if b.owner_id is None:
             return []
         done: list[str] = []
+        from .demo_report import DEMO_ARB_AMOUNTS
         if not b.demo.accounts:  # демо ещё ни разу не запускали (остановленное руками не трогаем)
-            b.demo.start([5.0], b.owner_id)
-            done.append("🔺 демо-арбитраж на $5")
+            b.demo.start(DEMO_ARB_AMOUNTS, b.owner_id)
+            done.append("🔺 демо-арбитраж на $5 и $50")
+        elif b.demo.active:  # $5 почти всегда упирается в минимум биржи — рядом счёт $50 для сравнения
+            added = b.demo.resume(DEMO_ARB_AMOUNTS)
+            if added:
+                done.append("🔺 демо-арбитраж: " + ", ".join(added))
         if not b.copy.st["on"]:
             b.copy.st["on"] = True
             done.append("🐋 копитрейдинг (без денег)")
@@ -515,7 +520,7 @@ class Autonomy:
         t = b.trader
         pilot_note = ("на деньгах" if t.state.live and b.scalper.on else "в тесте" if b.scalper.on else
                       "остановлен тобой (/stop)" if self.st["pilot_hold"] else
-                      "нужен ключ биржи" if not t.working else "выключен")
+                      "выключен")
         return [
             ("🔺 Демо-арбитраж", b.demo.active, "" if b.demo.active else "остановлен" if b.demo.accounts else ""),
             ("🧪 Демо мемкоинов", b.meme.demo_on, ""),

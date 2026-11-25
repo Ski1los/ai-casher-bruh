@@ -136,6 +136,9 @@ async def scalp_preflight(b: ArbitrageBot) -> list[str]:
     out: list[str] = []
     if not names:
         return ["нет рабочего ключа биржи: /keys"]
+    if not t.state.live and not t.working:
+        return ["🧪 рабочего ключа биржи нет — тест идёт по публичным ценам на виртуальные $10. "
+                "Для реальной торговли понадобится ключ: /keys"]
     try:
         await t.inspect_keys()
     except Exception:
@@ -169,7 +172,7 @@ async def scalp_preflight(b: ArbitrageBot) -> list[str]:
             else:
                 out.append(f"{title}: на торговом счёте {free:.2f} {b.settings.quote}, а биржа принимает ордер от $5. "
                            "Пополни хотя бы до $5,5 (с запасом на округление), пока эта биржа будет ждать"
-                           + ("" if t.state.live else " (в тесте бот возьмёт виртуальные $5)"))
+                           + ("" if t.state.live else " (в тесте бот возьмёт виртуальные $10)"))
     if b.duplicate_running():
         out.append("работают две копии бота: покупки на паузе, пока не удалишь лишний сервис в Render")
     return out
@@ -638,7 +641,7 @@ def register(b: ArbitrageBot) -> None:
     async def toggle_auto(chat_id: int, on: bool | None = None) -> None:
         st = b.trader.state
         on = (not st.auto) if on is None else on
-        if on and not b.trader.working:
+        if on and not b.trader.working and b.trader.state.live:
             await b._send(chat_id, "Для автоторговли нужен рабочий ключ биржи: /keys")
             return
         if on and not b.settings.triangular_enabled:
@@ -685,7 +688,7 @@ def register(b: ArbitrageBot) -> None:
                      if live_pos else "")
             await b._send(chat_id, "⏸ Режим $5 выключен." + extra)
             return
-        if not b.trader.working:
+        if not b.trader.working and b.trader.state.live:
             await b._send(chat_id, "Для режима $5 нужен рабочий ключ биржи: /keys")
             return
         if b.trader.state.auto:
@@ -731,7 +734,7 @@ def register(b: ArbitrageBot) -> None:
         if not on:
             await toggle_scalp(chat_id, False)
             return
-        if not b.trader.working:
+        if not b.trader.working and b.trader.state.live:
             await b._send(chat_id, "Для автопилота нужен рабочий ключ биржи (права «Чтение + Спот торговля»): /keys")
             return
         sc.st["use_coins"] = True
@@ -779,6 +782,12 @@ def register(b: ArbitrageBot) -> None:
             await toggle_scalp(message.chat.id, False)
         elif arg in ("test", "bt", "история", "проверка"):
             await scalp_backtest(message.chat.id)
+        elif arg in ("reset", "заново", "сброс"):
+            n = b.scalper.paper_reset()
+            await after_change()
+            await b._answer(message, "🔁 Тест режима $5 начат заново: тестовый баланс снова "
+                            "с реального (или виртуальных $10)" + (f", закрыто тестовых позиций: {n}" if n else "")
+                            + ". Опыт лаборатории сохранён.")
         else:
             await b._refresh_balances()
             await b._answer(message, b.scalper.status_text(), scalp_keyboard(b))

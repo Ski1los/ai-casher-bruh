@@ -47,7 +47,8 @@ def test_ensure_turns_on_all_learning_without_money(bot_env):
     assert b.demo.active and b.demo.chat_id == b.owner_id  # демо-арбитраж на $5
     assert b.meme.demo_on and b.copy.on and b.mentors.train.st["on"] and b.mentors.scout.st["on"]
     assert any("демо-арбитраж" in x for x in done) and any("копитрейдинг" in x for x in done)
-    assert not b.scalper.on  # без ключа биржи автопилот не включаем
+    # v45: тест автопилота работает и без ключа — по публичным ценам на виртуальные деньги
+    assert b.scalper.on and not b.trader.state.live
     assert b.autonomy.ensure(NOW) == []  # второй раз — ничего не надо
     # остановленное руками демо не перезапускаем (оно обнулило бы результаты)
     b.demo.stop()

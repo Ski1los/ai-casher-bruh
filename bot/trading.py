@@ -1133,13 +1133,21 @@ class Trader:
         start = opp.legs[0].from_ccy
         need = self.settings.tri_min_profit_percent if min_net is None else min_net
         async with self._lock:
-            ex = self._ex(name)
-            free = await self.free(name, start)
+            if self.state.live:
+                ex = self._ex(name)
+                free = await self.free(name, start)
+            else:  # 🧪 тест: ключ не обязателен — баланс читаем, если можем, иначе считаем на лимите сделки
+                ex = None
+                try:
+                    free = await self.free(name, start) if name in self.working else 0.0
+                except Exception:
+                    free = 0.0
             cap = self.settings.max_trade_usd if amount is None else min(amount, self.settings.max_trade_usd)
             amount = min(cap, free * 0.998)
             note = ""
             if not self.state.live and amount < cap * 0.5:
-                note = f"на бирже {free:.2f} {start}, тест посчитан на ${cap:g}"
+                note = (f"на бирже {free:.2f} {start}, тест посчитан на ${cap:g}" if name in self.working else
+                        f"рабочего ключа нет — тест посчитан на ${cap:g} по публичным стаканам")
                 amount = cap
             res = TriExecution(False, self.state.live, opp, amount)
             if amount <= 0:
@@ -1263,18 +1271,24 @@ class Trader:
                 status["best"] = {"net": round(near.net_percent, 4), "path": near.text, "exchange": ""}
 
         usable = []
-        for name in self.creds:
-            why = self.trade_block_reason(name)
-            if why:
+        pool = list(self.creds)
+        if not self.state.live:  # 🧪 тест: и без ключа (или с неработающим) — по публичным стаканам, деньги виртуальные
+            pool += [n for n in self.scanner.exchanges if n not in pool]
+        for name in pool:
+            why = self.trade_block_reason(name) if name in self.creds else None
+            if why and self.state.live:
                 status["blocked"][name] = why
             else:
                 usable.append(name)
+                if why or name not in self.creds:
+                    status.setdefault("paper_public", []).append(name)
         executions: list[TriExecution] = []
-        if usable:  # и в тесте: сразу видно, что на торговом счёте пусто, ещё до реального режима
-            status["free"] = await self._free_quote(usable, now)
+        keyed = [n for n in usable if n in self.working]
+        if keyed:  # и в тесте: сразу видно, что на торговом счёте пусто, ещё до реального режима
+            status["free"] = await self._free_quote(keyed, now)
             status["low_money"] = {n: v for n, v in status["free"].items()
                                    if v is not None and v < self.min_start_usd(n)}
-            status["need_usd"] = {n: self.min_start_usd(n) for n in usable}
+            status["need_usd"] = {n: self.min_start_usd(n) for n in keyed}
             funding = {}
             for n in status["low_money"]:
                 f = await self.funding_usd(n, now)
@@ -1282,7 +1296,7 @@ class Trader:
                     funding[n] = round(f, 2)
             if funding:
                 status["funding"] = funding
-        if not self.creds:
+        if not usable and not self.creds:
             status["reason"], status["code"] = "нет API-ключей бирж (/keys)", "no_keys"
         elif not usable:
             status["reason"], status["code"] = "ни на одной бирже с ключом бот сейчас не может торговать", "blocked"
@@ -1465,6 +1479,10 @@ class Trader:
         if not st:
             lines.append("\nЕщё не было ни одной проверки после включения. Подожди один скан.")
             return "\n".join(lines)
+        public = [self.scanner.display_name(n) for n in st.get("paper_public") or []]
+        if public and not state.live:
+            lines.append(f"🧪 Без рабочего ключа тест идёт по публичным стаканам: {html.escape(', '.join(public))} "
+                         f"(виртуальные ${s.max_trade_usd:g} на цикл)")
         for name, value in (st.get("free") or {}).items():
             if value is not None:
                 need = self.min_start_usd(name)
