@@ -628,6 +628,22 @@ def seed_news(b, now: float) -> None:
     for s in nw.sources()[:27]:
         nw.health[s.key] = {"ok": 1, "fail": 0, "err": "", "at": now, "next": now + 600, "items": 20, "name": s.name}
     nw.last_tick = now
+    nt = b.newstrade.st
+    nt.update(cash=6.82, found=14, checked=11, day=[time.strftime("%Y-%m-%d", time.gmtime(now)), 2])
+    nt["open"] = [{"id": "n2:TON", "event": "n2", "coin": "TON", "symbol": "TON/USDT", "ex": "bybit", "cat": "listing_major",
+                   "title": "Binance добавит Toncoin (TON)", "live": False, "cost": 3.33, "amount": 1.06, "entry": 3.141,
+                   "fee": 0.001, "opened": now - 1500, "tp": 3.141 * 1.042, "sl": 3.141 * 0.975, "peak": 3.19,
+                   "be": False, "tp_pct": 4.2}]
+    nt["closed"] = [
+        {"coin": c, "ex": "bybit", "cat": cat, "title": "", "live": False, "cost": 3.33, "opened": now - h * 3600 - 9000,
+         "got": 3.33 * (1 + p / 100), "pnl": round(3.33 * p / 100, 4), "pct": p, "why": why, "closed": now - h * 3600}
+        for c, cat, p, why, h in [("WLD", "listing_major", 3.6, "цель", 30), ("ENA", "listing_major", -2.6, "стоп", 20),
+                                  ("ONDO", "etf_pos", 1.2, "4 ч прошло", 9), ("SEI", "listing_major", 2.3, "защита прибыли", 4)]]
+    nt["cats"] = {"listing_major": [5, 7.1, 4], "etf_pos": [2, 0.9, 1]}
+    nt["skips"] = [{"at": now - 4000, "coin": "PEPE", "why": "опоздали: с момента новости уже +5.8% из ожидаемых +4.1%",
+                    "title": ""},
+                   {"at": now - 900, "coin": "ARB", "why": "по фактам такие новости дают +0.6% за 4 ч — меньше порога +1.5%",
+                    "title": ""}]
 
 async def main():
     from tests import fake_market_api as fm

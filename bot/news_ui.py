@@ -20,7 +20,8 @@ HELP = ("📰 <b>Команды новостей</b>\n"
         "/news learn — чему бот научился (какие новости реально двигают цену)\n"
         "/news src — какие источники работают\n"
         "/news alerts on|off — уведомления о важных новостях\n"
-        "/news on|off — весь модуль (выключенный не ставит щит и паузы)")
+        "/news on|off — весь модуль (выключенный не ставит щит и паузы)\n"
+        "/newstrade — 🤖 торговля по новостям (демо, потом реал)")
 
 
 def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
@@ -30,9 +31,92 @@ def keyboard(b: ArbitrageBot) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="📋 Все за сутки", callback_data="nw:all")],
         [InlineKeyboardButton(text="🧠 Чему научился", callback_data="nw:learn"),
          InlineKeyboardButton(text="📡 Источники", callback_data="nw:src")],
+        [InlineKeyboardButton(text="🤖 Торговля по новостям", callback_data="nx:panel")],
         [InlineKeyboardButton(text="🔔 Уведомления: вкл" if st["alerts"] else "🔕 Уведомления: выкл",
                               callback_data="nw:alerts")],
     ])
+
+
+TRADE_HELP = ("🤖 <b>Торговля по новостям</b>\n"
+              "/newstrade — состояние, открытые сделки, экзамен на демо\n"
+              "/newstrade on|off — включить или выключить\n"
+              "/newstrade real — реальные сделки (только для типов новостей, сдавших экзамен на демо)\n"
+              "/newstrade demo — вернуть всё в демо\n"
+              "/newstrade sell — продать все открытые сделки по новостям\n"
+              "/newstrade reset — начать демо заново ($10)")
+
+REAL_WARNING = ("💵 <b>Включить реальные сделки по новостям?</b>\n\n"
+                "Вживую бот будет покупать только по тем типам новостей, которые сдали экзамен на демо, и только "
+                "в пределах лимитов (/set max_trade, дневной убыток). Остальные типы продолжат учиться на демо.\n\n"
+                "Риски: новость доходит до бота за минуты, цена может развернуться; стоп −2.5% при резком движении "
+                "может исполниться хуже. Две реальные сделки подряд в минус — бот сам вернётся в демо. /stop — тоже.")
+
+
+def trade_kb(b: ArbitrageBot) -> InlineKeyboardMarkup:
+    st = b.newstrade.st
+    rows = [[InlineKeyboardButton(text="⏸ Выключить" if st["on"] else "▶️ Включить",
+                                  callback_data="nx:off" if st["on"] else "nx:on"),
+             InlineKeyboardButton(text="🧪 Вернуть демо" if st["real"] else "💵 Реальные сделки",
+                                  callback_data="nx:demo" if st["real"] else "nx:real")]]
+    if st["open"]:
+        rows.append([InlineKeyboardButton(text="💰 Продать всё сейчас", callback_data="nx:sell")])
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="nx:panel"),
+                 InlineKeyboardButton(text="📰 Новости", callback_data="nx:news")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def real_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Да, включить", callback_data="nx:real2"),
+        InlineKeyboardButton(text="Отмена", callback_data="nx:panel")]])
+
+
+async def trade_action(b: ArbitrageBot, action: str, uid: int | None) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Общая логика команд и кнопок торговли по новостям. Возвращает (текст, клавиатура)."""
+    from .users_ui import is_main_owner
+
+    nt = b.newstrade
+    st = nt.st
+    if action in ("real", "real2") and b.owner_id is not None and not is_main_owner(b, uid):
+        return "Это может только главный владелец бота: реальные деньги включает только он.", None
+    if action in ("on", "off", "demo", "sell", "reset") and b.owner_id is not None and not b.is_owner(uid):
+        return "Это может только владелец бота.", None
+    if action in ("on", "off"):
+        st["on"] = action == "on"
+        nt._changed()
+        return (("▶️ Торговля по новостям включена: " + nt.mode_text()) if st["on"] else
+                "⏸ Торговля по новостям выключена (открытые сделки ведутся до цели или стопа)"), trade_kb(b)
+    if action == "real":
+        why = nt.real_problem()
+        if why:
+            return f"💵 Пока нельзя: {why}.", trade_kb(b)
+        return REAL_WARNING, real_kb()
+    if action == "real2":
+        why = nt.real_problem()
+        if why:
+            return f"💵 Пока нельзя: {why}.", trade_kb(b)
+        st["real"] = True
+        st["reverted"] = ""
+        nt._changed()
+        passed = [c for c in news_cats() if nt.graduated(c)]
+        return ("💵 <b>Реальные сделки по новостям включены</b> для: " + ", ".join(news_cats()[c] for c in passed)
+                + ". Остальные типы — на демо."), trade_kb(b)
+    if action == "demo":
+        st["real"] = False
+        nt._changed()
+        return "🧪 Торговля по новостям — снова демо", trade_kb(b)
+    if action == "sell":
+        msgs = await nt.sell_all()
+        return ("\n\n".join(msgs) or "Открытых сделок по новостям нет."), trade_kb(b)
+    if action == "reset":
+        nt.reset_demo()
+        return f"🧪 Демо торговли по новостям начато заново: ${nt.equity():.2f}", trade_kb(b)
+    return nt.panel_text(), trade_kb(b)
+
+
+def news_cats() -> dict:
+    from .news import CATS
+    return {k: v[1] for k, v in CATS.items()}
 
 
 def register(b: ArbitrageBot) -> None:
@@ -75,6 +159,34 @@ def register(b: ArbitrageBot) -> None:
                                  else "⏸ Новости выключены: щит монет и паузы по новостям сняты")
         else:
             await b._send(message.chat.id, HELP)
+
+    @dp.message(Command("newstrade", "newsbot", "nt_trade"))
+    async def cmd_newstrade(message: Message, command: CommandObject) -> None:
+        if not b._allowed(message):
+            return
+        uid = message.from_user.id if message.from_user else None
+        arg = (command.args or "").strip().lower().split()
+        action = {"on": "on", "off": "off", "real": "real", "реал": "real", "demo": "demo", "демо": "demo",
+                  "sell": "sell", "reset": "reset", "": "panel"}.get(arg[0] if arg else "", "help")
+        if action == "help":
+            await b._send(message.chat.id, TRADE_HELP)
+            return
+        text, kb = await trade_action(b, action, uid)
+        await b._send(message.chat.id, text, kb)
+
+    @dp.callback_query(F.data.startswith("nx:"))
+    async def cb_newstrade(cb: CallbackQuery) -> None:
+        if not b._allowed_user(cb.from_user.id):
+            await cb.answer()
+            return
+        action = cb.data.split(":", 1)[1]
+        chat_id = cb.message.chat.id if cb.message else cb.from_user.id
+        await cb.answer()
+        if action == "news":
+            await b._send(chat_id, b.news.panel_text(), keyboard(b))
+            return
+        text, kb = await trade_action(b, action, cb.from_user.id)
+        await b._send(chat_id, text, kb)
 
     @dp.callback_query(F.data.startswith("nw:"))
     async def cb_news(cb: CallbackQuery) -> None:

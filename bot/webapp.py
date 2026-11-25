@@ -795,12 +795,26 @@ class WebApp:
     # --- ⚖️ спред-арбитраж -----------------------------------------------------------------------------
 
     async def news(self, request: web.Request) -> dict:
-        return self.b.news.status_dict()
+        return {**self.b.news.status_dict(), "trade": self.b.newstrade.status_dict()}
 
     async def news_set(self, request: web.Request) -> dict:
         """📰 {refresh: true} — прочитать все источники сейчас; {alerts|on: bool} — только владелец."""
         body = await self._body(request)
         nw = self.b.news
+        if any(k in body for k in ("trade_on", "trade_real", "trade_sell", "trade_reset")):
+            from .news_ui import trade_action
+            self._owner(request)
+            uid = request[USER]["id"]
+            action = ("on" if body.get("trade_on") else "off") if "trade_on" in body else \
+                ("real2" if body.get("trade_real") and body.get("confirm") else "real" if body.get("trade_real")
+                 else "demo") if "trade_real" in body else "sell" if body.get("trade_sell") else "reset"
+            text, _ = await trade_action(self.b, action, uid)
+            if text.startswith("Это может только"):
+                raise ApiError(text, 403)
+            if text.startswith("💵 Пока нельзя"):
+                raise ApiError(re.sub(r"<[^>]+>", "", text)[2:300].strip(), 400)
+            if action == "real":
+                raise ApiError("нужно подтверждение (confirm: true)", 400)
         if "alerts" in body or "on" in body:
             self._owner(request)
             if "alerts" in body:
@@ -812,7 +826,7 @@ class WebApp:
         if body.get("refresh"):
             for text in await nw.tick(force=True):
                 await self.b.notify(text)
-        return nw.status_dict()
+        return {**nw.status_dict(), "trade": self.b.newstrade.status_dict()}
 
     async def spread(self, request: web.Request) -> dict:
         return self.b.spread.status_dict()

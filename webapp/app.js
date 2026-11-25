@@ -732,7 +732,7 @@ function renderHome() {
       <div class="o6 col" style="gap:10px">
         <div class="section-title" style="margin:6px 4px 0">Движки заработка</div>
         <div class="banner info press" data-act="opps"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
-        <div class="banner info press" data-act="news"><div style="font-size:22px">📰</div><div><b>Новости → рынок</b><br><span class="muted">~30 источников, щит после плохих новостей, пауза вокруг данных США, чему бот научился</span> <span class="link">Открыть →</span></div></div>
+        <div class="banner info press" data-act="news"><div style="font-size:22px">📰</div><div><b>Новости → рынок</b><br><span class="muted">~30 источников, 🤖 сделки по свежим новостям (демо → реал), щит после плохих новостей, пауза вокруг данных США</span> <span class="link">Открыть →</span></div></div>
         ${[profitCard(), scalpCard(), copyCard(), mentorsCard(), autoCard()].join("").replace(/margin-top:10px/g, "margin-top:0")}
       </div>
     </div>
@@ -2363,6 +2363,7 @@ function newsHtml(x) {
       ${owner() ? `<button class="btn grow" data-act="news-alerts">${x.alerts ? "🔔 Уведомления: вкл" : "🔕 Уведомления: выкл"}</button>` : ""}
     </div>
     ${(x.shield || []).length ? `<div class="section-title">🛡 Щит по новостям · не покупаю, спред не трогает</div><div class="list">${x.shield.map((c) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">${esc(c.coin)}</div><div class="s" style="white-space:normal">до ${when(c.until)} · ${esc(c.why)}</div></div></div>`).join("")}</div>` : ""}
+    ${newsTradeHtml(x.trade)}
     <div class="section-title">Главное за сутки</div>
     ${(x.events || []).length ? `<div class="list">${x.events.slice(0, 12).map(ev).join("")}</div>` : `<div class="card empty">Собираю новости: первые появятся через пару минут после запуска</div>`}
     <div class="section-title">🧠 Чему научился</div>
@@ -2373,10 +2374,38 @@ function newsHtml(x) {
     <div class="tiny muted" style="margin-top:12px;white-space:normal">Новость — не сигнал «покупай»: к публикации цена часто уже сдвинулась. Бот меряет, что было после каждой новости, учится на этом и защищает деньги: щит монет, пауза в шторм и вокруг данных США. Вживую по новостям сам не покупает.</div>`;
 }
 
+function newsTradeHtml(t) {
+  if (!t) return "";
+  const own = owner();
+  return `<div class="section-title">🤖 Торговля по новостям</div>
+    <div class="card">
+      <div class="row between"><div class="b">${t.real ? (t.live_now ? "💵 Реальный режим" : "💵 Реал включён, сейчас демо") : "🧪 Демо"}</div>
+        <label class="switch"><input type="checkbox" data-act="ns-toggle" ${t.on ? "checked" : ""} ${own ? "" : "disabled"}><span></span></label></div>
+      <div class="tiny muted" style="white-space:normal;margin-top:4px">Хорошая свежая новость → токен на Bybit/BingX → проверка «не опоздали ли» → покупка с целью, стопом −2.5% и выходом через 4 ч.${t.real && !t.live_now && t.live_why ? ` Сейчас демо: ${esc(t.live_why)}.` : ""}</div>
+      <div class="grid2" style="margin-top:10px">
+        <div class="stat"><div class="k">Демо-счёт</div><div class="v num ${cls(t.equity - t.start)}">${money(t.equity)}</div><div class="small muted">из ${money(t.start)} · сделок ${t.demo.n}, в плюс ${t.demo.wins}</div></div>
+        <div class="stat"><div class="k">Реальные</div><div class="v num ${cls(t.real_totals.pnl)}">${money(t.real_totals.pnl, { sign: true })}</div><div class="small muted">сделок ${t.real_totals.n}, в плюс ${t.real_totals.wins}</div></div>
+      </div>
+      ${own ? `<div class="row" style="gap:8px;margin-top:10px"><button class="btn grow" data-act="ns-mode">${t.real ? "🧪 Вернуть демо" : "💵 Реальные сделки"}</button>${t.open.length ? `<button class="btn grow" data-act="ns-sell">💰 Продать всё</button>` : ""}</div>` : ""}
+    </div>
+    ${t.open.length ? `<div class="list" style="margin-top:8px">${t.open.map((p) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">${p.live ? "💵" : "🧪"} ${esc(p.coin)} · ${esc(p.ex)}</div><div class="s" style="white-space:normal">${money(p.cost)} по ${amount(p.entry)} · цель ${amount(p.tp)} · стоп ${amount(p.sl)} · до ${when(p.until)}<br>${esc(p.title)}</div></div></div>`).join("")}</div>` : ""}
+    ${t.exam.length ? `<div class="card" style="margin-top:8px"><div class="b">🎓 Экзамен на демо</div><div class="tiny muted" style="white-space:normal">Вживую — только типы новостей с ≥ ${t.grad.n} сделками, в среднем ≥ +${t.grad.avg}% и в плюс ≥ ${Math.round(t.grad.win * 100)}%</div>${t.exam.map((x) => `<div class="row between small" style="margin-top:6px"><span>${x.icon} ${esc(x.name)}</span><span class="num ${cls(x.avg)}">${pct(x.avg, 2)} · ${x.passed ? "✅ сдал" : `${x.n}/${t.grad.n}`}</span></div>`).join("")}</div>` : ""}
+    ${t.closed.length ? `<div class="list" style="margin-top:8px">${t.closed.map((c) => `<div class="item"><div class="grow"><div class="t">${c.live ? "💵" : "🧪"} ${esc(c.coin)}</div><div class="s">${esc(c.why)} · ${when(c.closed)}</div></div><div class="r"><div class="b num ${cls(c.pct)}">${pct(c.pct, 2)}</div></div></div>`).join("")}</div>` : ""}
+    ${t.skips.length ? `<div class="card" style="margin-top:8px"><div class="b small">Почему не купил</div>${t.skips.map((s) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">• ${esc(s.coin)}: ${esc(s.why)}</div>`).join("")}</div>` : ""}
+    <div class="tiny muted" style="margin-top:6px">Найдено токенов в новостях: ${t.found}, проверено: ${t.checked}</div>`;
+}
+
 async function newsSheet() {
   Sheet.open("Новости → рынок", newsHtml(S.news), { full: true });
   try { S.news = await api("/api/news"); } catch (e) { fail(e); return; }
   Sheet.body().innerHTML = newsHtml(S.news);
+}
+
+async function ntMode(btn) {
+  const t = (S.news || {}).trade || {};
+  if (t.real) return newsSet({ trade_real: false }, "🧪 Торговля по новостям — демо", btn);
+  if (!(await confirmBox("Включить РЕАЛЬНЫЕ сделки по новостям? Вживую бот покупает только по типам новостей, которые сдали экзамен на демо, в пределах лимитов. Новость доходит до бота за минуты — цена может развернуться; стоп −2.5% при резком движении может исполниться хуже. Две реальные сделки подряд в минус — бот сам вернётся в демо."))) return;
+  newsSet({ trade_real: true, confirm: true }, "💵 Реальные сделки по новостям включены", btn);
 }
 
 async function newsSet(body, okText, btn) {
@@ -2588,6 +2617,8 @@ document.addEventListener("click", async (e) => {
     case "opps": haptic.tap(); oppsSheet(); break;
     case "news": haptic.tap(); newsSheet(); break;
     case "news-refresh": newsSet({ refresh: true }, "Новости обновлены", el); break;
+    case "ns-mode": ntMode(el); break;
+    case "ns-sell": if (await confirmBox("Продать все открытые сделки по новостям по рынку?")) newsSet({ trade_sell: true }, "Продано", el); break;
     case "news-alerts": haptic.sel(); newsSet({ alerts: !(S.news || {}).alerts }, (S.news || {}).alerts ? "🔕 Уведомления о новостях выключены" : "🔔 Уведомления о новостях включены"); break;
     case "opps-tab": haptic.sel(); S.oppsTab = d.v; $$('[data-act="opps-tab"]').forEach((b) => b.classList.toggle("on", b.dataset.v === d.v)); $("#oppsBox").innerHTML = oppsBody(S.opps, d.v); break;
     case "opps-plan": haptic.tap(); oppsPlan(); break;
@@ -2666,6 +2697,7 @@ document.addEventListener("change", (e) => {
   else if (el.dataset.act === "scalp-coins") toggleScalpCoins(el);
   else if (el.dataset.act === "live") toggleLive(el);
   else if (el.dataset.act === "cc-auto") ccAuto(el);
+  else if (el.dataset.act === "ns-toggle") newsSet({ trade_on: el.checked }, el.checked ? "🤖 Торговля по новостям включена" : "Торговля по новостям выключена");
   else if (el.dataset.act === "nt-on") notifySet({ muted: !el.checked }, el);
   else if (el.dataset.act === "nt-quiet") notifySet({ quiet: el.checked }, el);
   else if (el.dataset.act === "copy-on") copyAction({ on: el.checked }, el.checked ? "Копитрейдинг включён" : "Выключен");
