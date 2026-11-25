@@ -1874,6 +1874,19 @@ function autonomyBlock(d) {
   </div>`;
 }
 
+function demosBlock(d) {
+  const list = d.demos || [];
+  if (!list.length) return "";
+  const on = list.filter((r) => r.on).length;
+  const total = list.reduce((x, r) => x + (r.n || 0), 0);
+  const rows = list.map((r) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t" style="white-space:normal">${r.on ? "🟢" : "⚪️"} ${esc(r.icon)} ${esc(r.title)}</div>
+      <div class="s" style="white-space:normal">${r.result ? esc(r.result) + " · " : ""}${r.n && r.on ? "сейчас: " : r.on ? "почему нет сделок: " : ""}${esc(r.why || "")}</div></div>
+      <div class="r"><div class="b num">${r.n}</div><div class="tiny muted">сделок</div></div></div>`).join("");
+  return `<div class="section-title">🧪 Вся демо-торговля · ${on}/${list.length} · сделок ${total}</div>
+    <div class="list">${rows}</div>
+    ${d.owner && on < list.length ? `<button class="btn sm" style="margin-top:8px" data-act="pf-demos">▶️ Включить всё демо</button>` : ""}`;
+}
+
 function profitSheet() {
   const d = S.profit;
   if (!d) { Sheet.open("Профит-центр", `<div class="card empty">Считаю…</div>`, { full: true }); loadProfit(); return; }
@@ -1892,6 +1905,7 @@ function profitSheet() {
     ${d.muted && d.muted.copy ? `<div class="banner" style="margin-top:8px;white-space:normal">🔕 Сигналы копитрейдинга выключены Стражем (демо в минусе) ${d.owner ? `<button class="btn sm ghost" data-act="pf-unmute">Вернуть</button>` : ""}</div>` : ""}
     <div class="section-title">Что зарабатывает</div>
     ${rows ? `<div class="list">${rows}</div>` : `<div class="card empty">Сделок пока нет ни у одного способа. Включи демо мемкоинов, копитрейдинг, тренировку или автопилот в тесте.</div>`}
+    ${demosBlock(d)}
     <div class="section-title">План денег</div>
     <div class="chips">${amounts}</div>
     <div class="list" style="margin-top:8px">${plan}</div>
@@ -2484,6 +2498,7 @@ document.addEventListener("click", async (e) => {
     case "pf-amount": haptic.tap(); if (S.profit && S.profit.owner) profitAction({ amount: Number(d.v) }); else loadProfit(d.v); break;
     case "pf-resume": if (await popup("Снять паузу?", "Страж поставил паузу, потому что последние настоящие сделки доказанно в минусе. Снова проверит после 5 новых сделок.", "Снять")) profitAction({ resume: d.v }); break;
     case "pf-unmute": profitAction({ unmute: "copy" }); break;
+    case "pf-demos": haptic.tap(); profitAction({ demos_on: true }); break;
     case "au-every": haptic.sel(); profitAction({ auto_every: Number(d.v) }); break;
     case "au-realoff": if (confirm("Запретить автомату настоящие деньги? То, что он включил, вернётся в тест.")) profitAction({ auto_real: false }); break;
     case "pf-ai": haptic.tap(); aiSheet(); if (S.ov && S.ov.ai) askAI("Как мне получить максимум прибыли при минимальном риске по данным Профит-центра? Что доказало плюс, куда и сколько положить, что включить или выключить."); break;

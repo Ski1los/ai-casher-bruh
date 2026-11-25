@@ -29,7 +29,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import (autonomy, copy_ui, council, extras_ui, feed, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
+from . import (autonomy, copy_ui, council, demo_report, extras_ui, feed, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
                spread, trading_ui, transfers,
                updater, users_ui)
 from .copytrade import CopyTrader
@@ -173,7 +173,7 @@ HELP_TEXT = """\
 <b>Демо-счета</b> (виртуальные деньги, реальные стаканы и комиссии)
 /demo_start — демо на $5, $50 и $500 (<code>/demo_start 5</code> — только $5)
 /demo — сводка по всем счетам
-/demo 5 — счета на $5: сделки и отказы
+/demos — всё демо сразу и почему нет сделок
 /demo_history — последние сделки
 /demo_stop — остановить демо
 
@@ -1569,6 +1569,7 @@ class ArbitrageBot:
         feed.register(self)
         transfers.register(self)
         spread.register(self)
+        demo_report.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
 
@@ -1978,6 +1979,7 @@ class ArbitrageBot:
                     BotCommand(command="auto_on", description="Включить автосигналы"),
                     BotCommand(command="auto_off", description="Выключить автосигналы"),
                     BotCommand(command="demo_start", description="Демо на $5, $50, $500"),
+                    BotCommand(command="demos", description="🧪 Вся демо-торговля: почему нет сделок"),
                     BotCommand(command="demo", description="Демо: сводка по счетам"),
                     BotCommand(command="demo_history", description="Демо: последние сделки"),
                     BotCommand(command="demo_stop", description="Остановить демо"),
