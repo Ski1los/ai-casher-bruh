@@ -277,6 +277,8 @@ class WebApp:
             ("GET", "/api/spread"): self.spread,
             ("POST", "/api/spread"): self.spread_set,
             ("POST", "/api/spread/check"): self.spread_check,
+            ("GET", "/api/news"): self.news,
+            ("POST", "/api/news"): self.news_set,
         }
         for (method, path), handler in routes.items():
             r.add_route(method, path, self._wrap(handler))
@@ -791,6 +793,26 @@ class WebApp:
                 "transfers": self._transfers_dict()}
 
     # --- ⚖️ спред-арбитраж -----------------------------------------------------------------------------
+
+    async def news(self, request: web.Request) -> dict:
+        return self.b.news.status_dict()
+
+    async def news_set(self, request: web.Request) -> dict:
+        """📰 {refresh: true} — прочитать все источники сейчас; {alerts|on: bool} — только владелец."""
+        body = await self._body(request)
+        nw = self.b.news
+        if "alerts" in body or "on" in body:
+            self._owner(request)
+            if "alerts" in body:
+                nw.st["alerts"] = bool(body.get("alerts"))
+            if "on" in body:
+                nw.st["on"] = bool(body.get("on"))
+                nw.apply()
+            nw._changed()
+        if body.get("refresh"):
+            for text in await nw.tick(force=True):
+                await self.b.notify(text)
+        return nw.status_dict()
 
     async def spread(self, request: web.Request) -> dict:
         return self.b.spread.status_dict()

@@ -202,7 +202,23 @@ def _pulse(b) -> dict:
     return _row("pulse", "⚡", "Пульс рынка (GMGN/Axiom)", st["on"], n, _pct_line(rets), why, "/pulse")
 
 
-PARTS = (_arb, _tri, _pilot, _lab, _spread, _copy, _meme, _train, _mirror, _pulse)
+def _news(b) -> dict:
+    nw = b.news
+    st = nw.st
+    rets = [float(c["pct"]) for c in st["paper"]["closed"]]
+    opened = len(st["paper"]["open"])
+    if not st["on"]:
+        why = "новости выключены: /news on"
+    elif opened:
+        why = f"ждёт 4 ч после новости: открыто {opened}"
+    else:
+        why = (f"ждёт хорошую свежую новость по монете с наших бирж (ожидаемый рост ≥ 1.5% за 4 ч); "
+               f"замеров влияния: {st.get('measured', 0)}")
+    return _row("news", "📰", "Новости — бумажные сделки по сигналам", st["on"], len(rets), _pct_line(rets), why,
+                "/news")
+
+
+PARTS = (_arb, _tri, _pilot, _lab, _spread, _news, _copy, _meme, _train, _mirror, _pulse)
 
 
 def rows(b) -> list[dict]:

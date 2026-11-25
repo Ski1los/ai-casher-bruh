@@ -29,8 +29,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import (autonomy, copy_ui, council, demo_report, extras_ui, feed, meme_ui, market_ui, mentors_ui, notify, opps_ui, profit_ui, pulse_ui,
-               spread, trading_ui, transfers,
+from . import (autonomy, copy_ui, council, demo_report, extras_ui, feed, meme_ui, market_ui, mentors_ui, news, news_ui,
+               notify, opps_ui, profit_ui, pulse_ui, spread, trading_ui, transfers,
                updater, users_ui)
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
@@ -544,6 +544,9 @@ class ArbitrageBot:
         # (bot/autonomy.py); состояние — в copy.st["autonomy"]
         self.autonomy = Autonomy(self)
         self.trader.on_panic = self.autonomy.on_panic
+        # 📰 Новости → рынок: ~30 источников, замер влияния на цену, обучение, щит и паузы (bot/news.py);
+        # состояние — в copy.st["news"]
+        self.news = news.News(self)
         self._loops: dict[str, tuple] = {}  # имя → (фабрика корутины, задача): сторож перезапускает упавшие
         self._beats: dict[str, float] = {}  # имя цикла → когда он последний раз отметился (для поиска зависших)
 
@@ -839,7 +842,8 @@ class ArbitrageBot:
             "price_alerts": [a.symbol_text + f" ({a.exchange})" for a in self.alerts.items[:15]],
             "api_keys": keys,
             "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
-                                "/hot", "/radar", "/council", "/mentors", "/stream", "/train", "/profit", "/pulse"],
+                                "/hot", "/radar", "/council", "/mentors", "/stream", "/train", "/profit", "/pulse",
+                                "/news"],
             "memecoin_radar_on": bool(self.radar_chats),
             "ai_council_last": self.council_last,
             "copytrading_solana": self._copy_context(),
@@ -847,7 +851,15 @@ class ArbitrageBot:
             "market_pulse_gmgn_axiom": self._pulse_context(),
             "transfers_between_exchanges": self._transfers_context(),
             "spread_arbitrage": self._spread_context(),
+            "news": self._news_context(),
         }
+
+    def _news_context(self) -> dict:
+        try:
+            return self.news.context()
+        except Exception as e:
+            log.warning("Новости для ИИ: %s", e)
+            return {}
 
     def _spread_context(self) -> dict:
         try:
@@ -1569,6 +1581,7 @@ class ArbitrageBot:
         feed.register(self)
         transfers.register(self)
         spread.register(self)
+        news_ui.register(self)
         demo_report.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
@@ -2012,7 +2025,7 @@ class ArbitrageBot:
                     BotCommand(command="train", description="🏋️ Тренировка: сам торгую выученным на демо"),
                     BotCommand(command="scout", description="🔭 Разведчик: сам ищу прибыльных трейдеров"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
-                    BotCommand(command="news", description="📰 Новости крипты"),
+                    BotCommand(command="news", description="📰 Новости: влияние на рынок, щит, обучение"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
                     BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
                     BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
@@ -2043,6 +2056,7 @@ class ArbitrageBot:
             tasks.append(self._spawn("alerts", lambda: extras_ui.alerts_loop(self)))
             tasks.append(self._spawn("radar", lambda: market_ui.radar_loop(self)))
             tasks.append(self._spawn("opps", lambda: opps_ui.opps_loop(self)))
+            tasks.append(self._spawn("news", lambda: news.news_loop(self)))
             tasks.append(self._spawn("copy", lambda: copy_ui.copy_loop(self)))
             tasks.append(self._spawn("mentors", lambda: mentors_ui.mentors_loop(self)))
             tasks.append(self._spawn("profit", lambda: profit_ui.profit_loop(self)))
@@ -2072,6 +2086,7 @@ class ArbitrageBot:
                 await runner.cleanup()
             await self.scanner.close()
             await self.opps.close()
+            await self.news.close()
             await self.ai.client.close()
             await self.phantom.close()
             await self.dex.close()

@@ -350,6 +350,22 @@ def _automat_checks(b: ArbitrageBot, now: float) -> list[Check]:
                                     if stale else "")))
         except Exception as e:  # у тестовых заглушек может не быть части полей
             log.debug("doctor: автомат: %s", e)
+    nw = getattr(b, "news", None)
+    if nw is not None:
+        try:
+            st = nw.st
+            ok, total = nw.working()
+            if not st["on"]:
+                out.append(Check("Автомат", "📰 Новости", "info", "выключены: щита и пауз по новостям нет. Включить: /news on"))
+            elif not nw.health:
+                out.append(Check("Автомат", "📰 Новости", "info", "первый сбор новостей — через минуту после запуска"))
+            else:
+                bad = ok < total / 2
+                out.append(Check("Автомат", "📰 Новости", "warn" if bad else "ok",
+                                 f"источников работает {ok} из {total}, замеров влияния на цену: {st.get('measured', 0)}"
+                                 + (". Многие не отвечают — список: /news src" if bad else "")))
+        except Exception as e:
+            log.debug("doctor: новости: %s", e)
     gmgn = getattr(b, "gmgn", None)
     if gmgn is not None:
         g = gmgn.status()

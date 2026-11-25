@@ -527,7 +527,7 @@ class Transfers:
                 plan.add("bad", f"лимит ${st['day_usd']:g} в сутки: сегодня уже ${st['day_sent']:.2f} (/transfer limit)")
             else:
                 plan.add("ok", f"≈${plan.usd:.2f} — в пределах лимитов (${st['max_usd']:g} за раз, ${st['day_usd']:g} в сутки)")
-        risk = (self.b.scalper.st.get("risk") or {}).get(coin)
+        risk = (self.b.scalper.st.get("nrisk") or {}).get(coin) or (self.b.scalper.st.get("risk") or {}).get(coin)
         if risk and float(risk[0]) > time.time():
             plan.add("warn", f"по {coin} есть тревожные новости: {risk[1]}")
         try:

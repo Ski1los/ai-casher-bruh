@@ -256,6 +256,14 @@ class Spread:
     def wants_scan(self) -> bool:
         return bool(self.st["on"] or self.active())
 
+    def news_pause(self, now: float | None = None) -> tuple[float, str] | None:
+        news = getattr(self.b, "news", None)
+        try:
+            return news.pause(now) if news is not None else None
+        except Exception as e:
+            log.info("Спред: пауза по новостям: %s", e)
+            return None
+
     def problems(self) -> list[str]:
         """Что мешает работать прямо сейчас (пусто — готов)."""
         t = self.b.trader
@@ -282,6 +290,8 @@ class Spread:
         cool = self.st["cool"]
         skipped: dict[str, int] = {}
         out = []
+        news = getattr(self.b, "news", None)
+        nrisk = news.risk(now) if news is not None else {}
         for o in getattr(result, "opportunities", None) or []:
             coin, q = (o.symbol.split("/") + [""])[:2]
             src, dst = o.buy.exchange, o.sell.exchange
@@ -300,6 +310,9 @@ class Spread:
                     self.st["reasons"]["stale"] = int(self.st["reasons"].get("stale", 0)) + 1
             if self.bad(coin, now):
                 skipped["bad"] = skipped.get("bad", 0) + 1
+                continue
+            if coin in nrisk:  # 📰 взлом, делистинг, иск…: биржи часто закрывают вывод, цена падает, пока монеты едут
+                skipped["news"] = skipped.get("news", 0) + 1
                 continue
             vol = min(float(getattr(o.buy, "volume_usd", 0) or 0), float(getattr(o.sell, "volume_usd", 0) or 0))
             if vol < MIN_VOL_USD:
@@ -739,6 +752,8 @@ class Spread:
                 return msgs
             if self.live and self.b.duplicate_running():
                 return msgs
+            if self.news_pause(now):  # ⏰ важные данные США или 🌩 шторм: пока монеты едут, цена может улететь
+                return msgs
             told = st["told"]
             for o in cands[:CANDIDATES]:
                 if len(self.active()) >= self.max_runs:
@@ -854,6 +869,9 @@ class Spread:
         probs = self.problems()
         if probs:
             lines += ["", "⛔ <b>Мешает</b>:"] + [f"• {html.escape(p)}" for p in probs]
+        np = self.news_pause()
+        if np:
+            lines.append(f"⏸ Новые сделки на паузе до {self.when(np[0])}: {html.escape(np[1])} (/news)")
         act = self.active()
         if act:
             lines += ["", "<b>Сейчас</b>:"] + [self.run_line(r) for r in act]
@@ -874,7 +892,7 @@ class Spread:
         sk = self.skipped
         if sk:
             parts = [f"{t} {sk[k]}" for k, t in (("bad", "в карантине"), ("volume", "тонкий рынок"),
-                                                  ("cool", "пауза после отказа")) if sk.get(k)]
+                                                  ("news", "тревожные новости"), ("cool", "пауза после отказа")) if sk.get(k)]
             lines.append("Отсеял до анализа на последнем скане: " + ", ".join(parts))
         bad = self.bad_rows()
         if bad:
@@ -912,8 +930,10 @@ class Spread:
         runs = [r for r in st["runs"] if r.get("stage") in ("done", "stuck")][-6:][::-1]
         bad = [{"coin": c, "until": float(x["until"]), "why": x.get("why", ""), "auto": bool(x.get("auto", True))}
                for c, x in self.bad_rows()]
+        np = self.news_pause()
         return {"on": bool(st["on"]), "live": self.live, "paper": bool(st["paper"]),
                 "max_runs": self.max_runs, "bad": bad[:20], "skipped": dict(self.skipped),
+                "news_pause": {"until": np[0], "why": np[1]} if np else None,
                 "stuck": int(st.get("stuck") or 0),
                 "trading_live": bool(self.b.trader.state.live), "min_pct": st["min_pct"], "min_usd": st["min_usd"],
                 "max_usd": min(float(st["max_usd"]), float(self.b.settings.max_trade_usd)), "max_net_min": MAX_NET_MIN,
