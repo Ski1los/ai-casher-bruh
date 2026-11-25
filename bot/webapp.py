@@ -815,6 +815,26 @@ class WebApp:
                     raise ApiError("нужно подтверждение")
             await spread_mod.set_paper(self.b, paper)
             self._changed("📱 ⚖️ Спред: " + ("тест на бумаге" if sp.st["paper"] else "💵 реальные сделки"))
+        if body.get("unban"):  # 🚫 карантин проблемных монет
+            coin = str(body["unban"]).upper().strip()
+            if sp.unban(coin):
+                self._changed(f"📱 ⚖️ Спред: {coin} вышла из карантина")
+            self.b.save_trading()
+        if body.get("ban"):
+            coin = str(body["ban"]).upper().strip()
+            if not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
+                raise ApiError("монета — латиницей, например LUNC")
+            sp.ban(coin, 30 * 86400, "добавлено вручную из приложения", auto=False)
+            self.b.save_trading()
+        if "max_runs" in body:
+            try:
+                v = int(body["max_runs"])
+            except (TypeError, ValueError):
+                raise ApiError("max_runs — число") from None
+            if not 1 <= v <= spread_mod.MAX_RUNS_CAP:
+                raise ApiError(f"сделок одновременно: 1–{spread_mod.MAX_RUNS_CAP}")
+            sp.st["max_runs"] = v
+            self.b.save_trading()
         if "on" in body:
             on = bool(body.get("on"))
             text = await spread_mod.set_on(self.b, on)
