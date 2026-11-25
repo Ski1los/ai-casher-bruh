@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 
 from . import (autonomy, copy_ui, council, demo_report, extras_ui, feed, meme_ui, market_ui, mentors_ui, news, news_ui,
-               notify, opps_ui, profit_ui, pulse_ui, spread, trading_ui, transfers,
+               news_trade, notify, opps_ui, profit_ui, pulse_ui, spread, trading_ui, transfers,
                updater, users_ui)
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
@@ -547,6 +547,15 @@ class ArbitrageBot:
         # 📰 Новости → рынок: ~30 источников, замер влияния на цену, обучение, щит и паузы (bot/news.py);
         # состояние — в copy.st["news"]
         self.news = news.News(self)
+        # 🤖 торговля по новостям: новость → токен → проверки → сделка; демо, потом реал (bot/news_trade.py)
+        self.newstrade = news_trade.NewsTrader(self)
+        panic = self.trader.on_panic
+
+        def on_panic() -> None:
+            panic()
+            self.newstrade.on_panic()
+
+        self.trader.on_panic = on_panic
         self._loops: dict[str, tuple] = {}  # имя → (фабрика корутины, задача): сторож перезапускает упавшие
         self._beats: dict[str, float] = {}  # имя цикла → когда он последний раз отметился (для поиска зависших)
 
@@ -843,7 +852,7 @@ class ArbitrageBot:
             "api_keys": keys,
             "useful_commands": ["/doctor", "/why", "/price COIN", "/alert COIN < PRICE", "/phantom", "/dex", "/rug",
                                 "/hot", "/radar", "/council", "/mentors", "/stream", "/train", "/profit", "/pulse",
-                                "/news"],
+                                "/news", "/newstrade"],
             "memecoin_radar_on": bool(self.radar_chats),
             "ai_council_last": self.council_last,
             "copytrading_solana": self._copy_context(),
@@ -856,7 +865,9 @@ class ArbitrageBot:
 
     def _news_context(self) -> dict:
         try:
-            return self.news.context()
+            return {**self.news.context(), "news_trading": {
+                k: v for k, v in self.newstrade.status_dict().items()
+                if k in ("mode", "equity", "demo", "real_totals", "open", "exam", "skips")}}
         except Exception as e:
             log.warning("Новости для ИИ: %s", e)
             return {}
@@ -2026,6 +2037,7 @@ class ArbitrageBot:
                     BotCommand(command="scout", description="🔭 Разведчик: сам ищу прибыльных трейдеров"),
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости: влияние на рынок, щит, обучение"),
+                    BotCommand(command="newstrade", description="🤖 Торговля по новостям: демо → реал"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
                     BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
                     BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
@@ -2057,6 +2069,7 @@ class ArbitrageBot:
             tasks.append(self._spawn("radar", lambda: market_ui.radar_loop(self)))
             tasks.append(self._spawn("opps", lambda: opps_ui.opps_loop(self)))
             tasks.append(self._spawn("news", lambda: news.news_loop(self)))
+            tasks.append(self._spawn("newstrade", lambda: news_trade.newstrade_loop(self)))
             tasks.append(self._spawn("copy", lambda: copy_ui.copy_loop(self)))
             tasks.append(self._spawn("mentors", lambda: mentors_ui.mentors_loop(self)))
             tasks.append(self._spawn("profit", lambda: profit_ui.profit_loop(self)))
@@ -2087,6 +2100,7 @@ class ArbitrageBot:
             await self.scanner.close()
             await self.opps.close()
             await self.news.close()
+            await self.newstrade.close()
             await self.ai.client.close()
             await self.phantom.close()
             await self.dex.close()

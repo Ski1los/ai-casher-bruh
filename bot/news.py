@@ -952,7 +952,14 @@ class News:
                 log.info("Новости: замер цен: %s", e)
             storm = self._update_storm(now)
             self.apply(now)
-            return self._alerts(new, storm, now)
+            msgs = self._alerts(new, storm, now)
+        trader = getattr(self.b, "newstrade", None)  # 🤖 торговля по новостям: найти токен, проверить, купить
+        if trader is not None:
+            try:
+                msgs += await trader.process(new, now)
+            except Exception:
+                log.exception("Торговля по новостям")
+        return msgs
 
     def _alerts(self, new: list[dict], storm: str | None, now: float) -> list[str]:
         st = self.st

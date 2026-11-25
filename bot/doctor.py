@@ -366,6 +366,20 @@ def _automat_checks(b: ArbitrageBot, now: float) -> list[Check]:
                                  + (". Многие не отвечают — список: /news src" if bad else "")))
         except Exception as e:
             log.debug("doctor: новости: %s", e)
+    ntr = getattr(b, "newstrade", None)
+    if ntr is not None:
+        try:
+            st = ntr.st
+            n, w, pnl = ntr.totals(False)
+            if not st["on"]:
+                out.append(Check("Автомат", "🤖 Торговля по новостям", "info", "выключена. Включить: /newstrade on"))
+            else:
+                why = ntr.live_ready() if st["real"] else None
+                out.append(Check("Автомат", "🤖 Торговля по новостям", "warn" if why else "ok",
+                                 ("реальный режим" + (f", но сейчас демо: {why}" if why else "") if st["real"] else "демо")
+                                 + f" · демо-счёт ${ntr.equity():.2f}, сделок {n}, в плюс {w}, открыто {len(st['open'])}"))
+        except Exception as e:
+            log.debug("doctor: торговля по новостям: %s", e)
     gmgn = getattr(b, "gmgn", None)
     if gmgn is not None:
         g = gmgn.status()

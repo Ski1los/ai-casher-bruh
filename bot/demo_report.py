@@ -218,7 +218,28 @@ def _news(b) -> dict:
                 "/news")
 
 
-PARTS = (_arb, _tri, _pilot, _lab, _spread, _news, _copy, _meme, _train, _mirror, _pulse)
+def _newstrade(b) -> dict:
+    nw, nt = b.news, b.newstrade
+    st = nt.st
+    rets = [float(c["pct"]) for c in st["closed"] if not c["live"]]
+    opened = [p["coin"] for p in st["open"] if not p["live"]]
+    if not nw.st["on"]:
+        why = "новости выключены: /news on"
+    elif not st["on"]:
+        why = "торговля по новостям выключена: /newstrade on"
+    elif opened:
+        why = "в сделке: " + ", ".join(opened)
+    elif st["skips"]:
+        last = st["skips"][-1]
+        why = f"последний найденный токен {last['coin']} не куплен: {last['why']}"
+    else:
+        why = "ждёт свежую хорошую новость с токеном на Bybit/BingX (ожидаемый рост ≥ 1.5% за 4 ч)"
+    result = (f"демо-счёт ${nt.equity():.2f} · " + _pct_line(rets)) if rets else ""
+    return _row("newstrade", "🤖", "Торговля по новостям — новость → токен → сделка", bool(st["on"] and nw.st["on"]),
+                len(rets), result, why, "/newstrade")
+
+
+PARTS = (_arb, _tri, _pilot, _lab, _spread, _news, _newstrade, _copy, _meme, _train, _mirror, _pulse)
 
 
 def rows(b) -> list[dict]:
@@ -289,6 +310,10 @@ def enable_all(b) -> list[str]:
     if pulse is not None and not pulse.st.get("on"):
         pulse.st["on"] = True
         done.append("⚡ пульс рынка")
+    nt = getattr(b, "newstrade", None)
+    if nt is not None and not nt.st["on"]:
+        nt.st["on"] = True  # реальный режим не трогаем: включается только вручную (/newstrade real)
+        done.append("🤖 торговля по новостям (демо)")
     if not t.state.live:
         if not t.state.auto and not b.scalper.on:
             b.scalper.turn_on()
