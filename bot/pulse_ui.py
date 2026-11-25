@@ -132,7 +132,7 @@ async def pulse_loop(b: ArbitrageBot) -> None:
             await pulse_tick(b)
         except Exception:
             log.exception("Ошибка пульса рынка")
-        await asyncio.sleep(TICK_SEC)
+        await b.traffic.sleep(TICK_SEC)
 
 
 def register(b: ArbitrageBot) -> None:

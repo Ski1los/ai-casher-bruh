@@ -58,10 +58,14 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
         return default
 
 
-CLIP_SEC = _env_int("LIVE_CLIP_SEC", 16, 6, 40)          # сколько секунд эфира смотрит ИИ за раз
-LIVE_PER_DAY = _env_int("LIVE_PER_DAY", 300, 0, 2000)   # просмотров в день (из ~500 бесплатных Flash-Lite)
+CLIP_SEC = _env_int("LIVE_CLIP_SEC", 10, 6, 40)          # сколько секунд эфира смотрит ИИ за раз
+LIVE_PER_DAY = _env_int("LIVE_PER_DAY", 60, 0, 2000)    # просмотров в день
+# 📶 трафик: кусок видео качается с Twitch и ещё раз уходит в Gemini (base64 +33%) — это самое тяжёлое в боте.
+# На бесплатном Render всего 5 ГБ в месяц на всё, поэтому эфирам — не больше LIVE_MB_PER_DAY в сутки.
+LIVE_MB_PER_DAY = _env_int("LIVE_MB_PER_DAY", 40, 0, 100_000)
+WIRE_K = 2.4                                             # скачали + отправили в Gemini в base64
 MAX_CLIP_BYTES = 10 * 1024 * 1024                        # Gemini принимает до 20 МБ в запросе (base64 +33%)
-MAX_BW = 3_600_000                                       # 720p30 (~3 Мбит/с) влезает, 720p60/1080p — нет
+MAX_BW = 1_000_000                                       # ~360p (≈1 Мбит/с): 10 с ≈ 1.2 МБ — бережём трафик
 INTERVALS = (3, 5, 10, 20)                               # минут между взглядами на один эфир
 MAX_STREAMS = 2                                          # одновременно смотрим не больше двух эфиров
 LIVE_FPS = _env_int("LIVE_FPS", 2, 1, 5)                 # кадров в секунду для ИИ: 2 — ловит окна, мелькнувшие на миг
@@ -232,8 +236,8 @@ def parse_master(text: str) -> list[dict]:
     return out
 
 
-def pick_variant(variants: list[dict], max_bw: int = MAX_BW, max_h: int = 720) -> dict | None:
-    """Лучшее качество, которое влезает в запрос к Gemini: до 720p и ~3,6 Мбит/с (16 с ≈ 7 МБ)."""
+def pick_variant(variants: list[dict], max_bw: int = MAX_BW, max_h: int = 480) -> dict | None:
+    """Лучшее качество в пределах экономии трафика: до 480p и ~1 Мбит/с (10 с ≈ 1.2 МБ)."""
     video = [v for v in variants if v["h"] > 0]
     ok = [v for v in video if v["h"] <= max_h and (not v["bw"] or v["bw"] <= max_bw)]
     if ok:
@@ -524,9 +528,12 @@ class TwitchVideo:
         self._media[login] = (variant["url"], time.time())
         return variant["url"]
 
-    async def clip(self, login: str, seconds: float = CLIP_SEC) -> tuple[bytes, str, dict]:
+    async def clip(self, login: str, seconds: float = CLIP_SEC, video: bool = True) -> tuple[bytes, str, dict]:
         """Последние ~seconds эфира → (MP4, mime, {sec, mode}). Без ffmpeg или если видео не отдали (реклама,
-        Twitch поменял протокол) — превью-кадр эфира (JPEG): хуже, но взгляд не пропадает."""
+        Twitch поменял протокол) — превью-кадр эфира (JPEG): хуже, но взгляд не пропадает.
+        video=False — сразу кадр (экономия трафика: кадр ≈ 0.1 МБ против ≈ 1.2 МБ видео)."""
+        if not video:
+            return await self.snapshot(login), "image/jpeg", {"sec": 0, "mode": "image", "why": "экономия трафика"}
         ff = self.ffmpeg()
         if not ff:
             return await self.snapshot(login), "image/jpeg", {"sec": 0, "mode": "image", "why": "нет ffmpeg"}
@@ -793,8 +800,12 @@ class LiveWatch:
     def budget_left(self, now: float) -> int:
         b = self.st["budget"]
         if b["day"] != _day(now):
-            b["day"], b["n"] = _day(now), 0
+            b["day"], b["n"], b["bytes"] = _day(now), 0, 0
         return LIVE_PER_DAY - b["n"]
+
+    def bytes_left(self, now: float) -> float:
+        self.budget_left(now)
+        return LIVE_MB_PER_DAY * 1024 * 1024 - self.st["budget"].get("bytes", 0)
 
     def sources(self) -> dict[str, dict]:
         return {s["ident"].lower(): s for s in self.m.active("twitch") if LOGIN_RE.match(s["ident"].lower())}
@@ -884,6 +895,8 @@ class LiveWatch:
             raise LiveError("нужен ключ Gemini (GEMINI_API_KEY) — без него смотреть эфир нечем")
         if self.budget_left(now) <= 0:
             raise LiveError(f"на сегодня лимит просмотров исчерпан ({LIVE_PER_DAY}), продолжу завтра")
+        if self.bytes_left(now) <= 0:
+            raise LiveError(f"на сегодня лимит трафика эфиров исчерпан ({LIVE_MB_PER_DAY} МБ), продолжу завтра")
         async with self.lock:
             if sess is None:  # кнопка «посмотреть» раньше, чем бот узнал об эфире
                 info = (await self.tv.online([login])).get(login)
@@ -893,7 +906,10 @@ class LiveWatch:
                 self._open(login, src, info, now)
                 sess = st["sessions"][login]
             sess["last_at"] = now
-            data, mime, meta = await self.tv.clip(login)
+            from . import traffic
+            video = traffic.allow("live_video") and self.bytes_left(now) >= 3 * 1024 * 1024
+            data, mime, meta = await self.tv.clip(login, video=video)
+            st["budget"]["bytes"] = int(st["budget"].get("bytes", 0) + len(data) * WIRE_K)
             prompt = self.prompt(sess, src, meta)
             try:
                 raw = await self.ai.analyze(data, mime, prompt)

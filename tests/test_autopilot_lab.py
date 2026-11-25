@@ -224,7 +224,7 @@ def test_lab_results_are_backed_up(bot_env):
     sc.st["on"] = False
     saved = []
 
-    async def fake_backup():
+    async def fake_backup(soon=False):
         saved.append(1)
         b._last_backup = time.time()
 

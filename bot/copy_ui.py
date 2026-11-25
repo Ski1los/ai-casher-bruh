@@ -260,7 +260,7 @@ async def copy_tick(b: ArbitrageBot) -> None:
         b._copy_saved = ct.changes
         b.save_copy()
         if events or time.time() - b._last_backup > 30 * 60:
-            await b._backup_now()
+            await b._backup_now(soon=True)
 
 
 async def copy_loop(b: ArbitrageBot) -> None:
@@ -270,7 +270,7 @@ async def copy_loop(b: ArbitrageBot) -> None:
             await copy_tick(b)
         except Exception:
             log.exception("Ошибка копитрейдинга")
-        await asyncio.sleep(getattr(b.copy, "step_sec", STEP_SEC))
+        await b.traffic.sleep(getattr(b.copy, "step_sec", STEP_SEC))  # 📶 в экономии реже
 
 
 def short_line(b: ArbitrageBot) -> str:

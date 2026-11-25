@@ -42,6 +42,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from . import traffic
 from .opportunities import TICKER_RE, UA, bybit_base, coins_in, parse_announcements
 
 if TYPE_CHECKING:
@@ -93,6 +94,10 @@ GOOGLE = "https://news.google.com/rss/search?q={q}&hl={hl}&gl={gl}&ceid={gl}:{la
 
 def gnews(q: str, ru: bool = False) -> str:
     return GOOGLE.format(q=quote(q), hl="ru" if ru else "en-US", gl="RU" if ru else "US", lang="ru" if ru else "en")
+
+
+class NotModified(Exception):
+    """Источник ответил 304: с прошлого раза ничего нового."""
 
 
 @dataclass(frozen=True)
@@ -411,6 +416,7 @@ class News:
     def __init__(self, b: ArbitrageBot) -> None:
         self.b = b
         self._session: aiohttp.ClientSession | None = None
+        self._validators: dict[str, tuple[str, str]] = {}  # 📶 url → (ETag, Last-Modified): «не изменилось» = 0 байт
         self.health: dict[str, dict] = {}
         self.macro: list[dict] = []
         self.fng: dict | None = None
@@ -464,9 +470,22 @@ class News:
     # --- сбор ----------------------------------------------------------------------------------------
 
     async def _get(self, url: str, params: dict | None = None, as_json: bool = False):
-        async with self._s().get(url, params=params) as r:
+        headers = {}
+        key = url + "?" + "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()) if k != "auth_token")
+        etag, lastmod = self._validators.get(key, ("", ""))
+        if etag:
+            headers["If-None-Match"] = etag
+        if lastmod:
+            headers["If-Modified-Since"] = lastmod
+        async with self._s().get(url, params=params, headers=headers) as r:
+            if r.status == 304:
+                raise NotModified()  # 📶 лента не менялась — сервер ничего не прислал
             if r.status != 200:
                 raise RuntimeError(f"ответ {r.status}")
+            if r.headers.get("ETag") or r.headers.get("Last-Modified"):
+                self._validators[key] = (r.headers.get("ETag", ""), r.headers.get("Last-Modified", ""))
+                if len(self._validators) > 200:
+                    self._validators.pop(next(iter(self._validators)))
             raw = await r.content.read(MAX_BYTES)
         text = raw.decode("utf-8", errors="replace")
         if not as_json:
@@ -498,6 +517,8 @@ class News:
 
     def _due(self, src: Source, now: float) -> bool:
         h = self.health.get(src.key)
+        if src.tier == 0 and not traffic.allow("news_low"):
+            return False  # 📶 экономия трафика: агрегаторы и соцсети — первыми в сторону
         return h is None or now >= h.get("next", 0)
 
     async def collect(self, now: float, force: bool = False) -> list[tuple[Source, dict]]:
@@ -510,13 +531,16 @@ class News:
                                                      "items": 0, "name": src.name})
                 try:
                     items = await asyncio.wait_for(self.fetch(src), 30)
+                except NotModified:
+                    items = []
                 except Exception as e:
                     h["fail"] += 1
                     h["err"] = f"{type(e).__name__}: {e}"[:120]
                     h["next"] = now + min(BACKOFF_MAX, src.every * 2 ** min(h["fail"], 6))
                     log.info("Новости, %s: %s", src.name, h["err"])
                     return []
-                h.update(ok=h["ok"] + 1, fail=0, err="", at=now, next=now + src.every, items=len(items))
+                every = src.every * (2 if src.tier == 0 else 1) * traffic.factor()  # 📶 бесплатные 5 ГБ Render
+                h.update(ok=h["ok"] + 1, fail=0, err="", at=now, next=now + every, items=len(items) or h.get("items", 0))
                 return [(src, it) for it in items]
 
         res = await asyncio.gather(*(one(s) for s in due))
@@ -1218,5 +1242,5 @@ async def news_loop(b: ArbitrageBot) -> None:
                 await b.notify(text)
         except Exception:
             log.exception("Ошибка новостей")
-        await asyncio.sleep(TICK_SEC)
+        await b.traffic.sleep(TICK_SEC)
 

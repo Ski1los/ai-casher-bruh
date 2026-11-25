@@ -170,17 +170,18 @@ async def live_tick(b: ArbitrageBot) -> None:
     if mt.copy.changes != before:
         b.save_copy()
         if events:
-            await b._backup_now()
+            await b._backup_now(soon=True)
 
 
 async def live_loop(b: ArbitrageBot) -> None:
     await asyncio.sleep(60)
     while True:
         try:
-            await live_tick(b)
+            if b.traffic.allow("live"):  # 📶 эфиры — самое тяжёлое по трафику
+                await live_tick(b)
         except Exception:
             log.exception("Ошибка просмотра стримов")
-        await asyncio.sleep(LIVE_TICK)
+        await b.traffic.sleep(LIVE_TICK)
 
 
 async def scout_find(b: ArbitrageBot, chat_id: int) -> None:
@@ -694,7 +695,7 @@ async def mentors_tick(b: ArbitrageBot) -> None:
     if mt.copy.changes != before:
         b.save_copy()
         if events:
-            await b._backup_now()
+            await b._backup_now(soon=True)
 
 
 async def mentors_loop(b: ArbitrageBot) -> None:
@@ -704,10 +705,11 @@ async def mentors_loop(b: ArbitrageBot) -> None:
     try:
         while True:
             try:
-                await mentors_tick(b)
+                if b.traffic.allow("mentors"):
+                    await mentors_tick(b)
             except Exception:
                 log.exception("Ошибка учёбы у трейдеров")
-            await asyncio.sleep(TICK_SEC if not b.mentors.twitch.queue.qsize() else 60)
+            await b.traffic.sleep(TICK_SEC if not b.mentors.twitch.queue.qsize() else 60)
     finally:
         twitch_task.cancel()
         live_task.cancel()

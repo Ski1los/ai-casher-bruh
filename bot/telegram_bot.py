@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 
 from . import (autonomy, copy_ui, council, demo_report, extras_ui, feed, meme_ui, market_ui, mentors_ui, news, news_ui,
-               news_trade, notify, opps_ui, profit_ui, pulse_ui, spread, trading_ui, transfers,
+               news_trade, notify, traffic, opps_ui, profit_ui, pulse_ui, spread, trading_ui, transfers,
                updater, users_ui)
 from .copytrade import CopyTrader
 from .memetrade import MemeTrader
@@ -72,6 +72,8 @@ EXPLAIN_KEEP = 30  # для скольких последних сообщени
 MAX_IN_MESSAGE = 10  # сколько связок показывать в одном сообщении
 MAX_TRI_IN_MESSAGE = 5  # сколько треугольников показывать
 BACKUP_EVERY_SEC = 30 * 60  # как часто сохранять статистику демо в Telegram
+BACKUP_MIN_GAP_SEC = 5 * 60  # 📶 и не чаще раза в 5 минут даже при событиях (каждый бэкап — файл в Telegram)
+SCAN_MIN_SEC = 120  # 📶 сканер всех тикеров не чаще раза в 2 минуты: бесплатный Render даёт 5 ГБ трафика в месяц
 CLEANUP_EVERY_SEC = 10 * 60  # как часто убирать устаревшие записи и возвращать память системе
 KEYS_WATCH_SEC = 12 * 3600  # как часто перепроверять ключи бирж (права, срок действия)
 AUTO_WARN_SEC = 6 * 3600  # об одной и той же проблеме автоторговли напоминаем не чаще раза в 6 часов
@@ -549,6 +551,9 @@ class ArbitrageBot:
         self.news = news.News(self)
         # 🤖 торговля по новостям: новость → токен → проверки → сделка; демо, потом реал (bot/news_trade.py)
         self.newstrade = news_trade.NewsTrader(self)
+        # 📶 учёт трафика: бесплатный Render даёт 5 ГБ в месяц на всё — бот меряет и сам экономит (bot/traffic.py)
+        self.traffic = traffic.Traffic(self)
+        traffic.install(self.traffic)
         panic = self.trader.on_panic
 
         def on_panic() -> None:
@@ -567,6 +572,7 @@ class ArbitrageBot:
         # Бэкап в Telegram работает, только если известен владелец (ALLOWED_USER_IDS)
         self.backup = TelegramBackup(self.bot, owner) if owner else None
         self._last_backup = 0.0
+        self._backup_pending = False
         self._lab_saved = 0  # сколько бумажных сделок лаборатории уже сохранено
 
     # --- резервная копия ----------------------------------------------------
@@ -678,9 +684,15 @@ class ArbitrageBot:
         self.scanner.apply_fee_overrides(exchange)
         self._save_settings()
 
-    async def _backup_now(self) -> None:
+    async def _backup_now(self, soon: bool = False) -> None:
+        """Сохранить состояние в Telegram. soon=True — фоновые события: не чаще раза в BACKUP_MIN_GAP_SEC
+        (📶 каждый бэкап — файл в Telegram, это трафик), отложенное сохранит цикл учёта трафика."""
         if self.backup is None:
             return
+        if soon and time.time() - self._last_backup < BACKUP_MIN_GAP_SEC:
+            self._backup_pending = True
+            return
+        self._backup_pending = False
         self._last_backup = time.time()
         await self.backup.save(self._state())
 
@@ -1593,6 +1605,7 @@ class ArbitrageBot:
         transfers.register(self)
         spread.register(self)
         news_ui.register(self)
+        traffic.register(self)
         demo_report.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
@@ -1655,7 +1668,7 @@ class ArbitrageBot:
             log.exception("Ошибка демо-счёта")
             return
         if events or (self.demo.active and time.time() - self._last_backup > BACKUP_EVERY_SEC):
-            await self._backup_now()
+            await self._backup_now(soon=True)
         chat_id = self.demo.chat_id
         for text in events:
             if chat_id is None:
@@ -1674,7 +1687,7 @@ class ArbitrageBot:
         for text in events:
             await self.notify(text, urgent="ТЕСТ" not in text)
         if events:
-            await self._backup_now()
+            await self._backup_now(soon=not self.trader.state.live)
 
     async def _run_autotrade(self, result: ScanResult) -> None:
         if not self.trader.state.auto or self.owner_id is None:
@@ -1785,7 +1798,9 @@ class ArbitrageBot:
                     await self._send_alerts(result)
                 except Exception:
                     log.exception("Ошибка в автосканировании")
-            await asyncio.sleep(self.settings.scan_interval_sec)
+            # 📶 каждый скан — все тикеры Bybit и BingX (сотни КБ): на бесплатных 5 ГБ Render не чаще раза в 2 мин,
+            # а в эконом-режиме ещё реже (см. bot/traffic.py)
+            await self.traffic.sleep(max(self.settings.scan_interval_sec, SCAN_MIN_SEC))
 
     def _spawn(self, name: str, factory) -> asyncio.Task:
         """Запускает бесконечный цикл и запоминает, как его перезапустить (сторож ♾ автомата)."""
@@ -1818,7 +1833,7 @@ class ArbitrageBot:
                 await self._scalp_tick()
             except Exception:
                 log.exception("Ошибка режима $5")
-            await asyncio.sleep(SCALP_STEP_SEC)
+            await self.traffic.sleep(SCALP_STEP_SEC, cap=2)  # позиция под присмотром: не реже раза в минуту
 
     async def _scalp_tick(self) -> None:
         """Один шаг автопилота: торговля (если включён) или обучение лаборатории (если выключен)."""
@@ -1831,7 +1846,7 @@ class ArbitrageBot:
             await self.scalper.learn(public=not self.trader.working)
         if events:
             self.save_trading()
-            await self._backup_now()
+            await self._backup_now(soon=not self.trader.state.live)
             self._lab_saved = self.scalper.lab_changes
         elif (self.scalper.lab_changes != self._lab_saved
               and time.time() - self._last_backup > BACKUP_EVERY_SEC):
@@ -1839,7 +1854,7 @@ class ArbitrageBot:
             # поэтому не реже раза в полчаса отправляем их в бэкап в Telegram
             self._lab_saved = self.scalper.lab_changes
             self.save_trading()
-            await self._backup_now()
+            await self._backup_now(soon=True)
 
     # --- приложение ---------------------------------------------------------
 
@@ -2038,6 +2053,7 @@ class ArbitrageBot:
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости: влияние на рынок, щит, обучение"),
                     BotCommand(command="newstrade", description="🤖 Торговля по новостям: демо → реал"),
+                    BotCommand(command="traffic", description="📶 Трафик: сколько из 5 ГБ Render потрачено"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
                     BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
                     BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
@@ -2070,6 +2086,7 @@ class ArbitrageBot:
             tasks.append(self._spawn("opps", lambda: opps_ui.opps_loop(self)))
             tasks.append(self._spawn("news", lambda: news.news_loop(self)))
             tasks.append(self._spawn("newstrade", lambda: news_trade.newstrade_loop(self)))
+            tasks.append(self._spawn("traffic", lambda: traffic.traffic_loop(self)))
             tasks.append(self._spawn("copy", lambda: copy_ui.copy_loop(self)))
             tasks.append(self._spawn("mentors", lambda: mentors_ui.mentors_loop(self)))
             tasks.append(self._spawn("profit", lambda: profit_ui.profit_loop(self)))

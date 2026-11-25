@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import html
 import json
@@ -25,10 +26,11 @@ from aiohttp import web
 
 log = logging.getLogger(__name__)
 
-BACKUP_FILENAME = "bot_state.json"
+BACKUP_FILENAME = "bot_state.json.gz"  # 📶 сжатый: JSON жмётся в ~8 раз, а бэкап уходит в Telegram часто
+OLD_BACKUP_FILENAMES = ("bot_state.json",)  # до v48.1 — без сжатия, читаем и его
 BACKUP_CAPTION = "💾 Резервная копия бота (демо-счёт и настройки). Не открепляй это сообщение."
 SELF_PING_SEC = 10 * 60
-BOT_VERSION = "48"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
+BOT_VERSION = "49"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
 
 
 def version_text() -> str:
@@ -203,12 +205,16 @@ class TelegramBackup:
             log.warning("Бэкап: не могу открыть чат %s (%s). Напиши боту /start", self.chat_id, e)
             return None
         pinned = chat.pinned_message
-        if not pinned or not pinned.document or pinned.document.file_name != BACKUP_FILENAME:
+        if not pinned or not pinned.document or \
+                pinned.document.file_name not in (BACKUP_FILENAME, *OLD_BACKUP_FILENAMES):
             return None
         self.message_id = pinned.message_id
         try:
             buf = await self.bot.download(pinned.document)
-            return json.loads(buf.read().decode("utf-8"))
+            raw = buf.read()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            return json.loads(raw.decode("utf-8"))
         except Exception as e:
             log.warning("Бэкап: не удалось прочитать файл: %s", e)
             return None
@@ -219,6 +225,7 @@ class TelegramBackup:
             digest = hashlib.blake2b(data, digest_size=16).digest()
             if digest == self._last_digest and self.message_id:
                 return  # ничего не изменилось — не тратим запрос к Telegram
+            data = gzip.compress(data, 6, mtime=0)
             file = BufferedInputFile(data, filename=BACKUP_FILENAME)
             if self.message_id:
                 try:
