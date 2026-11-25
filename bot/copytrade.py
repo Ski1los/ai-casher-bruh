@@ -56,6 +56,9 @@ MAX_ACTIVE = 15  # сколько кошельков отслеживать од
 POLL_PER_STEP = MAX_ACTIVE  # проверяем все кошельки каждый шаг: 15 лёгких запросов за 30 с — далеко от лимитов узла
 NEW_TX_PER_WALLET = 8
 DISCOVER_EVERY_SEC = 2 * 3600
+DISCOVER_FAST_SEC = 20 * 60  # пока кошельков мало (< DISCOVER_FEW) — ищем чаще: без них нет ни копий, ни демо-сделок
+DISCOVER_FEW = 5
+GMGN_BOOST = 2  # кошелёк из «умных денег»/KOL GMGN весит как замеченный ранним покупателем в двух токенах
 EARLY_TX = 40  # сколько первых сделок пула разбирать при поиске ранних покупателей
 HISTORY_TX = 40  # сколько последних транзакций кошелька разбирать при анализе
 
@@ -452,6 +455,7 @@ class CopyTrader:
     def __init__(self, dex, rpc=None) -> None:
         self.dex = dex
         self.rpc = rpc or SolanaRpc()
+        self.gmgn = None  # GmgnClient (bot/gmgn.py): «умные деньги» и KOL — ещё один источник кошельков
         self.st = new_state()
         self.last_error: str | None = None
         self.step_sec = STEP_SEC  # текущая пауза между шагами (растёт, если узел Solana просит подождать)
@@ -815,19 +819,26 @@ class CopyTrader:
         """Ранние покупатели выросших токенов → кандидаты → анализ истории → в отслеживание.
         Возвращает строки-отчёт для человека."""
         now = time.time() if now is None else now
-        if not force and now - self.st["discovered_at"] < DISCOVER_EVERY_SEC:
+        every = DISCOVER_FAST_SEC if len(self.active()) < DISCOVER_FEW else DISCOVER_EVERY_SEC
+        if not force and now - self.st["discovered_at"] < every:
             return []
         self.st["discovered_at"] = now
         report: list[str] = []
+        cands = self.st["candidates"]
+        report += await self._gmgn_candidates(now)
         winners = []
-        for p in await self.dex.trending("solana", limit=40):
+        try:
+            trending = await self.dex.trending("solana", limit=40)
+        except Exception as e:  # DexScreener недоступен — кандидаты GMGN всё равно проверим
+            report.append(f"тренды DexScreener: {e}")
+            trending = []
+        for p in trending:
             age = p.age_hours(now)
             grow = max(p.change.get("h24") or 0, p.change.get("h6") or 0)
             if (grow >= 50 and (p.liquidity_usd or 0) >= 30_000 and age is not None and 2 <= age <= 96
                     and p.sells_h24 > 0 and p.pair_address):
                 winners.append(p)
         winners.sort(key=lambda p: -(p.change.get("h24") or 0))
-        cands = self.st["candidates"]
         for p in winners[:2]:
             try:
                 buyers = await self.early_buyers(p.pair_address, p.address)
@@ -849,22 +860,55 @@ class CopyTrader:
                 break
             if addr in self.st["wallets"] or addr in self.st["graveyard"]:
                 continue
+            c = cands[addr]
             try:
                 hist = await self.analyze(addr, now)
             except Exception as e:
-                report.append(f"{short(addr)}: анализ не удался ({e})")
-                continue
-            c = cands.pop(addr)
-            if hist["grade"] in ("bot", "fast", "weak"):
+                if not c.get("gmgn"):  # ранний покупатель без истории — не берём вслепую, попробуем позже
+                    report.append(f"{short(addr)}: анализ не удался ({e})")
+                    continue
+                hist = None  # GMGN уже отобрал его по прибыли: берём, а судить будем по копиям без денег
+            cands.pop(addr)
+            if hist and hist["grade"] in ("bot", "fast", "weak"):
                 self.st["graveyard"] = (self.st["graveyard"] + [addr])[-300:]
                 report.append(f"{short(addr)}: {grade_text(hist['grade'])} — не беру")
                 continue
-            w = self._new_wallet(f"{short(addr)} ({', '.join(c['tokens'][:2])})", "auto", now)
+            label = c.get("gmgn") or ", ".join(c["tokens"][:2])
+            w = self._new_wallet(f"{short(addr)} ({label})"[:40], "auto", now)
             w["hist"] = hist
             self.st["wallets"][addr] = w
             added += 1
-            report.append(f"➕ {w['name']}: {grade_text(hist['grade'])}, взял в отслеживание")
+            report.append(f"➕ {w['name']}: {grade_text(hist['grade'] if hist else 'unknown')}, взял в отслеживание")
         self.changes += 1
+        return report
+
+    async def _gmgn_candidates(self, now: float) -> list[str]:
+        """Кошельки, которые GMGN считает «умными деньгами» или KOL и которые купили за последний час."""
+        g = self.gmgn
+        if g is None or not getattr(g, "configured", False):
+            return []
+        cands, report, found = self.st["candidates"], [], 0
+        for kind, fn in (("🧠 GMGN", g.smartmoney), ("📣 KOL", g.kol)):
+            try:
+                trades = await fn("sol", limit=100)
+            except Exception as e:
+                report.append(f"{kind}: {e}")
+                continue
+            for tr in trades:
+                addr = tr.get("maker") or ""
+                if (tr.get("side") != "buy" or now - (tr.get("at") or now) > 3600 or not valid_address(addr)
+                        or addr in self.st["wallets"] or addr in self.st["graveyard"]):
+                    continue
+                c = cands.setdefault(addr, {"seen": 0, "tokens": [], "first": now})
+                if not c.get("gmgn"):
+                    c["seen"] += GMGN_BOOST
+                    c["gmgn"] = f"{kind} {tr['who']}".strip() if tr.get("who") else kind
+                    found += 1
+                sym = (tr.get("symbol") or "")[:16]
+                if sym and sym not in c["tokens"]:
+                    c["tokens"] = (c["tokens"] + [sym])[-5:]
+        if found:
+            report.append(f"GMGN: новых кандидатов из умных денег и KOL — {found}")
         return report
 
     async def early_buyers(self, pool: str, mint: str) -> list[str]:
