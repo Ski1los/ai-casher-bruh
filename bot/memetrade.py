@@ -25,14 +25,14 @@ import time
 
 import aiohttp
 
-from .copytrade import WSOL, buy_links, learn_exits, tp_text
+from .copytrade import WSOL, buy_links, filter_fails, learn_exits, tp_text
 from .solana import WalletError, short
 from .solkey import BadKey, Keypair, close_accounts_tx, sign_transaction
 
 log = logging.getLogger(__name__)
 
 JUP_BASE = "https://api.jup.ag/swap/v2"
-TOKEN_PROGRAMS = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFNoz2z5Z7m8wVPVQEz")
+TOKEN_PROGRAMS = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
 LAMPORTS = 1_000_000_000
 MAX_ROUNDTRIP = 0.06        # вход+выход дороже 6% — рынок слишком тонкий
 MAX_HOLD_SEC = 48 * 3600
@@ -44,7 +44,8 @@ MAX_SIZE_USD = 50.0
 NET_FEE = 100_000            # лампорты: сеть + приоритет за одну транзакцию (для демо; ≈ $0,015)
 DEMO_SIZES = (5.0, 10.0, 20.0)
 DEMO_READY_TRADES = 10      # после стольких демо-сделок можно судить, работает ли
-CAT_ICON = {"star": "⭐", "good": "👀", "mentor": "🎓"}
+CAT_ICON = {"star": "⭐", "good": "👀", "mentor": "🎓", "new": "🔍"}
+NEW_MIN = 15                # 🔍 новые кошельки на демо: решаем, стоит ли их копировать, от 15 копий
 GOOD_MIN = 12               # судить о 👀-кошельках не раньше чем по 12 копиям
 
 ACCOUNT_DEFAULT = {"positions": {}, "closed": [], "decisions": [], "day": "", "day_pnl_usd": 0.0, "day_trades": 0,
@@ -58,7 +59,7 @@ REAL_DEFAULT = {
     "stop_pct": 0.4, "tp_pct": None, "low_sol_warned": 0.0,
     **ACCOUNT_DEFAULT,
     "demo": DEMO_DEFAULT,
-    "learn": {"good_ok": None, "seen": None, "good_n": 0, "good_avg": 0.0},
+    "learn": {"good_ok": None, "seen": None, "good_n": 0, "good_avg": 0.0, "new_ok": None, "new_n": 0, "new_avg": 0.0},
 }
 
 
@@ -94,6 +95,25 @@ SETUP_TEXT = """\
 
 Необязательно, но лучше: бесплатный ключ Jupiter (developers.jup.ag/portal) → <code>JUPITER_API_KEY</code> — сделки
 быстрее; бесплатный ключ Helius → <code>SOLANA_RPC_URL</code> — меньше «подождите» от сети."""
+
+
+def _reason_label(r: str) -> str:
+    """Короткое имя причины отказа риск-фильтра (для «почему нет сделок»)."""
+    if r.startswith("ликвидность"):
+        return "мало ликвидности"
+    if r.startswith("нет проверки"):
+        return "RugCheck не ответил"
+    if r.startswith("RugCheck"):
+        return "риск RugCheck"
+    if r.startswith("токену"):
+        return "слишком новый токен"
+    if r.startswith("цена уже"):
+        return "опоздали за кошельком"
+    if "за час" in r:
+        return "вход на пике"
+    if r.startswith("продаж нет"):
+        return "нельзя продать"
+    return r[:30]
 
 
 class SwapError(Exception):
@@ -263,7 +283,9 @@ class MemeWallet:
 
 class MemeTrader:
     """Два счёта с одними правилами: настоящий (кошелёк «Бот») и 🧪 демо (виртуальные SOL, настоящие котировки
-    Jupiter). Демо работает всегда, пока включён копитрейдинг: учится, пока кошелёк не подключён или пуст."""
+    Jupiter). Демо работает всегда, пока включён копитрейдинг: учится, пока кошелёк не подключён или пуст.
+    Разница одна — кого копировать: настоящий счёт только ⭐ (или 👀 по кнопке), демо ещё и 👀 и 🔍 новые
+    кошельки, пока их копии не докажут убыток (learn)."""
 
     CHECK_DELAY = 5.0  # сек: подождать, прежде чем проверять, дошла ли сделка без ответа Jupiter
 
@@ -284,6 +306,7 @@ class MemeTrader:
         self._lock = asyncio.Lock()
         self._balance: tuple[float, int | None] = (0.0, None)
         self.last_error: str | None = None
+        self.quote_failed = False  # последняя котировка Jupiter не удалась из-за сбоя или лимита (не «нет маршрута»)
 
     # --- состояние ----------------------------------------------------------
 
@@ -412,14 +435,18 @@ class MemeTrader:
         return int(q2["outAmount"]) / lamports - 1
 
     async def _quote(self, input_mint: str, output_mint: str, amount: int) -> int | None:
+        """Котировка Jupiter. None — нет маршрута (self.quote_failed=False) или сбой/лимит (quote_failed=True)."""
+        self.quote_failed = False
         try:
             return int((await self.jup.order(input_mint, output_mint, amount))["outAmount"])
         except SwapError as e:
             if "нет маршрута" not in str(e) and "route" not in str(e).lower():
                 self.last_error = f"котировка Jupiter: {e}"
+                self.quote_failed = True
             return None
         except Exception as e:  # сеть: демо возьмёт цену DexScreener
             log.info("Котировка Jupiter для демо: %s", e)
+            self.quote_failed = True
             return None
 
     async def _price(self, mint: str) -> float | None:
@@ -602,10 +629,12 @@ class MemeTrader:
             raise SwapError(f"на демо-счёте мало SOL ({fmt_sol(d['cash'])}) — дождись продаж или начни демо заново")
         price = await self._price(mint)
         out = await self._quote(WSOL, mint, lamports)
-        if out:
+        back = await self._quote(mint, WSOL, out) if out else None
+        if out and not back and self.quote_failed:  # лимит/сбой Jupiter — не путаем с ловушкой: ещё раз
             back = await self._quote(mint, WSOL, out)
-            if not back:
-                raise SwapError("токен нельзя продать обратно — похоже на ловушку (honeypot)")
+        if out and not back and not self.quote_failed:
+            raise SwapError("токен нельзя продать обратно — похоже на ловушку (honeypot)")
+        if out and back:
             rt, src = back / lamports - 1, "jupiter"
             self._calibrate(-rt, now)
         else:  # Jupiter недоступен — считаем по цене DexScreener и откалиброванной стоимости
@@ -666,17 +695,21 @@ class MemeTrader:
     # --- автокопирование --------------------------------------------------------
 
     def _in_scope(self, w: dict | None, demo: bool = False) -> str | None:
-        """Категория кошелька, если его стоит копировать на этом счёте: "star" / "good" / None."""
+        """Категория кошелька, если его стоит копировать на этом счёте: "star" / "good" / "new" (только демо) / None."""
         if not w or w["status"] == "dropped":
             return None
         if w["status"] == "star":
             return "star"
         good = (w.get("hist") or {}).get("grade") == "good"
-        if not good:
-            return None
-        if demo:  # демо пробует и хорошие 👀, чтобы учиться быстрее, — пока они не доказали, что теряют
-            return "good" if self.st["learn"]["good_ok"] is not False else None
-        return "good" if self.st["scope"] == "good" else None
+        if not demo:
+            return "good" if good and self.st["scope"] == "good" else None
+        # 🧪 демо учится: пробует и 👀 с хорошей историей, и 🔍 новые кошельки (история неизвестна) — пока каждая
+        # группа не доказала копиями, что теряет. Настоящий счёт это не трогает: там только ⭐ (или 👀 по кнопке).
+        lr = self.st["learn"]
+        if good:
+            return "good" if lr["good_ok"] is not False else None
+        grade = (w.get("hist") or {}).get("grade") or "unknown"
+        return "new" if grade == "unknown" and lr["new_ok"] is not False else None
 
     def _why_not(self, pos: dict, now: float, acc: dict | None = None) -> str | None:
         acc = self.st if acc is None else acc
@@ -884,6 +917,21 @@ class MemeTrader:
                     if st["scope"] == "good":
                         st["scope"] = "star"
                 events.append({"text": self.copy._lesson(text, now), "buttons": btn})
+        # 🔍 новые кошельки (история ещё неизвестна): демо копирует их, чтобы учиться, — пока копии не докажут убыток
+        new = [t["ret"] for t in closed if t.get("passed") and t.get("wstatus") == "watch"
+               and (t.get("wgrade") or "unknown") == "unknown"]
+        lr["new_n"] = len(new)
+        lr["new_avg"] = round(sum(new) / (len(new) + 5), 2) if new else 0.0
+        if len(new) >= NEW_MIN:
+            ok = lr["new_avg"] > -1.0 if lr["new_ok"] is not False else lr["new_avg"] >= 2.0
+            if ok != (lr["new_ok"] is not False):
+                lr["new_ok"] = ok
+                text = (f"🧠 Урок: копии 🔍 новых кошельков снова в плюсе ({lr['new_avg']:+.1f}% в среднем за "
+                        f"{len(new)}). Демо опять пробует их, чтобы найти новые ⭐." if ok else
+                        f"🧠 Урок: копии 🔍 новых кошельков теряют ({lr['new_avg']:+.1f}% в среднем за {len(new)} "
+                        "сделок, с поправкой на везение). Демо их больше не копирует — только ⭐ и 👀. "
+                        "Новые кошельки бот по-прежнему проверяет копиями без денег.")
+                events.append({"text": self.copy._lesson(text, now), "buttons": []})
         return events
 
     # --- показ ------------------------------------------------------------------
@@ -909,7 +957,8 @@ class MemeTrader:
                 "decisions": list(reversed(d["decisions"][-12:])), "stats": s,
                 "paused_until": d["paused_until"] if d["paused_until"] > time.time() else None,
                 "day_pnl_usd": d["day_pnl_usd"] if d["day"] == _day(time.time()) else 0.0,
-                "ready": self.demo_verdict(), "sizes": list(DEMO_SIZES)}
+                "ready": self.demo_verdict(), "sizes": list(DEMO_SIZES), "idle": self.demo_idle(),
+                "scope": self.demo_scope_text()}
 
     def demo_verdict(self) -> dict:
         s = self.demo["stats"]
@@ -944,20 +993,21 @@ class MemeTrader:
             "demo": self.demo_dict(),
             "learned": {"cost_pct": round(self.copy.cost_side() * 200, 2),
                         "calibrated": bool((self.copy.st.get("calib") or {}).get("cost")),
-                        "good_ok": lr["good_ok"], "good_n": lr["good_n"], "good_avg": lr["good_avg"]},
+                        "good_ok": lr["good_ok"], "good_n": lr["good_n"], "good_avg": lr["good_avg"],
+                        "new_ok": lr["new_ok"], "new_n": lr["new_n"], "new_avg": lr["new_avg"]},
         }
 
     def demo_text(self) -> str:
         d = self.demo_dict()
-        st = self.st
         lines = [f"🧪 <b>Демо-счёт</b> (виртуальные SOL, настоящие котировки Jupiter): "
                  f"{'🟢 торгует' if d['on'] else '⏸ выключен'}",
                  f"Баланс: <b>${d['equity_usd']:.2f}</b> из ${d['start_usd']:g} ({d['total_pct']:+.1f}%)"]
         if d["on"] and not self.copy.on:
             lines.append("⚠️ Копитрейдинг выключен — без него нет сделок. Включи: /copy")
-        good = st["learn"]["good_ok"]
-        lines.append("Копирует: ⭐" + (" и 👀 с хорошей историей (чтобы учиться быстрее)" if good is not False else
-                                       " (👀 доказали, что теряют)"))
+        lines.append("Копирует: " + self.demo_scope_text())
+        idle = d["idle"] if self.copy.on else None  # «копитрейдинг выключен» уже сказано выше
+        if idle:
+            lines.append("❔ <b>Почему пока нет сделок</b>: " + html.escape(idle))
         if d["paused_until"]:
             lines.append(f"⏸ Пауза после убытков до {_hm(d['paused_until'])}")
         for p in d["positions"]:
@@ -972,6 +1022,54 @@ class MemeTrader:
         icon = {"wait": "⏳", "ok": "✅", "bad": "⚠️"}[d["ready"]["state"]]
         lines.append(f"{icon} {d['ready']['text']}")
         return "\n".join(lines)
+
+    def demo_scope_text(self) -> str:
+        lr = self.st["learn"]
+        parts = ["⭐ проверенные", "🎓 ⭐-стримеры"]
+        parts.append("👀 с хорошей историей" if lr["good_ok"] is not False else "без 👀 (доказали, что теряют)")
+        parts.append("🔍 новые кошельки (чтобы учиться быстрее)" if lr["new_ok"] is not False else
+                     "без 🔍 новых (доказали, что теряют)")
+        return " · ".join(parts)
+
+    def demo_idle(self, now: float | None = None) -> str | None:
+        """Если демо давно ничего не покупает — честная причина по цепочке: кошельки → их покупки → фильтр."""
+        now = time.time() if now is None else now
+        d = self.demo
+        if not d["on"]:
+            return None
+        if d["positions"] or any(now - (t.get("opened") or t.get("closed") or 0) < 6 * 3600 for t in d["closed"][-5:]):
+            return None
+        ct = self.copy
+        if not ct.on:
+            return "копитрейдинг выключен — без него нет сигналов. Включи в /copy"
+        if now < d["paused_until"]:
+            return f"пауза после убытков до {_hm(d['paused_until'])}"
+        err = f" Последняя ошибка: {ct.last_error[:120]}" if ct.last_error else ""
+        active = ct.active()
+        if not active:
+            return ("ещё нет кошельков для копирования — бот ищет их каждые 20 минут (тренды DexScreener"
+                    + (" и умные деньги GMGN" if getattr(getattr(ct, "gmgn", None), "configured", False)
+                       else "; с бесплатным GMGN_API_KEY находит быстрее") + ")." + err)
+        day = [t for t in ct.st["closed"] if now - t.get("opened", 0) < 86400]
+        day += [p for p in ct.st["open"].values() if now - p.get("opened", 0) < 86400]
+        if not day:
+            return (f"слежу за {len(active)} кошельками, но за сутки они ничего не купили (или узел Solana не "
+                    "отдаёт их сделки)." + err)
+        passed = [t for t in day if t.get("passed") and not t.get("hard_fail")]
+        if not passed:
+            reasons: dict[str, int] = {}
+            for t in day:
+                why = t.get("reasons") or (filter_fails(t["feats"], ct.st["filter"]) if t.get("feats") else [])
+                r = _reason_label(why[0]) if why else ("ловушка (RugCheck)" if t.get("hard_fail") else "риск")
+                reasons[r] = reasons.get(r, 0) + 1
+            top = ", ".join(f"{k} ×{v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])[:3])
+            return (f"за сутки кошельки купили {len(day)} токенов, но ни один не прошёл риск-фильтр "
+                    f"(ловушки, мало ликвидности, вход на пике): {top}. Это защита от слива.")
+        last = d["decisions"][-1] if d["decisions"] else None
+        if last:
+            return f"последнее решение ({_hm(last['at'])}, {last['symbol']}): {last['text']}"
+        return (f"за сутки {len(passed)} токенов прошли фильтр, но их купили кошельки, которых демо не копирует "
+                "(доказали убыток).")
 
     def rules_text(self) -> str:
         st = self.st

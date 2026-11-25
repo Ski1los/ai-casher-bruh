@@ -338,6 +338,11 @@ def learn_text(b: ArbitrageBot) -> str:
     else:
         lines.append(f"👀 кошельки без ⭐: {'окупаются' if lr['good_ok'] else 'теряют'} ({lr['good_avg']:+.1f}% "
                      f"на копию за {lr['good_n']})")
+    if lr.get("new_ok") is False:
+        lines.append(f"🔍 новые кошельки: теряют ({lr['new_avg']:+.1f}% на копию за {lr['new_n']}) — демо их не копирует")
+    else:
+        lines.append(f"🔍 новые кошельки: демо копирует их, чтобы учиться (копий {lr.get('new_n', 0)}, "
+                     f"решение — от 15)")
     if lessons:
         lines.append("\n<b>Последние уроки</b>:")
         for x in lessons[-6:][::-1]:

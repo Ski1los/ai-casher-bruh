@@ -534,6 +534,7 @@ class ArbitrageBot:
         # ⚡ Пульс рынка: GMGN (= Axiom Pulse) + DexScreener + токены со стримов, стратегии-фильтры на бумаге и
         # выводы (bot/pulse.py); состояние — в copy.st["pulse"]. Ключ GMGN только читает рынок.
         self.gmgn = GmgnClient()
+        self.copy.gmgn = self.gmgn  # 🐋 кошельки «умных денег» и KOL GMGN — кандидаты для копитрейдинга и демо
         self.pulse = Pulse(self.copy, self.gmgn)
         self.mentors.live.pulse = self.pulse  # 🎥 токены, мелькнувшие на стримах, проверяются и ведутся Пульсом
         # 💰 Профит-центр: результаты всех способов по фактам, план денег, Страж прибыли (bot/profit.py);

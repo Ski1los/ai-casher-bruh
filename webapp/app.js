@@ -1695,7 +1695,7 @@ function demoBlock(c) {
   const L = r.learned || {};
   const v = d.ready || {};
   const vcls = v.state === "ok" ? "ok" : v.state === "bad" ? "bad" : "gray";
-  const pos = (d.positions || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.symbol)}</div><div class="s">${p.source === "copy" || p.source === "mentor" ? ({ star: "⭐ ", mentor: "🎓 " }[p.category] || "👀 ") + esc(p.wallet) : "вручную"} · ${money(p.usd_in, { d: 2 })} · ${ago(p.opened)}</div></div>
+  const pos = (d.positions || []).map((p) => `<div class="item"><div class="grow"><div class="t">${esc(p.symbol)}</div><div class="s">${p.source === "copy" || p.source === "mentor" ? ({ star: "⭐ ", mentor: "🎓 ", new: "🔍 " }[p.category] || "👀 ") + esc(p.wallet) : "вручную"} · ${money(p.usd_in, { d: 2 })} · ${ago(p.opened)}</div></div>
     <div class="r" style="display:flex;gap:8px;align-items:center"><div class="b num ${p.pct == null ? "muted" : cls(p.pct)}">${p.pct == null ? "—" : pct(p.pct, 1)}</div>${owner() ? `<button class="btn sm ghost" data-act="demo-sell" data-v="${esc(p.mint)}" data-s="${esc(p.symbol)}">Продать</button>` : ""}</div></div>`).join("");
   const closed = (d.closed || []).slice(0, 6).map((t) => `<div class="item"><div class="grow"><div class="t">${esc(t.symbol)}</div><div class="s" style="white-space:normal">${esc(t.why)} · ${when(t.closed)}</div></div><div class="r"><div class="b num ${cls(t.pnl_usd)}">${money(t.pnl_usd, { sign: true, d: 2 })}</div>${t.pct != null ? `<div class="s">${pct(t.pct, 1)}</div>` : ""}</div></div>`).join("");
   const dec = (d.decisions || []).slice(0, 4).map((x) => `<div class="tiny muted" style="white-space:normal;margin-top:4px">${hm(x.at)} <b>${esc(x.symbol)}</b> — ${esc(x.text)}</div>`).join("");
@@ -1707,7 +1707,9 @@ function demoBlock(c) {
     ${s.sells ? `<div class="small" style="margin-top:4px">Сделок ${s.sells} · в плюс ${s.wins} · <b class="${cls(s.pnl_usd)}">${money(s.pnl_usd, { sign: true, d: 2 })}</b></div>` : ""}
     <div style="margin-top:8px"><span class="pill ${vcls}" style="white-space:normal">${esc(v.text || "")}</span></div>
     ${d.paused_until ? `<div class="banner" style="margin-top:8px">⏸ Пауза после убытков до ${hm(d.paused_until)}</div>` : ""}
-    <div class="tiny muted" style="margin-top:8px;white-space:normal">🧠 Правила подбирает сам: ${rules}${L.good_ok === false ? " · 👀 не копирует (теряли)" : " · копирует ⭐ и 👀"}</div>
+    <div class="tiny muted" style="margin-top:8px;white-space:normal">🧠 Правила подбирает сам: ${rules}</div>
+    <div class="tiny muted" style="margin-top:4px;white-space:normal">Копирует: ${esc(d.scope || "⭐ и 👀")}</div>
+    ${d.idle ? `<div class="banner" style="margin-top:8px;white-space:normal">❔ <b>Почему пока нет сделок:</b> ${esc(d.idle)}</div>` : ""}
     ${owner() && !r.configured ? `<div class="small muted" style="margin-top:10px">Сумма сделки</div>
       <div class="chips" style="margin-top:6px">${(r.sizes || [1, 2, 3, 5]).map((x) => `<div class="chip ${r.size_usd === x ? "on" : ""}" data-act="meme-size" data-v="${x}">$${x}</div>`).join("")}</div>` : ""}
     ${pos ? `<div class="list" style="margin-top:10px">${pos}</div>` : ""}
