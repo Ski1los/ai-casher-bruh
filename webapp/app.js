@@ -732,6 +732,7 @@ function renderHome() {
       <div class="o6 col" style="gap:10px">
         <div class="section-title" style="margin:6px 4px 0">Движки заработка</div>
         <div class="banner info press" data-act="opps"><div style="font-size:22px">💡</div><div><b>Как заработать сейчас</b><br><span class="muted">Акции Bybit (Launchpool, аирдропы), проценты, новости и план для $5</span> <span class="link">Открыть →</span></div></div>
+        <div class="banner info press" data-act="news"><div style="font-size:22px">📰</div><div><b>Новости → рынок</b><br><span class="muted">~30 источников, щит после плохих новостей, пауза вокруг данных США, чему бот научился</span> <span class="link">Открыть →</span></div></div>
         ${[profitCard(), scalpCard(), copyCard(), mentorsCard(), autoCard()].join("").replace(/margin-top:10px/g, "margin-top:0")}
       </div>
     </div>
@@ -1338,7 +1339,8 @@ function spreadHtml(x) {
     <div class="card small">🧪 тест: ${tt.n} сделок, <b class="num">${sign(tt.pnl)}</b> · 💵 реально: ${tl.n}, <b class="num">${sign(tl.pnl)}</b>
       ${x.near ? `<div class="muted" style="margin-top:6px">Лучший спред скана: ${esc(x.near.text)} — ${x.near.gross >= 0 ? "+" : ""}${x.near.gross}% по ценам, ${x.near.net >= 0 ? "+" : ""}${x.near.net}% после торговых комиссий</div>` : ""}</div>
     ${(x.bad || []).length ? `<div class="section-title">🚫 Карантин · не проверяю и не беру</div><div class="list">${x.bad.map((c) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">${esc(c.coin)}</div><div class="s" style="white-space:normal">до ${when(c.until)} · ${esc(c.why)}</div></div>${owner() ? `<button class="btn sm ghost" data-act="spread-unban" data-v="${esc(c.coin)}">Снять</button>` : ""}</div>`).join("")}</div>` : ""}
-    ${x.skipped && (x.skipped.bad || x.skipped.volume) ? `<div class="tiny muted" style="margin-top:6px">Отсеял до анализа: ${x.skipped.bad ? `в карантине ${x.skipped.bad}` : ""}${x.skipped.bad && x.skipped.volume ? ", " : ""}${x.skipped.volume ? `тонкий рынок ${x.skipped.volume}` : ""}</div>` : ""}
+    ${x.news_pause ? `<div class="banner" style="margin-top:8px">⏸ Новые сделки на паузе до ${when(x.news_pause.until)}: ${esc(x.news_pause.why)}</div>` : ""}
+    ${x.skipped && (x.skipped.bad || x.skipped.volume || x.skipped.news) ? `<div class="tiny muted" style="margin-top:6px">Отсеял до анализа: ${[x.skipped.bad ? `в карантине ${x.skipped.bad}` : "", x.skipped.volume ? `тонкий рынок ${x.skipped.volume}` : "", x.skipped.news ? `тревожные новости ${x.skipped.news}` : ""].filter(Boolean).join(", ")}</div>` : ""}
     ${(x.checks || []).length ? `<div class="section-title">Последние проверки</div><div class="list">${x.checks.map((c) => `<div class="item"><div class="grow"><div class="t">${esc(c.coin)} ${esc(c.src)} → ${esc(c.dst)}</div><div class="s">спред ${c.gross}%${c.pct != null ? ` · итог ${c.pct >= 0 ? "+" : ""}${c.pct}%` : ""}${c.reason ? ` · ${esc(c.reason)}` : ""}</div></div><div class="r">${c.reason ? "⛔" : "🟢"}</div></div>`).join("")}</div>` : ""}
     ${(x.runs || []).length ? `<div class="section-title">Сделки</div><div class="list">${x.runs.map((r) => `<div class="item"><div class="grow small">${esc(r)}</div></div>`).join("")}</div>` : ""}`;
 }
@@ -2342,6 +2344,50 @@ function oppsBody(r, tab) {
     + `<div class="tiny muted" style="margin-top:10px;white-space:normal">Новость — не сигнал покупать: к моменту публикации цена обычно уже сдвинулась.</div>` + err;
 }
 
+// --- 📰 Новости → рынок (v47) ---------------------------------------------------------------
+function newsHtml(x) {
+  if (!x) return `<div class="skel" style="height:140px"></div>`;
+  const moodCls = x.mood <= -1 ? "down" : x.mood >= 1 ? "up" : "";
+  const ev = (e) => `<div class="item" style="align-items:flex-start"><div style="font-size:20px">${e.icon}</div><div class="grow"><div class="t" style="white-space:normal">${e.coins.length ? `<b>${esc(e.coins.join(", "))}</b>: ` : ""}${esc(e.title)}</div><div class="s" style="white-space:normal">${esc(e.src)} · ${when(e.t)}${e.cat_name ? ` · ${esc(e.cat_name)}: обычно ${pct(e.est, 1)} за 4 ч${e.n ? ` (${e.n} замеров)` : ""}` : ""}${Object.keys(e.fact || {}).length ? ` · факт: ${Object.entries(e.fact).map(([c, v]) => `${esc(c)} ${pct(v, 1)}`).join(", ")}` : ""}</div>${e.why ? `<div class="tiny muted" style="white-space:normal;margin-top:2px">🤖 ${esc(e.why)}</div>` : ""}</div>${e.url ? `<a class="link tiny" href="${esc(e.url)}" target="_blank" rel="noopener">→</a>` : ""}</div>`;
+  return `
+    <div class="card hero">
+      <div class="row between"><div class="label">Настроение по новостям</div><span class="chip ${x.on ? "on" : ""}">${x.on ? "работает" : "выключено"}</span></div>
+      <div class="big ${moodCls}">${esc(x.mood_label)} <span class="num small">${x.mood > 0 ? "+" : ""}${Number(x.mood).toFixed(1)}</span></div>
+      <div class="muted small">${x.fng ? `Страх и жадность: <b>${x.fng.value}</b> (${esc(x.fng.label)}) · ` : ""}источников работает ${x.sources.ok} из ${x.sources.total} · прочитано ${x.total}</div>
+    </div>
+    ${x.pause ? `<div class="banner red" style="margin-top:10px">⏸ Новые покупки на паузе до ${when(x.pause.until)}: ${esc(x.pause.why)}</div>` : ""}
+    ${(x.macro || []).length ? `<div class="banner" style="margin-top:10px">⏰ Важные данные США: ${x.macro.slice(0, 3).map((m) => `${when(m.at)} — ${esc(m.ru)}`).join("; ")}. За 30 мин до и 45 мин после — без новых покупок.</div>` : ""}
+    ${x.digest && x.digest.text ? `<div class="card" style="margin-top:10px"><div class="b">🤖 Сводка ИИ</div><div class="small" style="white-space:normal;margin-top:4px">${esc(x.digest.text)}</div></div>` : ""}
+    <div class="row" style="gap:8px;margin-top:10px">
+      <button class="btn primary grow" data-act="news-refresh">🔄 Обновить сейчас</button>
+      ${owner() ? `<button class="btn grow" data-act="news-alerts">${x.alerts ? "🔔 Уведомления: вкл" : "🔕 Уведомления: выкл"}</button>` : ""}
+    </div>
+    ${(x.shield || []).length ? `<div class="section-title">🛡 Щит по новостям · не покупаю, спред не трогает</div><div class="list">${x.shield.map((c) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">${esc(c.coin)}</div><div class="s" style="white-space:normal">до ${when(c.until)} · ${esc(c.why)}</div></div></div>`).join("")}</div>` : ""}
+    <div class="section-title">Главное за сутки</div>
+    ${(x.events || []).length ? `<div class="list">${x.events.slice(0, 12).map(ev).join("")}</div>` : `<div class="card empty">Собираю новости: первые появятся через пару минут после запуска</div>`}
+    <div class="section-title">🧠 Чему научился</div>
+    <div class="card">
+      <div class="small">Замеров влияния на цену: <b>${x.measured}</b>${x.shield_score && x.shield_score.n ? ` · щит угадал падение в ${x.shield_score.right} из ${x.shield_score.n}` : ""}${x.paper && x.paper.n ? ` · бумажные сделки по новостям: ${x.paper.n}, в плюс ${x.paper.wins}, в среднем ${pct(x.paper.avg, 2)}` : ""}</div>
+      ${(x.learn || []).length ? x.learn.map((r) => `<div class="row between small" style="margin-top:6px"><span>${r.icon} ${esc(r.name)}${r.proven ? " ⚡" : r.shield ? " 🛡" : ""}</span><span class="num ${cls(r.est)}">${pct(r.est, 1)} · ${r.n}</span></div>`).join("") : `<div class="tiny muted" style="margin-top:6px">Первые замеры — через 15 минут после первых свежих новостей. Через пару дней станет видно, какие новости реально двигают цену.</div>`}
+    </div>
+    <div class="tiny muted" style="margin-top:12px;white-space:normal">Новость — не сигнал «покупай»: к публикации цена часто уже сдвинулась. Бот меряет, что было после каждой новости, учится на этом и защищает деньги: щит монет, пауза в шторм и вокруг данных США. Вживую по новостям сам не покупает.</div>`;
+}
+
+async function newsSheet() {
+  Sheet.open("Новости → рынок", newsHtml(S.news), { full: true });
+  try { S.news = await api("/api/news"); } catch (e) { fail(e); return; }
+  Sheet.body().innerHTML = newsHtml(S.news);
+}
+
+async function newsSet(body, okText, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    S.news = await api("/api/news", body, { timeout: 60000 });
+    haptic.ok(); if (okText) toast(okText);
+    Sheet.body().innerHTML = newsHtml(S.news);
+  } catch (e) { fail(e); if (btn) btn.disabled = false; }
+}
+
 function oppsSheet(tab) {
   tab = tab || S.oppsTab || "promos"; S.oppsTab = tab;
   const r = S.opps;
@@ -2540,6 +2586,9 @@ document.addEventListener("click", async (e) => {
     case "pilot-start": haptic.tap(); pilotStart(); break;
     case "dex": haptic.tap(); dexSheet(d.v || "hot"); break;
     case "opps": haptic.tap(); oppsSheet(); break;
+    case "news": haptic.tap(); newsSheet(); break;
+    case "news-refresh": newsSet({ refresh: true }, "Новости обновлены", el); break;
+    case "news-alerts": haptic.sel(); newsSet({ alerts: !(S.news || {}).alerts }, (S.news || {}).alerts ? "🔕 Уведомления о новостях выключены" : "🔔 Уведомления о новостях включены"); break;
     case "opps-tab": haptic.sel(); S.oppsTab = d.v; $$('[data-act="opps-tab"]').forEach((b) => b.classList.toggle("on", b.dataset.v === d.v)); $("#oppsBox").innerHTML = oppsBody(S.opps, d.v); break;
     case "opps-plan": haptic.tap(); oppsPlan(); break;
     case "dex-tab": haptic.sel(); dexSheet(d.v); break;

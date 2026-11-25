@@ -656,6 +656,10 @@ class Scalper:
                                 f"щит: {LOSS_STREAK} убытка подряд — новые покупки на паузе до "
                                 f"{self._clock(pause)}. Рынок сейчас против стратегии, лучше переждать")
             return []
+        np = self.news_pause(now)
+        if np:
+            self.last_reason = f"{np[1]} — новые покупки на паузе до {self._clock(np[0])} (/news)"
+            return []
         ranking = await self.rank(name)
         good, held_back = self.candidates(name, now)
         if not good:
@@ -976,8 +980,21 @@ class Scalper:
         """Монеты с делистингом или плохими новостями (из bot/opportunities.risk_coins)."""
         self.st["risk"] = {c: [float(until), str(why)] for c, (until, why) in risk.items()}
 
+    def set_news(self, risk: dict[str, tuple[float, str]], pause: tuple[float, str] | None) -> None:
+        """📰 Щит и пауза по новостям (bot/news.py): монеты после плохих новостей; шторм или важные данные США."""
+        self.st["nrisk"] = {c: [float(until), str(why)] for c, (until, why) in risk.items()}
+        self.st["npause"] = [float(pause[0]), str(pause[1])] if pause else None
+
+    def news_pause(self, now: float | None = None) -> tuple[float, str] | None:
+        now = time.time() if now is None else now
+        p = self.st.get("npause")
+        return (float(p[0]), str(p[1])) if p and float(p[0]) > now else None
+
     def shield_reason(self, coin: str, now: float | None = None) -> str | None:
         now = time.time() if now is None else now
+        item = (self.st.get("nrisk") or {}).get(coin)
+        if item and float(item[0]) > now:
+            return f"{item[1]} (до {self._clock(float(item[0]))})"
         for src in ("risk", "blocked"):
             item = self.st[src].get(coin)
             if item and float(item[0]) > now:
@@ -991,6 +1008,12 @@ class Scalper:
             for coin, (until, why) in sorted(self.st[src].items()):
                 if float(until) > now:
                     out.append({"coin": coin, "until": float(until), "reason": why, "kind": src})
+        for coin, (until, why) in sorted((self.st.get("nrisk") or {}).items()):
+            if float(until) > now:
+                out.append({"coin": coin, "until": float(until), "reason": why, "kind": "news"})
+        np = self.news_pause(now)
+        if np:
+            out.append({"coin": "все монеты", "until": np[0], "reason": np[1], "kind": "news"})
         for name, until in self.st["pause"].items():
             if float(until) > now:
                 why = (self.st.get("pause_why") or {}).get(name)

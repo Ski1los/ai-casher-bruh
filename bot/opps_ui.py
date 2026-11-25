@@ -139,7 +139,8 @@ def section_text(snap: dict, section: str) -> str:
                         f"<i>({html.escape(n['source'])}{coins})</i>")
         return ("📰 <b>Новости крипты</b>\n\n" + ("\n".join(body) or "Новости не загрузились, попробуй позже.")
                 + "\n\n<i>Новость — не сигнал покупать: к моменту публикации цена обычно уже сдвинулась. "
-                "Спроси ИИ, что из этого важно для твоих $5: кнопка «🤖 План».</i>")
+                "Спроси ИИ, что из этого важно для твоих $5: кнопка «🤖 План».</i>\n"
+                "📰 Все источники, влияние на цену и чему бот научился: /news")
     return ""
 
 
@@ -196,13 +197,6 @@ def register(b: ArbitrageBot) -> None:
             return
         await message.answer("💡 Собираю акции Bybit, проценты и новости…")
         await show(message.chat.id, message.from_user.id if message.from_user else None)
-
-    @dp.message(Command("news"))
-    async def cmd_news(message: Message) -> None:
-        if not b._allowed(message):
-            return
-        snap = await snapshot(b)
-        await b._send(message.chat.id, section_text(snap, "news"), keyboard(b, None))
 
     @dp.callback_query(F.data.startswith("op:"))
     async def cb_opps(cb: CallbackQuery) -> None:

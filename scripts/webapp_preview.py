@@ -587,6 +587,48 @@ def build():
     return b
 
 
+
+def seed_news(b, now: float) -> None:
+    """📰 Новости на ненастоящих данных: события, замеры, макро-календарь — чтобы видеть дизайн без сети."""
+    nw = b.news
+    st = nw.st
+    st["first"] = False
+
+    def ev(i, title, src, cat, coins, scope, ago_min, imp, ru="", why="", fact=None):
+        e = {"id": f"n{i}", "t": now - ago_min * 60, "seen": now - ago_min * 60, "title": title, "url": "https://example.com",
+             "src": src, "srcs": [src] + (["cdk", "dcr"] if imp >= 3 else []), "tier": 1, "cat": cat, "prior": 0,
+             "coins": coins, "scope": scope, "old": False, "p0": {"BTC": 1.0}, "res": {}, "imp": imp, "ru": ru, "why": why}
+        if fact:
+            e["res"]["4h"] = {c: [v, v] for c, v in fact.items()}
+        return e
+
+    st["events"] = [
+        ev(1, "Hackers drain $38M from Cetus-like DEX on Sui", "ctg", "hack", ["SUI"], "coin", 50, 3,
+           "Хакеры вывели $38 млн из DEX в сети Sui", "биржи могут приостановить ввод/вывод SUI, цена под давлением",
+           {"SUI": -6.2}),
+        ev(2, "Binance Will List Toncoin (TON) with Seed Tag", "bnc", "listing_major", ["TON"], "coin", 30, 3,
+           "Binance добавит Toncoin (TON)", "листинг на крупнейшей бирже обычно даёт рост в первые часы"),
+        ev(3, "Spot bitcoin ETFs log $520M inflows, best day in a month", "tbk", "etf_pos", ["BTC"], "market", 160, 2,
+           "Спотовые биткоин-ETF: приток $520 млн — лучший день за месяц", "", {"BTC": 1.1}),
+        ev(4, "SEC sues token issuer over unregistered XRP sales", "sec", "lawsuit", ["XRP"], "coin", 300, 2,
+           "SEC подала иск против эмитента из-за продаж XRP", "", {"XRP": -1.8}),
+    ]
+    for cat, moves in {"hack": [-5.1, -7.4, -2.2, -3.9, -6.0], "listing_major": [6.3, 2.1, -1.0, 4.8],
+                       "lawsuit": [-1.2, 0.4, -2.6], "etf_pos": [0.9, 1.4, -0.3]}.items():
+        for m in moves:
+            nw._learn({"cat": cat, "src": "ctg"}, "4h", m)
+    st["measured"], st["total"] = 47, 1284
+    st["shield"] = {"n": 9, "right": 7}
+    st["paper"].update(n=4, wins=3, sum=7.6)
+    st["digest"] = {"text": "Рынок осторожен: приток в ETF поддерживает биткоин, но взлом DEX в сети Sui давит на "
+                            "альткоины. Сегодня вечером — данные по инфляции США.", "at": now - 1200}
+    nw.fng = {"value": 38, "label": "Fear", "at": now}
+    nw.macro = [{"id": "m1", "at": now + 5 * 3600, "title": "CPI m/m", "ru": "инфляция в США (CPI)", "forecast": "0.3%",
+                 "previous": "0.4%"}]
+    for s in nw.sources()[:27]:
+        nw.health[s.key] = {"ok": 1, "fail": 0, "err": "", "at": now, "next": now + 600, "items": 20, "name": s.name}
+    nw.last_tick = now
+
 async def main():
     from tests import fake_market_api as fm
 
@@ -603,6 +645,7 @@ async def main():
         hist.append([now - i * 900, round(v, 4)])
         v /= 1 + rnd.gauss(0.0004, 0.004)
     b.trader.state.history = hist[::-1] + [[now, p["total_usd"]]]
+    seed_news(b, now)
     from bot import feed  # 📡 лента и 🧠 штурман на ненастоящих данных — чтобы видеть дизайн
     for ago_min, text in [
         (400, "🐋 Кит 7xKX…gAsU купил MOODENG на 2.1 SOL — копирую на демо"),

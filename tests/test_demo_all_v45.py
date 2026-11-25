@@ -135,7 +135,7 @@ def test_overview_lists_every_engine_with_reason(bot_env):
     b, _ = bot_env
     rows = demo_report.rows(b)
     ids = [r["id"] for r in rows]
-    assert ids == ["arb", "tri", "pilot", "lab", "spread", "copy", "meme", "train", "mirror", "pulse"]
+    assert ids == ["arb", "tri", "pilot", "lab", "spread", "news", "copy", "meme", "train", "mirror", "pulse"]
     assert all(r["why"] for r in rows)
     text = demo_report.text(b)
     assert "Вся демо-торговля" in text and ("Почему нет сделок" in text or "Состояние" in text)
