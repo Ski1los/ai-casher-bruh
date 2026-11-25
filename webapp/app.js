@@ -1322,7 +1322,8 @@ function spreadHtml(x) {
   return `<div class="card">
       <div class="row between"><div class="b">${x.on ? "▶️ Работает" : "⏸ Выключен"}</div><span class="pill ${x.live ? "bad" : "gray"}">${x.live ? "💵 реальный" : "🧪 тест на бумаге"}</span></div>
       <div class="small muted" style="margin-top:6px">Монета на одной бирже дешевле → бот покупает там, переводит и продаёт на другой. Перед покупкой проверяет вывод/ввод, сеть, комиссии, стаканы и одна ли это монета.</div>
-      <div class="small" style="margin-top:8px">Прибыль после всех комиссий от <b>${x.min_pct}%</b> и <b>$${x.min_usd}</b> · сделка до <b>$${x.max_usd}</b> · перевод ≤ ${x.max_net_min} мин · одна за раз</div>
+      <div class="small" style="margin-top:8px">Прибыль после всех комиссий от <b>${x.min_pct}%</b> и <b>$${x.min_usd}</b> · сделка до <b>$${x.max_usd}</b> · перевод ≤ ${x.max_net_min} мин</div>
+      <div class="row" style="gap:6px;margin-top:8px;align-items:center"><span class="small muted">Сделок одновременно:</span>${[1, 2, 3, 4, 5].map((n) => `<span class="chip ${x.max_runs === n ? "on" : ""}" ${owner() ? `data-act="spread-runs" data-v="${n}"` : ""}>${n}</span>`).join("")}</div>
       ${(x.problems || []).map((p) => `<div class="banner red" style="margin-top:8px">⛔ ${esc(p)}</div>`).join("")}
       <div class="row" style="gap:8px;margin-top:10px">
         <button class="btn ${x.on ? "" : "primary"} grow" data-act="spread-toggle" ${owner() ? "" : "disabled"}>${x.on ? "⏸ Выключить" : "▶️ Включить"}</button>
@@ -1336,6 +1337,8 @@ function spreadHtml(x) {
     <div class="section-title">Итоги</div>
     <div class="card small">🧪 тест: ${tt.n} сделок, <b class="num">${sign(tt.pnl)}</b> · 💵 реально: ${tl.n}, <b class="num">${sign(tl.pnl)}</b>
       ${x.near ? `<div class="muted" style="margin-top:6px">Лучший спред скана: ${esc(x.near.text)} — ${x.near.gross >= 0 ? "+" : ""}${x.near.gross}% по ценам, ${x.near.net >= 0 ? "+" : ""}${x.near.net}% после торговых комиссий</div>` : ""}</div>
+    ${(x.bad || []).length ? `<div class="section-title">🚫 Карантин · не проверяю и не беру</div><div class="list">${x.bad.map((c) => `<div class="item" style="align-items:flex-start"><div class="grow"><div class="t">${esc(c.coin)}</div><div class="s" style="white-space:normal">до ${when(c.until)} · ${esc(c.why)}</div></div>${owner() ? `<button class="btn sm ghost" data-act="spread-unban" data-v="${esc(c.coin)}">Снять</button>` : ""}</div>`).join("")}</div>` : ""}
+    ${x.skipped && (x.skipped.bad || x.skipped.volume) ? `<div class="tiny muted" style="margin-top:6px">Отсеял до анализа: ${x.skipped.bad ? `в карантине ${x.skipped.bad}` : ""}${x.skipped.bad && x.skipped.volume ? ", " : ""}${x.skipped.volume ? `тонкий рынок ${x.skipped.volume}` : ""}</div>` : ""}
     ${(x.checks || []).length ? `<div class="section-title">Последние проверки</div><div class="list">${x.checks.map((c) => `<div class="item"><div class="grow"><div class="t">${esc(c.coin)} ${esc(c.src)} → ${esc(c.dst)}</div><div class="s">спред ${c.gross}%${c.pct != null ? ` · итог ${c.pct >= 0 ? "+" : ""}${c.pct}%` : ""}${c.reason ? ` · ${esc(c.reason)}` : ""}</div></div><div class="r">${c.reason ? "⛔" : "🟢"}</div></div>`).join("")}</div>` : ""}
     ${(x.runs || []).length ? `<div class="section-title">Сделки</div><div class="list">${x.runs.map((r) => `<div class="item"><div class="grow small">${esc(r)}</div></div>`).join("")}</div>` : ""}`;
 }
@@ -1344,6 +1347,14 @@ async function spreadSheet() {
   Sheet.open("Спред-арбитраж", `<div class="skel" style="height:140px"></div>`, { full: true });
   try { S.spread = await api("/api/spread"); } catch (e) { fail(e); Sheet.close(); return; }
   Sheet.body().innerHTML = spreadHtml(S.spread);
+}
+
+async function spreadSet(body, okText) {
+  try {
+    S.spread = await api("/api/spread", body);
+    haptic.ok(); toast(okText || "Готово");
+    Sheet.body().innerHTML = spreadHtml(S.spread);
+  } catch (e) { fail(e); }
 }
 
 async function spreadToggle(btn) {
@@ -1358,7 +1369,7 @@ async function spreadToggle(btn) {
 
 async function spreadMode(btn) {
   const paper = !(S.spread || {}).paper;
-  if (!paper && !(await confirmBox("Перевести спред на РЕАЛЬНЫЕ сделки? Бот будет сам покупать монеты, выводить их на твою вторую биржу и продавать — только если прибыль после всех комиссий выше порога. Пока монеты едут (2–15 мин), цена может уйти. Защита: одна сделка за раз, лимиты, стоп −3%, дневной лимит убытка."))) return;
+  if (!paper && !(await confirmBox(`Перевести спред на РЕАЛЬНЫЕ сделки? Бот будет сам покупать монеты, выводить их на твою вторую биржу и продавать — только если прибыль после всех комиссий выше порога. Пока монеты едут (2–15 мин), цена может уйти. Защита: карантин проблемных монет, до ${(S.spread || {}).max_runs || 3} сделок разными монетами, лимиты, стоп −3%, дневной лимит убытка.`))) return;
   btn.disabled = true;
   try {
     S.spread = await api("/api/spread", { paper, confirm: !paper });
@@ -2478,6 +2489,8 @@ document.addEventListener("click", async (e) => {
     case "spread-toggle": spreadToggle(el); break;
     case "spread-check": spreadCheck(el); break;
     case "spread-mode": spreadMode(el); break;
+    case "spread-runs": haptic.sel(); spreadSet({ max_runs: Number(d.v) }, `До ${d.v} сделок одновременно`); break;
+    case "spread-unban": if (confirm(`Снять ${d.v} с карантина? Бот снова будет её проверять (все проверки как обычно).`)) spreadSet({ unban: d.v }, `${d.v} вышла из карантина`); break;
     case "xfer-check": transferCheck(el); break;
     case "xfer-go": transferGo(el); break;
     case "xfer-test": transferTest(el); break;

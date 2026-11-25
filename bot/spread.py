@@ -15,7 +15,7 @@
 
 Режим: 🧪 ТЕСТ (по умолчанию, даже если остальной бот торгует по-настоящему) — сделки «на бумаге» по реальным
 стаканам, со временем перевода и настоящими комиссиями, деньги не двигаются; 💵 РЕАЛЬНЫЙ — настоящие ордера и
-выводы: нужны /live, разрешённые переводы (/transfer) и отдельное подтверждение /spread real. Одна сделка за раз, лимиты: сделка ≤ max_trade, перевод ≤ лимита переводов, дневной убыток.
+выводы: нужны /live, разрешённые переводы (/transfer) и отдельное подтверждение /spread real. До 3 сделок разными монетами одновременно (/spread runs), лимиты: сделка ≤ max_trade, перевод ≤ лимита переводов, дневной убыток.
 
 Честно: на $5 таких сделок мало — комиссия вывода монеты (часто $0.1–0.5) съедает 2–10% суммы, а большие спреды
 обычно бывают там, где биржа закрыла ввод/вывод (бот это видит и не лезет). Тест покажет реальную картину.
@@ -58,13 +58,34 @@ SUSPECT_PCT = 3.0         # такой спред без подтвержден�
 HOLD_SEC = 2 * 3600       # монеты доехали, а продать в плюс нельзя — ждём безубытка не дольше
 STOP_PCT = 3.0            # просадка от безубытка, при которой продаём сразу
 SLOW_SEC = 3 * 3600
-CANDIDATES = 3            # сколько связок за скан проверяем полностью (бережём лимиты бирж)
+CANDIDATES = 6            # сколько связок за скан проверяем полностью (бережём лимиты бирж)
+MAX_RUNS = 3              # сколько сделок (разных монет) держим одновременно по умолчанию; /spread runs 1–5
+MAX_RUNS_CAP = 5
+MIN_VOL_USD = 100_000     # оборот за сутки на КАЖДОЙ бирже: на тонких монетах большой спред — обычно ловушка
+STALE_SEC = 12 * 3600     # спред держится дольше — значит, перевезти монеты на деле нельзя (иначе его бы закрыли)
+STALE_PCT = 2.0
+SEEN_GAP_SEC = 900        # пропал из скана дольше — «висящий» спред считаем заново
+VOL_SIGMA = 2.0           # прибыль должна быть больше обычного хода цены за время перевода (2σ ≈ 95% случаев)
+PAPER_STUCK_SEC = HOLD_SEC + 3600        # тест: доехали, а продать не вышло 3 ч — в жизни монеты застряли бы
+LIVE_SENT_MAX_SEC = 24 * 3600            # реально: перевод идёт дольше суток
+LIVE_SELL_MAX_SEC = HOLD_SEC + 6 * 3600  # реально: монеты на месте, а продать не вышло 8 ч
+STRUCT = {"wallet", "suspect", "market", "net", "stale"}  # проблема монеты, а не рынка — копим «штрафы»
+STRIKES = 2               # столько структурных отказов за сутки → карантин
+BAN_STEPS = (86400, 3 * 86400, 7 * 86400)  # карантин растёт: 1 день → 3 дня → 7 дней
+BAN_RUN_SEC = 7 * 86400   # сделка застряла — монета в карантин на неделю
+# известно проблемные: спред по ним «висит» днями, потому что ввод/вывод сети годами то закрыт, то на техработах.
+# Снять: /spread unban LUNC
+SEED_BAD = {
+    "LUNC": "Terra Classic: ввод/вывод на биржах часто закрыт или на техработах — спред «висит» днями, перевезти нельзя",
+    "USTC": "Terra Classic (бывший UST): ввод/вывод часто закрыт, цена без опоры — спред «висит» днями",
+}
 RUNS_KEEP = 30
 CHECKS_KEEP = 8
 BOOK_CACHE_SEC = 600
 ACTIVE = ("sent", "arrived", "back")
 DEFAULTS = {"on": False, "paper": True, "min_pct": 1.0, "min_usd": 0.03, "max_usd": 10.0, "runs": [], "checks": [],
-            "reasons": {}, "cool": {}, "told": {}, "totals": {"test": [0, 0.0], "live": [0, 0.0]}}
+            "reasons": {}, "cool": {}, "told": {}, "totals": {"test": [0, 0.0], "live": [0, 0.0]},
+            "max_runs": MAX_RUNS, "bad": {}, "strikes": {}, "seeded": False, "stuck": 0}
 REASONS = {
     "fees": "после всех комиссий прибыль меньше порога",
     "wallet": "вывод/ввод монеты закрыт или нет общей сети",
@@ -78,9 +99,12 @@ REASONS = {
     "keys": "ключи, права или переводы не разрешены",
     "market": "пара не торгуется",
     "error": "ошибка запроса к бирже",
+    "stale": "спред держится больше 12 ч — перевезти монеты на деле нельзя",
+    "volatile": "цена за время перевода обычно уходит больше прибыли",
 }
 COOL_SEC = {"fees": 300, "book": 300, "error": 300, "money": 900, "keys": 900, "limits": 1800, "min": 1800,
-            "wallet": 1800, "addr": 1800, "market": 3600, "net": 6 * 3600, "suspect": 12 * 3600}
+            "wallet": 1800, "addr": 1800, "market": 3600, "net": 6 * 3600, "suspect": 12 * 3600, "stale": 6 * 3600,
+            "volatile": 1800}
 TELL_ADDR_SEC = 6 * 3600  # «добавь адрес в книгу» по одной связке — не чаще
 
 
@@ -142,6 +166,8 @@ class Spread:
         self.b = b
         self._book: dict[tuple[str, str], tuple[float, list[dict] | None]] = {}
         self._busy = asyncio.Lock()
+        self._seen: dict[str, list[float]] = {}  # связка → [впервые, последний раз] в сканах подряд
+        self.skipped: dict[str, int] = {}        # что отсеяно до полного анализа на последнем скане
 
     # --- состояние ---------------------------------------------------------------------------------
 
@@ -154,10 +180,68 @@ class Spread:
             if k not in st:
                 st[k] = ({kk: list(vv) for kk, vv in v.items()} if k == "totals" else
                          type(v)(v) if isinstance(v, (list, dict)) else v)
+        if not st["seeded"]:  # один раз: снятый руками карантин больше не возвращаем
+            st["seeded"] = True
+            for coin, why in SEED_BAD.items():
+                st["bad"].setdefault(coin, {"until": time.time() + 30 * 86400, "why": why, "n": 1, "auto": False})
         return st
+
+    # --- карантин проблемных монет -----------------------------------------------------------------
+
+    def bad(self, coin: str, now: float | None = None) -> dict | None:
+        """Монета в карантине? (запись с причиной и сроком) — такие связки бот даже не проверяет."""
+        now = time.time() if now is None else now
+        x = self.st["bad"].get(coin)
+        if x and float(x.get("until") or 0) > now:
+            return x
+        return None
+
+    def ban(self, coin: str, sec: float, why: str, now: float | None = None, auto: bool = True) -> dict:
+        now = time.time() if now is None else now
+        bad = self.st["bad"]
+        old = bad.get(coin) or {}
+        x = {"until": max(now + sec, float(old.get("until") or 0)), "why": why[:200], "n": int(old.get("n") or 0) + 1,
+             "auto": auto, "at": now}
+        bad[coin] = x
+        self.st["strikes"].pop(coin, None)
+        if len(bad) > 60:  # память чистая: истёкшие и самые старые — прочь
+            for k in sorted(bad, key=lambda k: float(bad[k].get("until") or 0))[:len(bad) - 60]:
+                bad.pop(k, None)
+        return x
+
+    def unban(self, coin: str) -> bool:
+        self.st["strikes"].pop(coin, None)
+        return self.st["bad"].pop(coin, None) is not None
+
+    def strike(self, coin: str, why: str, now: float | None = None) -> dict | None:
+        """Структурный отказ (вывод закрыт, разные токены, «висящий» спред…). STRIKES за сутки → карантин."""
+        now = time.time() if now is None else now
+        sts = self.st["strikes"]
+        hits = [t for t in sts.get(coin, []) if now - float(t) < 86400] + [now]
+        sts[coin] = hits[-STRIKES:]
+        if len(hits) < STRIKES:
+            return None
+        n = int((self.st["bad"].get(coin) or {}).get("n") or 0)
+        return self.ban(coin, BAN_STEPS[min(n, len(BAN_STEPS) - 1)], why, now)
+
+    def bad_rows(self, now: float | None = None) -> list[tuple[str, dict]]:
+        now = time.time() if now is None else now
+        return sorted(((c, x) for c, x in self.st["bad"].items() if float(x.get("until") or 0) > now),
+                      key=lambda cx: -float(cx[1].get("until") or 0))
+
+    @property
+    def max_runs(self) -> int:
+        try:
+            return max(1, min(MAX_RUNS_CAP, int(self.st["max_runs"])))
+        except (TypeError, ValueError):
+            return MAX_RUNS
 
     def name(self, ex: str) -> str:
         return self.b.scanner.display_name(ex)
+
+    def when(self, ts: float) -> str:
+        off = float(getattr(self.b.settings, "report_utc_offset", 3) or 0)
+        return time.strftime("%d.%m %H:%M", time.gmtime(ts + off * 3600))
 
     @property
     def live(self) -> bool:
@@ -188,21 +272,47 @@ class Spread:
 
     # --- анализ ------------------------------------------------------------------------------------
 
-    def candidates(self, result) -> list:
+    def candidates(self, result, now: float | None = None, track: bool = True) -> list:
+        """Связки для полного анализа. До него отсеиваем то, что проверять бессмысленно: монеты в карантине,
+        тонкие рынки (оборот < $100k за сутки на одной из бирж) и спреды, которые «висят» больше 12 ч."""
         quote = self.b.settings.quote
         t = self.b.trader
-        now = time.time()
+        now = time.time() if now is None else now
         busy = {r["coin"] for r in self.active()}
         cool = self.st["cool"]
+        skipped: dict[str, int] = {}
         out = []
         for o in getattr(result, "opportunities", None) or []:
             coin, q = (o.symbol.split("/") + [""])[:2]
             src, dst = o.buy.exchange, o.sell.exchange
             if q != quote or coin in busy or src not in t.creds or dst not in t.creds:
                 continue
-            if cool.get(f"{coin}:{src}:{dst}", 0) > now:
+            key = f"{coin}:{src}:{dst}"
+            if track:
+                seen = self._seen.get(key)
+                if seen is None or now - seen[1] > SEEN_GAP_SEC:
+                    seen = self._seen[key] = [now, now]
+                seen[1] = now
+                if now - seen[0] >= STALE_SEC and o.gross_percent >= STALE_PCT and not self.bad(coin, now):
+                    hours = (now - seen[0]) / 3600
+                    self.ban(coin, BAN_STEPS[0], f"спред {o.gross_percent:.1f}% держится {hours:.0f} ч — на деле "
+                                                 "перевезти монеты нельзя (иначе его бы давно закрыли)", now)
+                    self.st["reasons"]["stale"] = int(self.st["reasons"].get("stale", 0)) + 1
+            if self.bad(coin, now):
+                skipped["bad"] = skipped.get("bad", 0) + 1
+                continue
+            vol = min(float(getattr(o.buy, "volume_usd", 0) or 0), float(getattr(o.sell, "volume_usd", 0) or 0))
+            if vol < MIN_VOL_USD:
+                skipped["volume"] = skipped.get("volume", 0) + 1
+                continue
+            if cool.get(key, 0) > now:
+                skipped["cool"] = skipped.get("cool", 0) + 1
                 continue
             out.append(o)
+        if track:
+            self.skipped = skipped
+            for k in [k for k, v in self._seen.items() if now - v[1] > SEEN_GAP_SEC]:
+                self._seen.pop(k, None)
         out.sort(key=lambda o: o.net_percent, reverse=True)
         return out
 
@@ -222,6 +332,10 @@ class Spread:
         st = self.st
         coin, quote = symbol.split("/")
         ev = SpreadCheck(coin, src, dst, symbol, gross)
+        bad = self.bad(coin)
+        if bad:
+            ev.add("warn", f"{coin} в карантине до {self.when(float(bad['until']))}: {bad.get('why', '')} — сам не беру "
+                           f"(снять: /spread unban {coin})")
         for n in (src, dst):
             if n not in t.creds:
                 return ev.no("keys", f"нет API-ключа {self.name(n)} — /keys")
@@ -313,6 +427,15 @@ class Spread:
             ev.reason = "fees"
             ev.add("bad", f"порог: от {float(st['min_pct']):g}% и ${float(st['min_usd']):g} — не беру")
             return ev
+        # 5б. риск хода цены, пока монеты едут: обычное движение за `minutes` минут должно быть меньше прибыли
+        move = await self._typical_move(dst, symbol, minutes)
+        if move is None:
+            ev.add("info", "ход цены за время перевода не проверил (биржа не отдала свечи)")
+        elif move >= ev.pct:
+            return ev.no("volatile", f"за ~{minutes:g} мин цена {coin} обычно уходит на ±{move:.2f}% — больше прибыли "
+                                     f"{ev.pct:.2f}%: высокий риск продать в минус")
+        else:
+            ev.add("ok", f"ход цены за ~{minutes:g} мин обычно ±{move:.2f}% — меньше прибыли {ev.pct:.2f}%")
         # 6. адресная книга (последней: если только она мешает — скажем, какой адрес добавить)
         if src == "bybit":
             if not self.live:
@@ -333,6 +456,23 @@ class Spread:
                     ev.add("ok", "адрес есть в адресной книге Bybit")
         return ev
 
+    async def _typical_move(self, ex_name: str, symbol: str, minutes: float) -> float | None:
+        """Обычный ход цены за `minutes` минут, % (2σ по минутным свечам за последний час). None — свечей нет."""
+        ex = self.b.scanner.exchanges.get(ex_name)
+        if ex is None or not hasattr(ex, "fetch_ohlcv"):
+            return None
+        try:
+            rows = await ex.fetch_ohlcv(symbol, "1m", limit=61)
+        except Exception:
+            return None
+        closes = [float(r[4]) for r in rows or [] if r and len(r) > 4 and r[4]]
+        if len(closes) < 20:
+            return None
+        rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes))]
+        mean = sum(rets) / len(rets)
+        sd = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
+        return VOL_SIGMA * sd * math.sqrt(max(1.0, minutes)) * 100
+
     def _note(self, ev: SpreadCheck, now: float | None = None) -> None:
         now = time.time() if now is None else now
         st = self.st
@@ -343,6 +483,9 @@ class Spread:
         if ev.reason:
             st["reasons"][ev.reason] = int(st["reasons"].get(ev.reason, 0)) + 1
             st["cool"][f"{ev.coin}:{ev.src}:{ev.dst}"] = now + COOL_SEC.get(ev.reason, 600)
+            if ev.reason in STRUCT:
+                why = next((x for s, x in reversed(ev.checks) if s == "bad"), REASONS.get(ev.reason, ev.reason))
+                self.strike(ev.coin, why, now)
         for k in [k for k, v in st["cool"].items() if v < now]:
             st["cool"].pop(k, None)
 
@@ -434,6 +577,23 @@ class Spread:
             return "ждал безубытка 2 ч"
         return None
 
+    def _overdue(self, run: dict, now: float) -> str | None:
+        """Сделка застряла и ждать дальше бессмысленно? Текст причины или None."""
+        stage, live = run["stage"], run["mode"] == "live"
+        since = float(run.get("arrived_at") or run["opened"])
+        if not live:
+            if stage in ("arrived", "back") and now - since > PAPER_STUCK_SEC:
+                return ("тест: монеты «доехали», но продать их не вышло 3 ч (нет покупателей или пара не торгуется) — "
+                        "в реальности они бы застряли")
+            return None
+        if stage == "sent" and now - float(run["opened"]) > LIVE_SENT_MAX_SEC:
+            return "перевод идёт больше суток — проверь /transfer и баланс бирж; бот больше не ждёт"
+        if stage in ("arrived", "back") and now - since > LIVE_SELL_MAX_SEC:
+            where = run["dst"] if stage == "arrived" else run["src"]
+            return (f"монеты на {self.name(where)}, но продать их не вышло 8 ч — продай вручную: "
+                    f"/sell {where} {run['coin']} all")
+        return None
+
     async def _sell(self, run: dict, where: str, qty: float) -> float:
         """Реальная продажа монет сделки на бирже where. Возвращает полученные USDT."""
         t = self.b.trader
@@ -453,6 +613,10 @@ class Spread:
         note = "продал обратно на бирже покупки — вывод не прошёл" if why == "back" else f"продал {why}"
         run.update(received=round(received, 6), pnl=round(received - float(run["spent"]), 6), closed=now, stage="done",
                    why=note)
+        if why == "back":  # вывод не прошёл уже после покупки — монета проблемная
+            self.ban(run["coin"], BAN_STEPS[1], "вывод не прошёл после покупки: " + str(run.get("note") or "")[:120], now)
+        elif why.startswith("стоп"):
+            self.strike(run["coin"], f"стоп-лосс: цена ушла больше чем на {STOP_PCT:g}%, пока монеты ехали", now)
         tot = self.st["totals"].setdefault(run["mode"], [0, 0.0])
         tot[0] += 1
         tot[1] = round(tot[1] + run["pnl"], 6)
@@ -483,6 +647,14 @@ class Spread:
                                     f"Монеты {html.escape(run['coin'])} — на {html.escape(self.name(where))}"
                                     + (" (ещё в пути)" if run["stage"] == "sent" else "")
                                     + f". Продать вручную: <code>/sell {where} {html.escape(run['coin'])} all</code>")
+                    continue
+                stuck = self._overdue(run, now)
+                if stuck:  # застрявшая сделка не держит слот вечно (раньше могла висеть днями)
+                    run.update(stage="stuck", closed=now, note=stuck)
+                    self.st["stuck"] = int(self.st.get("stuck") or 0) + 1
+                    self.ban(run["coin"], BAN_RUN_SEC, f"сделка застряла: {stuck}", now)
+                    msgs.append(f"⚠️ Спред {html.escape(title)}: {html.escape(stuck)}. {html.escape(run['coin'])} — в "
+                                "карантин на 7 дней, место освобождено для новых сделок")
                     continue
                 if run["stage"] == "sent":
                     if not live:
@@ -554,20 +726,25 @@ class Spread:
         return msgs
 
     async def process(self, result, now: float | None = None) -> list[str]:
-        """Каждый скан: ведём открытую сделку, а если её нет и спред включён — ищем новую."""
+        """Каждый скан: ведём открытые сделки и, если есть свободные места (до max_runs разных монет), ищем новые."""
         if self._busy.locked():
             return []
         async with self._busy:
             msgs = await self.step(now)
             st = self.st
-            if not st["on"] or self.active() or self.problems():
+            cands = self.candidates(result)  # и для учёта «висящих» спредов — даже когда новых сделок не ищем
+            if not st["on"] or len(self.active()) >= self.max_runs or self.problems():
                 if msgs:
                     self.b.save_trading()
                 return msgs
             if self.live and self.b.duplicate_running():
                 return msgs
             told = st["told"]
-            for o in self.candidates(result)[:CANDIDATES]:
+            for o in cands[:CANDIDATES]:
+                if len(self.active()) >= self.max_runs:
+                    break
+                if o.symbol.split("/")[0] in {r["coin"] for r in self.active()}:
+                    continue
                 ev = await self.evaluate(o.symbol, o.buy.exchange, o.sell.exchange, o.gross_percent)
                 self._note(ev)
                 if ev.reason == "addr" and ev.received > ev.usd:
@@ -591,7 +768,6 @@ class Spread:
                     break
                 if run["mode"] == "live":  # тест на бумаге — одно сообщение с итогом, без лишнего шума
                     msgs.append(self.open_text(run))
-                break
             for k in [k for k, v in told.items() if time.time() - float(v) > 86400]:
                 told.pop(k, None)
             self.b.save_trading()
@@ -674,7 +850,7 @@ class Spread:
                  f"Статус: {'▶️ <b>работает</b>' if st['on'] else '⏸ выключен'} · режим {mode}",
                  f"Условия: прибыль после ВСЕХ комиссий от {float(st['min_pct']):g}% и ${float(st['min_usd']):g} · "
                  f"сделка до ${min(float(st['max_usd']), float(s.max_trade_usd)):g} · перевод не дольше {MAX_NET_MIN} мин · "
-                 "одна сделка за раз"]
+                 f"до {self.max_runs} сделок одновременно (разные монеты)"]
         probs = self.problems()
         if probs:
             lines += ["", "⛔ <b>Мешает</b>:"] + [f"• {html.escape(p)}" for p in probs]
@@ -695,13 +871,29 @@ class Spread:
         reasons = sorted(st["reasons"].items(), key=lambda kv: -kv[1])[:4]
         if reasons:
             lines.append("Чаще всего отказ: " + "; ".join(f"{html.escape(REASONS.get(k, k))} ({v})" for k, v in reasons))
+        sk = self.skipped
+        if sk:
+            parts = [f"{t} {sk[k]}" for k, t in (("bad", "в карантине"), ("volume", "тонкий рынок"),
+                                                  ("cool", "пауза после отказа")) if sk.get(k)]
+            lines.append("Отсеял до анализа на последнем скане: " + ", ".join(parts))
+        bad = self.bad_rows()
+        if bad:
+            lines.append("\n🚫 <b>Карантин</b> (проблемные монеты — не проверяю и не беру):")
+            for coin, x in bad[:6]:
+                lines.append(f"• <b>{html.escape(coin)}</b> до {self.when(float(x['until']))}: {html.escape(x.get('why', ''))}")
+            if len(bad) > 6:
+                lines.append(f"…и ещё {len(bad) - 6}: <code>/spread bad</code>")
+            lines.append("Снять: <code>/spread unban LUNC</code> · добавить: <code>/spread ban МОНЕТА</code>")
         res = self.b.scanner.last_result
         near = getattr(res, "near_cross", None) if res else None
         if near:
+            nb = self.bad(near.text.split("/")[0])
             lines.append(f"Лучший спред последнего скана: {html.escape(near.text)} — {near.gross_percent:+.2f}% по ценам, "
-                         f"{near.net_percent:+.2f}% после торговых комиссий (без комиссии вывода)")
+                         f"{near.net_percent:+.2f}% после торговых комиссий (без комиссии вывода)"
+                         + (" — 🚫 в карантине, не беру" if nb else ""))
         lines.append("\n<code>/spread check</code> — проверить сейчас · <code>/spread check SOL</code> — монету · "
-                     "<code>/spread min 1.5</code> · <code>/spread max 10</code> · <code>/spread addr</code> — адреса · "
+                     "<code>/spread min 1.5</code> · <code>/spread max 10</code> · <code>/spread runs 3</code> — сделок "
+                     "одновременно · <code>/spread addr</code> — адреса · <code>/spread bad</code> — карантин · "
                      "<code>/spread real</code> / <code>/spread test</code> — реальные сделки или тест")
         return "\n".join(lines)
 
@@ -718,7 +910,11 @@ class Spread:
         res = self.b.scanner.last_result
         near = getattr(res, "near_cross", None) if res else None
         runs = [r for r in st["runs"] if r.get("stage") in ("done", "stuck")][-6:][::-1]
+        bad = [{"coin": c, "until": float(x["until"]), "why": x.get("why", ""), "auto": bool(x.get("auto", True))}
+               for c, x in self.bad_rows()]
         return {"on": bool(st["on"]), "live": self.live, "paper": bool(st["paper"]),
+                "max_runs": self.max_runs, "bad": bad[:20], "skipped": dict(self.skipped),
+                "stuck": int(st.get("stuck") or 0),
                 "trading_live": bool(self.b.trader.state.live), "min_pct": st["min_pct"], "min_usd": st["min_usd"],
                 "max_usd": min(float(st["max_usd"]), float(self.b.settings.max_trade_usd)), "max_net_min": MAX_NET_MIN,
                 "problems": self.problems(), "active": [re.sub(r"<[^>]+>", "", self.run_line(r)) for r in self.active()],
@@ -735,6 +931,18 @@ class Spread:
         if not runs:
             return "⚖️ Сделок по спреду ещё не было. Включить: /spread on"
         return "⚖️ <b>Сделки по спреду</b>\n" + "\n".join(self.run_line(r) for r in reversed(runs))
+
+    def bad_text(self) -> str:
+        rows = self.bad_rows()
+        if not rows:
+            return ("🚫 Карантин пуст. Монета попадает сюда сама, если: вывод/ввод закрыт или это разные токены 2 раза "
+                    "за сутки, спред «висит» больше 12 ч, сделка застряла или вывод не прошёл. Вручную: /spread ban LUNC")
+        lines = ["🚫 <b>Карантин спреда</b> — эти монеты бот не проверяет и не берёт:"]
+        for coin, x in rows:
+            who = "" if x.get("auto", True) else " (вручную/заранее)"
+            lines.append(f"• <b>{html.escape(coin)}</b> до {self.when(float(x['until']))}{who}: {html.escape(x.get('why', ''))}")
+        lines.append("\nСрок растёт с каждым разом: 1 день → 3 дня → 7 дней. Снять: <code>/spread unban МОНЕТА</code>")
+        return "\n".join(lines)
 
     async def addr_text(self) -> str:
         """Какие адреса добавить в адресные книги, чтобы бот мог перевозить монеты (один раз)."""
@@ -786,7 +994,8 @@ LIVE_WARNING = (
     "Бот будет сам покупать монеты на одной бирже, выводить их на твою вторую биржу и продавать там. "
     "Только после полного анализа и только если прибыль после всех комиссий ≥ порога.\n"
     "Риски честно: пока монеты едут (2–15 мин), цена может уйти; биржа может задержать вывод. "
-    "Защита: одна сделка за раз, лимиты сделки и переводов, стоп −3%, дневной лимит убытка."
+    "Защита: проблемные монеты в карантине, не больше 3 сделок разными монетами одновременно (/spread runs), лимиты "
+    "сделки и переводов, стоп −3%, дневной лимит убытка."
 )
 
 
@@ -838,7 +1047,7 @@ async def check_evs(b: ArbitrageBot, coin: str | None = None) -> tuple[list[Spre
         old = sp.st["cool"]
         sp.st["cool"] = {}  # проверка по кнопке — без пауз после прошлых отказов
         try:
-            cands = sp.candidates(res)[:4]
+            cands = sp.candidates(res, track=False)[:4]
         finally:
             sp.st["cool"] = old
         for o in cands:
@@ -877,7 +1086,8 @@ async def set_paper(b: ArbitrageBot, paper: bool) -> str:
             " Открытую реальную сделку бот доведёт до конца." if any(r["mode"] == "live" for r in sp.active()) else "")
     return ("💵 <b>Спред торгует по-настоящему</b>" + (": бот проверяет каждую минуту." if sp.st["on"] else
                                                        ". Он сейчас выключен — нажми «▶️ Включить».")
-            + f" Сделка до ${min(float(sp.st['max_usd']), float(b.settings.max_trade_usd)):g}, одна за раз.")
+            + f" Сделка до ${min(float(sp.st['max_usd']), float(b.settings.max_trade_usd)):g}, "
+              f"до {sp.max_runs} одновременно.")
 
 
 async def set_on(b: ArbitrageBot, on: bool) -> str:
@@ -966,6 +1176,48 @@ def register(b: ArbitrageBot) -> None:
                                  f"{v:g}{'%' if key == 'min_pct' else '$'}"
                                  + (" — ниже 0.8% комиссии и движение цены часто съедают всё" if key == "min_pct" and v < 0.8
                                     else ""))
+            return
+        if head in ("bad", "карантин", "ban", "unban", "бан", "разбан", "runs", "сделок"):
+            if head in ("bad", "карантин") and len(args) < 2:
+                await b._answer(message, sp.bad_text())
+                return
+            if not is_main_owner(b, uid):
+                await message.answer("Карантин и число сделок меняет только главный владелец.")
+                return
+            if head in ("runs", "сделок"):
+                try:
+                    v = int(args[1])
+                    if not 1 <= v <= MAX_RUNS_CAP:
+                        raise ValueError
+                except (IndexError, ValueError):
+                    await message.answer(f"Напиши так: /spread runs 3 (сколько сделок разными монетами одновременно, "
+                                         f"1–{MAX_RUNS_CAP})")
+                    return
+                sp.st["max_runs"] = v
+                b.save_trading()
+                await message.answer(f"✅ Спред держит до {v} сделок одновременно (каждая — своя монета). В реальном режиме "
+                                     "каждая сделка — в пределах лимитов сделки, переводов и дневного убытка.")
+                return
+            coin = args[1].upper() if len(args) > 1 else ""
+            if not re.fullmatch(r"[A-Z0-9]{1,15}", coin):
+                await message.answer("Напиши так: /spread ban LUNC или /spread unban LUNC")
+                return
+            if head in ("unban", "разбан"):
+                ok = sp.unban(coin)
+                b.save_trading()
+                await message.answer(f"✅ {coin} вышла из карантина: бот снова будет её проверять (все проверки — как обычно)."
+                                     if ok else f"{coin} не в карантине.")
+                return
+            try:
+                days = float(args[2].replace(",", ".")) if len(args) > 2 else 30.0
+                if not 0.04 <= days <= 365:
+                    raise ValueError
+            except ValueError:
+                await message.answer("Срок — в днях, от 0.04 (1 ч) до 365: /spread ban LUNC 30")
+                return
+            sp.ban(coin, days * 86400, "добавлено вручную", auto=False)
+            b.save_trading()
+            await message.answer(f"🚫 {coin} в карантине на {days:g} дн.: спред по ней бот не проверяет и не берёт.")
             return
         if head in ("addr", "адреса", "address", "book"):
             await message.answer("📒 Беру адреса пополнения у бирж…")
