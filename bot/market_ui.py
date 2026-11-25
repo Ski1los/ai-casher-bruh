@@ -102,12 +102,13 @@ async def radar_loop(b: ArbitrageBot) -> None:
     await asyncio.sleep(45)
     while True:
         try:
-            await radar_once(b)
+            if b.traffic.allow("radar"):
+                await radar_once(b)
         except DexError as e:
             log.info("Радар: %s", e)
         except Exception:
             log.exception("Ошибка радара мемкоинов")
-        await asyncio.sleep(RADAR_EVERY_SEC)
+        await b.traffic.sleep(RADAR_EVERY_SEC)
 
 
 def register(b: ArbitrageBot) -> None:

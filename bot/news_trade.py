@@ -609,4 +609,4 @@ async def newstrade_loop(b: ArbitrageBot) -> None:
                 await b.notify(text)
         except Exception:
             log.exception("Ошибка торговли по новостям")
-        await asyncio.sleep(FAST_SEC)
+        await b.traffic.sleep(FAST_SEC, cap=2)  # открытые сделки — не реже чем раз в 40 с

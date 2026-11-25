@@ -41,8 +41,19 @@ HARD_DAILY_LOSS = 2.0
 REVERT_COOLDOWN = 3 * 24 * 3600  # вернул в тест после убытков — 3 дня не включает снова
 MEM_SOFT_MB = 430            # из 512 МБ Render: выше — уборка памяти
 MEM_EVERY_SEC = 1800
-STALE_SEC = {"scan": 900, "scalp": 1200, "pulse": 1800, "news": 1800, "newstrade": 600}  # цикл не отмечался так долго — завис, перезапускаем
+STALE_SEC = {"scan": 900, "scalp": 1200, "pulse": 1800, "news": 1800, "newstrade": 600, "traffic": 900}  # цикл не отмечался так долго — завис, перезапускаем
 FIXES_KEEP = 40
+
+def stale_limit(b, name: str) -> float | None:
+    """Сколько цикл может молчать, прежде чем считать его зависшим (📶 в экономии трафика циклы спят дольше)."""
+    limit = STALE_SEC.get(name)
+    if not limit:
+        return None
+    if name == "scan":
+        limit = max(limit, 6 * float(b.settings.scan_interval_sec), 6 * 120)
+    tr = getattr(b, "traffic", None)
+    return limit * (tr.factor() if tr is not None else 1)
+
 
 LOOP_NAMES = {
     "scan": "сканер и демо", "scalp": "автопилот и лаборатория", "alerts": "ценовые алерты", "radar": "радар мемкоинов",
@@ -50,6 +61,7 @@ LOOP_NAMES = {
     "equity": "график баланса", "report": "ежедневный отчёт", "update": "самообновление", "keys": "проверка ключей",
     "ping": "не-засыпание в облаке", "pulse": "пульс рынка GMGN/Axiom", "transfers": "переводы между биржами",
     "news": "новости и их влияние на рынок", "newstrade": "сделки по новостям",
+    "traffic": "учёт трафика (5 ГБ Render)",
 }
 
 
@@ -183,9 +195,7 @@ class Autonomy:
         loops = getattr(b, "_loops", None) or {}
         beats = getattr(b, "_beats", {})
         for name, (factory, task) in list(loops.items()):
-            limit = STALE_SEC.get(name)
-            if name == "scan":
-                limit = max(limit, 6 * float(b.settings.scan_interval_sec))
+            limit = stale_limit(b, name)
             stale = bool(limit) and not task.done() and now - beats.get(name, now) > limit
             if not task.done() and not stale:
                 continue
@@ -556,9 +566,7 @@ class Autonomy:
         beats = getattr(b, "_beats", {})
         dead = []
         for name, (_f, task) in loops.items():
-            limit = STALE_SEC.get(name)
-            if name == "scan":
-                limit = max(limit, 6 * float(b.settings.scan_interval_sec))
+            limit = stale_limit(b, name)
             if task.done() or (limit and now - beats.get(name, now) > limit):
                 dead.append(LOOP_NAMES.get(name, name))
         total = len(loops)
@@ -729,7 +737,7 @@ async def tick(b, now: float | None = None) -> None:
     if b.copy.changes != before:
         b.save_copy()
         if events or enabled:
-            await b._backup_now()
+            await b._backup_now(soon=True)
 
 
 async def ask_council(b, route: str, now: float) -> None:

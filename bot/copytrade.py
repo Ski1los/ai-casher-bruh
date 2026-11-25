@@ -820,7 +820,9 @@ class CopyTrader:
         Возвращает строки-отчёт для человека."""
         now = time.time() if now is None else now
         every = DISCOVER_FAST_SEC if len(self.active()) < DISCOVER_FEW else DISCOVER_EVERY_SEC
-        if not force and now - self.st["discovered_at"] < every:
+        from . import traffic
+        if not force and (now - self.st["discovered_at"] < every * traffic.factor()
+                          or not traffic.allow("copy_discover")):
             return []
         self.st["discovered_at"] = now
         report: list[str] = []

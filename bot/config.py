@@ -59,7 +59,7 @@ class Settings:
     max_profit_percent: float = 15.0
     min_volume_usd: float = 50_000
     trade_amount_usd: float = 100
-    scan_interval_sec: float = 60
+    scan_interval_sec: float = 120
     alert_cooldown_min: float = 30
     demo_transfer_min: float = 10
     demo_withdraw_fee_usd: float = 0.5
@@ -148,7 +148,7 @@ def load_settings() -> Settings:
         max_profit_percent=_float("MAX_PROFIT_PERCENT", 15),
         min_volume_usd=_float("MIN_VOLUME_USD", 50_000),
         trade_amount_usd=_float("TRADE_AMOUNT_USD", 100),
-        scan_interval_sec=_float("SCAN_INTERVAL_SEC", 60),
+        scan_interval_sec=_float("SCAN_INTERVAL_SEC", 120),
         alert_cooldown_min=_float("ALERT_COOLDOWN_MIN", 30),
         demo_transfer_min=_float("DEMO_TRANSFER_MIN", 10),
         demo_withdraw_fee_usd=_float("DEMO_WITHDRAW_FEE_USD", 0.5),

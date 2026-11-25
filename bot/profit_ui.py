@@ -83,7 +83,7 @@ async def profit_tick(b: ArbitrageBot) -> None:
         b.save_copy()
         b.save_trading()
         if events:
-            await b._backup_now()
+            await b._backup_now(soon=True)
 
 
 async def profit_loop(b: ArbitrageBot) -> None:
@@ -93,7 +93,7 @@ async def profit_loop(b: ArbitrageBot) -> None:
             await profit_tick(b)
         except Exception:
             log.exception("Ошибка Профит-центра")
-        await asyncio.sleep(CHECK_SEC)
+        await b.traffic.sleep(CHECK_SEC)
 
 
 def register(b: ArbitrageBot) -> None:

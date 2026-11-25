@@ -56,7 +56,7 @@ def test_master_and_variant_pick():
     v = parse_master(MASTER.format(base="https://x"))
     assert [x["h"] for x in v] == [1080, 720, 480, 0]
     best = pick_variant(v)
-    assert best["url"] == "https://x/v/720.m3u8" and best["name"] == "720p30"
+    assert best["url"] == "https://x/v/480.m3u8" and best["name"] == "480p30"  # 📶 бережём трафик: самое лёгкое видео
     # 720p30 нет — 480p, а не 1080p60 (не влезет в запрос к Gemini)
     assert pick_variant([x for x in v if x["h"] != 720])["h"] == 480
     assert pick_variant([v[0]])["h"] == 1080  # другого нет — берём что есть
@@ -188,7 +188,7 @@ class FakeTwitch:
         return web.Response(text=MASTER.format(base=self.base))
 
     async def media(self, request):
-        assert request.match_info["q"] == "720"
+        assert request.match_info["q"] == "480"
         return web.Response(text=media(self.base, ads=self.ads))
 
     async def seg(self, request):
@@ -265,7 +265,7 @@ def test_full_stream_flow(segments):
             assert "decu" in L.st["sessions"] and len(ai.calls) == 1
             mime, size, prompt = ai.calls[0]
             assert mime == "video/mp4" and size > 1000 and "Прошлый взгляд" not in prompt and "decu" in prompt
-            assert tw.seg_hits == 8  # 16 с = 8 кусков по 2 с
+            assert tw.seg_hits == 5  # 10 с = 5 кусков по 2 с
             assert len(ev) == 1 and "Вошёл в LONG" in ev[0]["text"] and "<b>SOL</b>" in ev[0]["text"]
             assert "нет стопа" in ev[0]["text"] and "плечо 50x" in ev[0]["text"] and "проверю ценой" in ev[0]["text"]
             calls = [c for c in mt.st["calls"] if c.get("live")]

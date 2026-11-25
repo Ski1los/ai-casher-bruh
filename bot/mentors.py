@@ -520,9 +520,10 @@ class TwitchChat:
 
     async def run(self) -> None:
         delay = 5
+        from . import traffic
         while True:
-            if not self._want:
-                await asyncio.sleep(30)
+            if not self._want or not traffic.allow("live"):  # 📶 экономия трафика: чат большого канала тяжёлый
+                await asyncio.sleep(60)
                 continue
             try:
                 http = await self._session()
@@ -534,8 +535,13 @@ class TwitchChat:
                     self.channels = set(self._want)
                     await ws.send_str("JOIN " + ",".join("#" + c for c in sorted(self.channels)))
                     self.connected, self.last_error, delay = True, None, 5
+                    n = 0
                     async for m in ws:
                         if m.type != aiohttp.WSMsgType.TEXT:
+                            break
+                        n += 1
+                        traffic.note_ws("irc-ws.chat.twitch.tv", len(m.data))
+                        if n % 200 == 0 and not traffic.allow("live"):
                             break
                         for line in m.data.split("\r\n"):
                             if line.startswith("PING"):
@@ -1038,7 +1044,9 @@ class Mentors:
             events += self.take_pending()
             events += await self.update_calls(now)
             events += await self.train.update(now)
-            events += await self.scout.step(now)
+            from . import traffic
+            if traffic.allow("scout"):  # 📶 разведчик ходит по многим страницам — первым уходит в экономию
+                events += await self.scout.step(now)
             await self.twitch.set_channels({s["ident"] for s in self.active("twitch")})
             return events
         finally:

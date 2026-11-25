@@ -366,6 +366,18 @@ def _automat_checks(b: ArbitrageBot, now: float) -> list[Check]:
                                  + (". Многие не отвечают — список: /news src" if bad else "")))
         except Exception as e:
             log.debug("doctor: новости: %s", e)
+    tr = getattr(b, "traffic", None)
+    if tr is not None:
+        try:
+            from .traffic import gb
+            tr.update(now)
+            d = tr.status_dict(now)
+            state = "ok" if d["level"] == 0 else "bad" if d["level"] >= 4 else "warn"
+            out.append(Check("Сервис", "📶 Трафик (5 ГБ Render)", state,
+                             f"за месяц {gb(d['used'])} из бюджета {gb(d['budget'])}, прогноз {gb(d['projected'])} · "
+                             f"режим: {d['level_name']}" + ("" if d["level"] == 0 else ". Подробно: /traffic")))
+        except Exception as e:
+            log.debug("doctor: трафик: %s", e)
     ntr = getattr(b, "newstrade", None)
     if ntr is not None:
         try:

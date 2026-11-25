@@ -178,10 +178,11 @@ async def opps_loop(b: ArbitrageBot) -> None:
     await asyncio.sleep(120)
     while True:
         try:
-            await opps_once(b)
+            if b.traffic.allow("opps"):
+                await opps_once(b)
         except Exception:
             log.exception("Ошибка проверки акций")
-        await asyncio.sleep(OPPS_EVERY_SEC)
+        await b.traffic.sleep(OPPS_EVERY_SEC)
 
 
 def register(b: ArbitrageBot) -> None:
