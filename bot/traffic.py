@@ -15,12 +15,15 @@
 4. 🛑 Последний рубеж: потрачено ≥ бюджета — работают только Telegram, приложение и ведение открытых сделок.
 
 Состояние — в copy.st["traffic"] (сохраняется в бэкап, переживает перезапуски).
+🖥 v50: у каждого хостинга свой счёт (запасной хостинг не наследует потраченные гигабайты Render): чужой счёт
+откладывается в copy.st["traffic_hosts"] и возвращается, когда бот переезжает обратно.
 """
 
 from __future__ import annotations
 
 import asyncio
 import calendar
+import html
 import logging
 import os
 import time
@@ -37,6 +40,8 @@ log = logging.getLogger(__name__)
 GB = 1024 ** 3
 MB = 1024 ** 2
 DEFAULT_BUDGET_GB = 4.0
+OTHER_HOST_BUDGET_GB = 100.0  # 🖥 не Render: лимит обычно «без счётчика» — бюджет большой (TRAFFIC_BUDGET_GB меняет)
+LEGACY_HOST = "render"  # счёт без поля host — из версий до v50, а они работали только на Render
 HOSTS_KEEP = 40
 # (порог: прогноз на месяц / бюджет, уровень). Прогноз = потрачено / прошедшая доля месяца.
 LEVELS = ((0.85, 0), (1.1, 1), (1.6, 2))
@@ -100,23 +105,30 @@ def gb(v: float) -> str:
 
 
 class Traffic:
-    def __init__(self, b: ArbitrageBot | None = None, netdev: str = "/proc/net/dev") -> None:
+    def __init__(self, b: ArbitrageBot | None = None, netdev: str = "/proc/net/dev", host: str | None = None) -> None:
+        from .failover import host_name
         self.b = b
+        self.host = host or host_name()
         self.netdev = netdev
         self._local: dict = {}
         self._session_hosts: dict[str, int] = {}  # с последнего сохранения
         self._session_bytes = 0
         self._last_raw = read_netdev(netdev)
         self._last_level: int | None = None
-        self.budget = self._budget_env()
+        self.budget = self._budget_env(self.host)
 
     @staticmethod
-    def _budget_env() -> float:
+    def _budget_env(host: str = LEGACY_HOST) -> float:
+        default = DEFAULT_BUDGET_GB if host == LEGACY_HOST or os.getenv("RENDER") else OTHER_HOST_BUDGET_GB
         try:
-            v = float(os.getenv("TRAFFIC_BUDGET_GB", "") or DEFAULT_BUDGET_GB)
+            v = float(os.getenv("TRAFFIC_BUDGET_GB", "") or default)
         except ValueError:
-            v = DEFAULT_BUDGET_GB
+            v = default
         return max(0.2, min(v, 10_000.0)) * GB
+
+    @property
+    def on_render(self) -> bool:
+        return self.host == LEGACY_HOST or bool(os.getenv("RENDER"))
 
     # --- состояние --------------------------------------------------------------------------------
 
@@ -127,6 +139,18 @@ class Traffic:
             st = cs.get("traffic")
             if not isinstance(st, dict):
                 st = cs["traffic"] = {}
+            owner = st.get("host") or (LEGACY_HOST if st.get("month") else self.host)
+            if owner != self.host:  # переехали на другой хостинг: свой счёт у каждого
+                store = cs.get("traffic_hosts")
+                if not isinstance(store, dict):
+                    store = cs["traffic_hosts"] = {}
+                st["host"] = owner
+                store[owner] = st
+                mine = store.pop(self.host, None)
+                st = cs["traffic"] = mine if isinstance(mine, dict) else {}
+                for h in list(store)[:-4]:  # не копим счета десятков хостингов
+                    store.pop(h, None)
+            st["host"] = self.host
         else:
             st = self._local
         st.setdefault("month", "")
@@ -236,7 +260,9 @@ class Traffic:
 
     def text(self, now: float | None = None) -> str:
         d = self.status_dict(now)
-        lines = ["📶 <b>Трафик за месяц</b> (Render бесплатно даёт 5 ГБ, дальше сервис спит до 1-го числа)",
+        head = ("📶 <b>Трафик за месяц</b> (Render бесплатно даёт 5 ГБ, дальше сервис спит до 1-го числа)"
+                if self.on_render else f"📶 <b>Трафик за месяц</b> на хостинге «{html.escape(self.host)}»")
+        lines = [head,
                  f"Потрачено: <b>{gb(d['used'])}</b> из бюджета {gb(d['budget'])}",
                  f"Прогноз на месяц при таком темпе: {gb(d['projected'])}",
                  f"Режим: <b>{d['level_name']}</b>"
@@ -248,6 +274,10 @@ class Traffic:
                 lines.append(f"• {h['host']}: {h['share'] * 100:.0f}%")
         if d.get("prev"):
             lines.append(f"\nПрошлый месяц ({d['prev']['month']}): {gb(d['prev']['used'])}")
+        if self.b is not None and isinstance(self.b.copy.st.get("traffic_hosts"), dict):
+            for h, other in self.b.copy.st["traffic_hosts"].items():
+                if isinstance(other, dict) and other.get("month") == d["month"]:
+                    lines.append(f"Хостинг «{html.escape(h)}» в этом месяце: {gb(other.get('used') or 0)}")
         lines.append("\n<i>Цифра бота может отличаться от Render на 10–20%. Если в Render (Dashboard → Billing) "
                      "больше — напиши /traffic used 3.2 (сколько там ГБ), бот подстроится. Бюджет: /traffic budget 4</i>")
         return "\n".join(lines)

@@ -373,11 +373,17 @@ def _automat_checks(b: ArbitrageBot, now: float) -> list[Check]:
             tr.update(now)
             d = tr.status_dict(now)
             state = "ok" if d["level"] == 0 else "bad" if d["level"] >= 4 else "warn"
-            out.append(Check("Сервис", "📶 Трафик (5 ГБ Render)", state,
+            out.append(Check("Сервис", "📶 Трафик (5 ГБ Render)" if tr.on_render else f"📶 Трафик ({tr.host})", state,
                              f"за месяц {gb(d['used'])} из бюджета {gb(d['budget'])}, прогноз {gb(d['projected'])} · "
                              f"режим: {d['level_name']}" + ("" if d["level"] == 0 else ". Подробно: /traffic")))
         except Exception as e:
             log.debug("doctor: трафик: %s", e)
+    fo = getattr(b, "failover", None)
+    if fo is not None and getattr(fo, "on", False):
+        moved = f" · переехал с «{fo.prev_holder}»" if fo.moved else ""
+        out.append(Check("Сервис", "🖥 Хостинг", "info",
+                         f"работает на «{fo.me}» ({'основной' if fo.prio == 1 else 'запасной'}){moved}. "
+                         "Если настроен запасной хостинг — он включится сам, когда эта копия пропадёт. Подробно: /host"))
     ntr = getattr(b, "newstrade", None)
     if ntr is not None:
         try:
