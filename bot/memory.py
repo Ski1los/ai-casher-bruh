@@ -24,7 +24,10 @@ import sys
 
 log = logging.getLogger(__name__)
 
-RENDER_RAM_MB = 512
+try:  # 🖥 v50: на другом хостинге памяти может быть больше или меньше (RAM_MB в .env)
+    RENDER_RAM_MB = max(128, int(os.getenv("RAM_MB", "") or 512))
+except ValueError:
+    RENDER_RAM_MB = 512
 M_ARENA_MAX = -8  # константа из malloc.h
 _libc = None
 

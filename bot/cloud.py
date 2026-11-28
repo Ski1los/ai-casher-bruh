@@ -30,7 +30,7 @@ BACKUP_FILENAME = "bot_state.json.gz"  # 📶 сжатый: JSON жмётся в
 OLD_BACKUP_FILENAMES = ("bot_state.json",)  # до v48.1 — без сжатия, читаем и его
 BACKUP_CAPTION = "💾 Резервная копия бота (демо-счёт и настройки). Не открепляй это сообщение."
 SELF_PING_SEC = 10 * 60
-BOT_VERSION = "49"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
+BOT_VERSION = "50"  # растёт с каждым обновлением: по нему видно, что Render поставил новую версию
 
 
 def version_text() -> str:
@@ -197,6 +197,13 @@ class TelegramBackup:
         self.message_id: int | None = None
         self._lock = asyncio.Lock()
         self._last_digest: bytes | None = None  # не загружаем тот же файл повторно
+        self.caption_fn = None  # 🖥 v50: подпись с отметкой «какая копия работает» (bot/failover.py)
+
+    def caption(self) -> str:
+        try:
+            return self.caption_fn() if self.caption_fn else BACKUP_CAPTION
+        except Exception:
+            return BACKUP_CAPTION
 
     async def restore(self) -> dict | None:
         try:
@@ -230,7 +237,7 @@ class TelegramBackup:
             if self.message_id:
                 try:
                     await self.bot.edit_message_media(
-                        media=InputMediaDocument(media=file, caption=BACKUP_CAPTION),
+                        media=InputMediaDocument(media=file, caption=self.caption()),
                         chat_id=self.chat_id,
                         message_id=self.message_id,
                     )
@@ -242,7 +249,7 @@ class TelegramBackup:
                 msg = await self.bot.send_document(
                     self.chat_id,
                     BufferedInputFile(data, filename=BACKUP_FILENAME),
-                    caption=BACKUP_CAPTION,
+                    caption=self.caption(),
                     disable_notification=True,
                 )
                 self.message_id = msg.message_id

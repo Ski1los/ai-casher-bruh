@@ -41,7 +41,7 @@ HARD_DAILY_LOSS = 2.0
 REVERT_COOLDOWN = 3 * 24 * 3600  # вернул в тест после убытков — 3 дня не включает снова
 MEM_SOFT_MB = 430            # из 512 МБ Render: выше — уборка памяти
 MEM_EVERY_SEC = 1800
-STALE_SEC = {"scan": 900, "scalp": 1200, "pulse": 1800, "news": 1800, "newstrade": 600, "traffic": 900}  # цикл не отмечался так долго — завис, перезапускаем
+STALE_SEC = {"scan": 900, "scalp": 1200, "pulse": 1800, "news": 1800, "newstrade": 600, "traffic": 900, "failover": 900}  # цикл не отмечался так долго — завис, перезапускаем
 FIXES_KEEP = 40
 
 def stale_limit(b, name: str) -> float | None:
@@ -61,7 +61,7 @@ LOOP_NAMES = {
     "equity": "график баланса", "report": "ежедневный отчёт", "update": "самообновление", "keys": "проверка ключей",
     "ping": "не-засыпание в облаке", "pulse": "пульс рынка GMGN/Axiom", "transfers": "переводы между биржами",
     "news": "новости и их влияние на рынок", "newstrade": "сделки по новостям",
-    "traffic": "учёт трафика (5 ГБ Render)",
+    "traffic": "учёт трафика (5 ГБ Render)", "failover": "запасной хостинг (отметка «я работаю»)",
 }
 
 

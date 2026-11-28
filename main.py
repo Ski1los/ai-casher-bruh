@@ -18,9 +18,10 @@ tune_malloc()  # до запуска потоков: меньше «арен» m
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.utils.token import TokenValidationError
 
+from bot import failover
 from bot.cloud import cloud_port, serve_problem_forever, set_status
 from bot.config import allowed_user_ids, load_settings, telegram_token
-from bot.telegram_bot import ArbitrageBot
+from bot.telegram_bot import DATA_DIR, ArbitrageBot
 
 NO_TOKEN_STEPS = [
     "Открой в Telegram <b>@BotFather</b> → /mybots → выбери своего бота → <b>API Token</b> → скопируй токен.",
@@ -62,19 +63,41 @@ def main() -> None:
              "Подробнее в README.md")
         return
 
-    try:
-        bot = ArbitrageBot(token, load_settings(), allowed_user_ids())
-    except TokenValidationError:
-        fail("TELEGRAM_BOT_TOKEN неправильного вида", BAD_TOKEN_STEPS,
-             "TELEGRAM_BOT_TOKEN неправильного вида: должен быть как 123456789:AA... (скопируй у @BotFather).")
-        return
-    try:
-        asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        print("\nБот остановлен.")
-    except TelegramUnauthorizedError:
-        fail("Telegram отклонил токен", BAD_TOKEN_STEPS,
-             "Telegram отклонил токен. Проверь TELEGRAM_BOT_TOKEN (скопируй заново у @BotFather).")
+    owner = next(iter(allowed_user_ids() or []), None)
+    while True:  # 🖥 v50: копия уступила место другой (запасной хостинг) — возвращаемся в ожидание
+        fo = failover.Failover(owner)
+        try:
+            if fo.on:  # работает другая копия бота (например, на запасном хостинге)? Тогда ждём своей очереди
+                asyncio.run(failover.standby(token, fo))
+                if fo.moved:  # переехали с другого хостинга: локальные файлы устарели, берём свежий бэкап
+                    failover.drop_local_state(DATA_DIR)
+            fo.role = "leader"
+            bot = ArbitrageBot(token, load_settings(), allowed_user_ids())
+        except TokenValidationError:
+            fail("TELEGRAM_BOT_TOKEN неправильного вида", BAD_TOKEN_STEPS,
+                 "TELEGRAM_BOT_TOKEN неправильного вида: должен быть как 123456789:AA... (скопируй у @BotFather).")
+            return
+        except TelegramUnauthorizedError:
+            fail("Telegram отклонил токен", BAD_TOKEN_STEPS,
+                 "Telegram отклонил токен. Проверь TELEGRAM_BOT_TOKEN (скопируй заново у @BotFather).")
+            return
+        except KeyboardInterrupt:
+            print("\nБот остановлен.")
+            return
+        bot.failover = fo
+        try:
+            asyncio.run(bot.run())
+        except KeyboardInterrupt:
+            print("\nБот остановлен.")
+            return
+        except TelegramUnauthorizedError:
+            fail("Telegram отклонил токен", BAD_TOKEN_STEPS,
+                 "Telegram отклонил токен. Проверь TELEGRAM_BOT_TOKEN (скопируй заново у @BotFather).")
+            return
+        if not bot.yielded:
+            return
+        logging.getLogger(__name__).info("Эта копия уступила место другой — жду своей очереди")
+        del bot
 
 
 if __name__ == "__main__":

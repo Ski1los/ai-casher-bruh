@@ -29,7 +29,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import (autonomy, copy_ui, council, demo_report, extras_ui, feed, meme_ui, market_ui, mentors_ui, news, news_ui,
+from . import (autonomy, copy_ui, council, demo_report, extras_ui, failover, feed, meme_ui, market_ui, mentors_ui, news, news_ui,
                news_trade, notify, traffic, opps_ui, profit_ui, pulse_ui, spread, trading_ui, transfers,
                updater, users_ui)
 from .copytrade import CopyTrader
@@ -571,6 +571,9 @@ class ArbitrageBot:
 
         # Бэкап в Telegram работает, только если известен владелец (ALLOWED_USER_IDS)
         self.backup = TelegramBackup(self.bot, owner) if owner else None
+        # 🖥 v50: запасной хостинг. main.py подменяет на объект, который уже дождался своей очереди
+        self.failover = failover.Failover(owner)
+        self.yielded = False  # уступили место другой копии: main.py вернёт бота в ожидание
         self._last_backup = 0.0
         self._backup_pending = False
         self._lab_saved = 0  # сколько бумажных сделок лаборатории уже сохранено
@@ -1606,6 +1609,7 @@ class ArbitrageBot:
         spread.register(self)
         news_ui.register(self)
         traffic.register(self)
+        failover.register(self)
         demo_report.register(self)
 
         # --- обычный текст = вопрос ИИ (регистрируется последним) ----------------
@@ -2053,7 +2057,8 @@ class ArbitrageBot:
                     BotCommand(command="earn", description="💡 Как заработать сейчас: акции, проценты"),
                     BotCommand(command="news", description="📰 Новости: влияние на рынок, щит, обучение"),
                     BotCommand(command="newstrade", description="🤖 Торговля по новостям: демо → реал"),
-                    BotCommand(command="traffic", description="📶 Трафик: сколько из 5 ГБ Render потрачено"),
+                    BotCommand(command="traffic", description="📶 Трафик: сколько из бюджета потрачено"),
+                    BotCommand(command="host", description="🖥 Где работает бот и запасной хостинг"),
                     BotCommand(command="why", description="🔍 Автоторговля: почему нет сделок"),
                     BotCommand(command="dex", description="🦎 Мемкоин: поиск и проверка"),
                     BotCommand(command="hot", description="🔥 Тренды Solana (DexScreener)"),
@@ -2077,6 +2082,11 @@ class ArbitrageBot:
 
             hello = await self._restore_backup()
             tasks.append(asyncio.create_task(self._hello(hello)))
+            if self.failover.on and self.backup is not None:
+                self.backup.caption_fn = self.failover.backup_caption
+                tasks.append(self._spawn("failover", lambda: failover.failover_loop(self)))
+                if self.failover.moved:
+                    tasks.append(asyncio.create_task(self.notify(self.failover.moved_text())))
             if self.trader.creds:
                 tasks.append(asyncio.create_task(self._check_keys_on_start()))
                 tasks.append(self._spawn("keys", self._keys_watch_loop))
@@ -2112,6 +2122,8 @@ class ArbitrageBot:
             aiogram_log.removeHandler(self.conflicts)
             for t in tasks + [item[1] for item in self._loops.values()]:
                 t.cancel()
+            if self.yielded and self.failover.release_needed:
+                await self.failover.release(self)  # последний бэкап и «свободно» — главная копия ждёт этого
             if runner:
                 await runner.cleanup()
             await self.scanner.close()
